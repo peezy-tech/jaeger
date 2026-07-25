@@ -112,6 +112,7 @@ async function run(command, args, cwd, env = process.env) {
       cwd,
       env,
       encoding: "utf8",
+      shell: process.platform === "win32" && command.toLowerCase().endsWith(".cmd"),
       timeout: 120_000,
       maxBuffer: 20 * 1024 * 1024,
     })
