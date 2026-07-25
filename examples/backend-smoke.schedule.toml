@@ -1,0 +1,15 @@
+version = 1
+name = "backend_smoke"
+workflow = "./backend-smoke.js"
+cwd = ".."
+
+[trigger]
+type = "cron"
+expression = "0 9 * * 1-5"
+timezone = "UTC"
+
+[policy]
+overlap = "forbid"
+misfire = "skip"
+pause_on_uncertain = true
+pause_after_failures = 3

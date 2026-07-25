@@ -1,0 +1,8 @@
+{
+  "cwd": ".",
+  "target": "Review the current working-tree diff against HEAD.",
+  "codexEffort": "low",
+  "claudeEffort": "low",
+  "synthesisHarness": "codex",
+  "synthesisEffort": "low"
+}

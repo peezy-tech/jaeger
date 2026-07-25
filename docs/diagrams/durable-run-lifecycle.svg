@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Jaeger durable run lifecycle</title>
+  <desc id="desc">A state diagram showing backend-owned pinned run identity, durable checkpoints, safe service recovery and resume, and fail-closed uncertainty.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#22d3ee"/></marker>
+    <marker id="arrow-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#fb7185"/></marker>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="1" stop-color="#0d1b2e"/></linearGradient>
+    <style>
+      .title { font: 700 38px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .subtitle { font: 400 19px ui-sans-serif, system-ui, sans-serif; fill: #94a3b8; }
+      .heading { font: 700 23px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .label { font: 600 18px ui-sans-serif, system-ui, sans-serif; fill: #e2e8f0; }
+      .small { font: 500 16px ui-sans-serif, system-ui, sans-serif; fill: #cbd5e1; }
+      .edge { fill: none; stroke: #22d3ee; stroke-width: 4; marker-end: url(#arrow); }
+      .warn-edge { fill: none; stroke: #fb7185; stroke-width: 4; marker-end: url(#arrow-warn); }
+      .state { fill: #101e32; stroke: #3b526e; stroke-width: 2.5; }
+      .safe { fill: #0b2535; stroke: #22d3ee; stroke-width: 2.5; }
+      .warn { fill: #2a1621; stroke: #fb7185; stroke-width: 3; }
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="80" y="82" class="title">Durable runs: checkpoint replay, not automatic retry</text>
+  <text x="80" y="118" class="subtitle">Source, inputs, runtime ABI, harnesses, and workspace are pinned. Completed calls replay; uncertain effects fail closed.</text>
+
+  <!-- Primary flow -->
+  <rect x="65" y="238" width="250" height="132" rx="22" class="state"/>
+  <text x="190" y="288" text-anchor="middle" class="heading">Stage + claim run</text>
+  <text x="190" y="325" text-anchor="middle" class="small">atomic submission identity</text>
+
+  <rect x="405" y="238" width="250" height="132" rx="22" class="state"/>
+  <text x="530" y="288" text-anchor="middle" class="heading">Start agent step</text>
+  <text x="530" y="325" text-anchor="middle" class="small">journal: agent.started</text>
+
+  <polygon points="790,218 920,304 790,390 660,304" fill="#17253b" stroke="#fbbf24" stroke-width="3"/>
+  <text x="790" y="291" text-anchor="middle" class="label">Durable completion</text>
+  <text x="790" y="320" text-anchor="middle" class="label">recorded?</text>
+
+  <rect x="1010" y="238" width="250" height="132" rx="22" class="safe"/>
+  <text x="1135" y="288" text-anchor="middle" class="heading">Checkpoint</text>
+  <text x="1135" y="325" text-anchor="middle" class="small">store structured result</text>
+
+  <polygon points="1385,218 1505,304 1385,390 1265,304" fill="#17253b" stroke="#22d3ee" stroke-width="3"/>
+  <text x="1385" y="291" text-anchor="middle" class="label">More workflow</text>
+  <text x="1385" y="320" text-anchor="middle" class="label">work?</text>
+
+  <path d="M315 304H405" class="edge"/>
+  <path d="M655 304H660" class="edge"/>
+  <path d="M920 304H1010" class="edge"/>
+  <text x="960" y="285" class="small">yes</text>
+  <path d="M1260 304H1265" class="edge"/>
+  <path d="M1385 218V175H530V238" class="edge"/>
+  <text x="1404" y="193" class="small">yes</text>
+
+  <!-- Complete -->
+  <rect x="1260" y="486" width="250" height="112" rx="56" class="safe"/>
+  <text x="1385" y="553" text-anchor="middle" class="heading">COMPLETED</text>
+  <path d="M1385 390V486" class="edge"/>
+  <text x="1402" y="445" class="small">no</text>
+
+  <!-- Uncertain branch -->
+  <rect x="560" y="516" width="460" height="196" rx="26" class="warn"/>
+  <text x="790" y="571" text-anchor="middle" class="heading" fill="#fecdd3">UNCERTAIN</text>
+  <text x="790" y="612" text-anchor="middle" class="label">agent.started exists, completion does not</text>
+  <text x="790" y="651" text-anchor="middle" class="small">Possible external effects must be reconciled.</text>
+  <text x="790" y="684" text-anchor="middle" class="small" fill="#fda4af">No retry. No resume command.</text>
+  <path d="M790 390V516" class="warn-edge"/>
+  <text x="811" y="458" class="small" fill="#fda4af">no / process lost</text>
+
+  <!-- Safe interruption and resume -->
+  <rect x="65" y="516" width="365" height="196" rx="26" class="safe"/>
+  <text x="247" y="570" text-anchor="middle" class="heading">Safe interruption</text>
+  <text x="247" y="612" text-anchor="middle" class="small">no unfinished agent step</text>
+  <line x1="105" y1="639" x2="390" y2="639" stroke="#1d6175" stroke-width="2"/>
+  <text x="247" y="675" text-anchor="middle" class="label">backend recovery / resume</text>
+  <path d="M1135 370C1030 445 440 420 247 516" fill="none" stroke="#22d3ee" stroke-width="4" stroke-dasharray="10 9" marker-end="url(#arrow)"/>
+  <text x="706" y="429" class="small">interrupt between completed steps</text>
+  <path d="M247 516C247 435 345 402 405 345" class="edge"/>
+  <text x="108" y="758" class="small">Service recovery or explicit resume replays completed checkpoints and continues safe coordinator work.</text>
+
+  <!-- Rules -->
+  <rect x="65" y="800" width="1445" height="2" fill="#334155"/>
+  <text x="80" y="846" class="small">New source or inputs → new run</text>
+  <text x="520" y="846" class="small">Changed external workspace state → abandon old run</text>
+  <text x="1090" y="846" class="small">Started without completion → reconcile first</text>
+</svg>

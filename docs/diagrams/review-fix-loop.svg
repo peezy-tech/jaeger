@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Jaeger review-fix workflow</title>
+  <desc id="desc">A bounded state diagram of the example review-fix loop, including clean, blocked, and exhausted exits.</desc>
+  <defs>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#22d3ee"/></marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#fbbf24"/></marker>
+    <marker id="arrow-mint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#4ade80"/></marker>
+    <marker id="arrow-rose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" fill="#fb7185"/></marker>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="1" stop-color="#0d1b2e"/></linearGradient>
+    <style>
+      .title { font: 700 38px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .subtitle { font: 400 19px ui-sans-serif, system-ui, sans-serif; fill: #94a3b8; }
+      .heading { font: 700 24px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .label { font: 600 18px ui-sans-serif, system-ui, sans-serif; fill: #e2e8f0; }
+      .small { font: 500 16px ui-sans-serif, system-ui, sans-serif; fill: #cbd5e1; }
+      .mono { font: 500 15px ui-monospace, SFMono-Regular, Consolas, monospace; fill: #c4b5fd; }
+      .box { fill: #101e32; stroke: #3b526e; stroke-width: 2.5; }
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="80" y="82" class="title">Example workflow: bounded review–fix loop</text>
+  <text x="80" y="118" class="subtitle">Structured findings cross harness boundaries; ordinary JavaScript controls the loop and its terminal outcomes.</text>
+
+  <!-- Input -->
+  <rect x="70" y="274" width="235" height="142" rx="22" class="box"/>
+  <text x="187" y="325" text-anchor="middle" class="heading">Working tree</text>
+  <text x="187" y="363" text-anchor="middle" class="small">current change</text>
+  <text x="187" y="392" text-anchor="middle" class="mono">round = 1</text>
+
+  <!-- Review -->
+  <rect x="390" y="230" width="300" height="230" rx="26" fill="#0b2535" stroke="#22d3ee" stroke-width="3"/>
+  <text x="540" y="284" text-anchor="middle" class="heading">REVIEW</text>
+  <text x="540" y="319" text-anchor="middle" class="small">persistent native session</text>
+  <rect x="435" y="346" width="210" height="66" rx="14" fill="#12394a"/>
+  <text x="540" y="373" text-anchor="middle" class="small">structured output</text>
+  <text x="540" y="399" text-anchor="middle" class="mono">verdict + findings[]</text>
+
+  <!-- Verdict -->
+  <polygon points="840,220 970,345 840,470 710,345" fill="#17253b" stroke="#a78bfa" stroke-width="3"/>
+  <text x="840" y="335" text-anchor="middle" class="heading">verdict?</text>
+  <text x="840" y="369" text-anchor="middle" class="mono">clean | changes | blocked</text>
+
+  <!-- Fix -->
+  <rect x="1010" y="230" width="300" height="230" rx="26" fill="#2a2114" stroke="#fbbf24" stroke-width="3"/>
+  <text x="1160" y="284" text-anchor="middle" class="heading">FIX</text>
+  <text x="1160" y="319" text-anchor="middle" class="small">persistent native session</text>
+  <rect x="1055" y="346" width="210" height="66" rx="14" fill="#3a2b13"/>
+  <text x="1160" y="373" text-anchor="middle" class="small">structured output</text>
+  <text x="1160" y="399" text-anchor="middle" class="mono">status + validation[]</text>
+
+  <!-- Fix status -->
+  <polygon points="1160,522 1290,635 1160,748 1030,635" fill="#17253b" stroke="#fbbf24" stroke-width="3"/>
+  <text x="1160" y="624" text-anchor="middle" class="heading">fix status?</text>
+  <text x="1160" y="658" text-anchor="middle" class="mono">fixed | blocked</text>
+
+  <!-- Round bound -->
+  <polygon points="680,522 815,635 680,748 545,635" fill="#17253b" stroke="#22d3ee" stroke-width="3"/>
+  <text x="680" y="624" text-anchor="middle" class="heading">round &lt; max?</text>
+  <text x="680" y="658" text-anchor="middle" class="mono">max ≤ 5</text>
+
+  <!-- Main edges -->
+  <path d="M305 345H390" fill="none" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrow-cyan)"/>
+  <path d="M690 345H710" fill="none" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrow-cyan)"/>
+  <path d="M970 345H1010" fill="none" stroke="#fbbf24" stroke-width="4" marker-end="url(#arrow-amber)"/>
+  <text x="990" y="310" text-anchor="middle" class="small">changes requested</text>
+  <path d="M1160 460V522" fill="none" stroke="#fbbf24" stroke-width="4" marker-end="url(#arrow-amber)"/>
+  <path d="M1030 635H815" fill="none" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrow-cyan)"/>
+  <text x="923" y="616" text-anchor="middle" class="small">fixed</text>
+  <path d="M680 522V495C680 485 665 480 650 480H540V460" fill="none" stroke="#22d3ee" stroke-width="4" marker-end="url(#arrow-cyan)"/>
+  <text x="615" y="502" class="small">yes: next round</text>
+
+  <!-- Terminal states -->
+  <rect x="1355" y="168" width="190" height="104" rx="52" fill="#10291f" stroke="#4ade80" stroke-width="3"/>
+  <text x="1450" y="230" text-anchor="middle" class="heading" fill="#86efac">CLEAN</text>
+  <path d="M840 220V175H1355" fill="none" stroke="#4ade80" stroke-width="4" marker-end="url(#arrow-mint)"/>
+  <text x="1025" y="196" class="small">clean</text>
+
+  <rect x="1355" y="365" width="190" height="104" rx="52" fill="#2a1621" stroke="#fb7185" stroke-width="3"/>
+  <text x="1450" y="427" text-anchor="middle" class="heading" fill="#fda4af">BLOCKED</text>
+  <path d="M840 470V490H1325V417H1355" fill="none" stroke="#fb7185" stroke-width="4" marker-end="url(#arrow-rose)"/>
+  <text x="887" y="512" class="small">review blocked</text>
+  <path d="M1290 635H1325V440H1355" fill="none" stroke="#fb7185" stroke-width="4" marker-end="url(#arrow-rose)"/>
+  <text x="1310" y="618" class="small">fix blocked</text>
+
+  <rect x="1355" y="688" width="190" height="104" rx="52" fill="#2a1621" stroke="#fb7185" stroke-width="3"/>
+  <text x="1450" y="750" text-anchor="middle" class="heading" fill="#fda4af">EXHAUSTED</text>
+  <path d="M680 748V810H1340V740H1355" fill="none" stroke="#fb7185" stroke-width="4" marker-end="url(#arrow-rose)"/>
+  <text x="740" y="799" class="small">no: max rounds reached</text>
+
+  <!-- Harness note -->
+  <rect x="70" y="616" width="390" height="146" rx="22" class="box"/>
+  <text x="100" y="659" class="label">Harness routing is per call</text>
+  <text x="100" y="697" class="small">reviewer: Codex or Claude Code</text>
+  <text x="100" y="730" class="small">fixer: Codex or Claude Code</text>
+</svg>

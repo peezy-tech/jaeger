@@ -1,0 +1,125 @@
+import assert from "node:assert/strict"
+import { execFile } from "node:child_process"
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { promisify } from "node:util"
+import { fileURLToPath } from "node:url"
+
+const execFileAsync = promisify(execFile)
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+const tempRoot = await mkdtemp(path.join(os.tmpdir(), "jaeger-controller-package-"))
+
+try {
+  const packDir = path.join(tempRoot, "pack")
+  const installDir = path.join(tempRoot, "install")
+  const appData = path.join(tempRoot, "appdata")
+  await Promise.all([
+    mkdir(packDir),
+    mkdir(installDir),
+    mkdir(appData),
+  ])
+  const pack = JSON.parse(
+    (await run("npm", ["pack", "--json", "--pack-destination", packDir], root))
+      .stdout,
+  )
+  assert.equal(pack.length, 1)
+  const artifact = pack[0]
+  const paths = artifact.files.map((file) => file.path)
+  for (const required of [
+    "AGENT_INSTALL.md",
+    "dist/cli.js",
+    "dist/platform.js",
+    "dist/runtime-targets.js",
+    "dist/ssh-runtime-client.js",
+    "dist/stdio-bridge.js",
+  ]) {
+    assert(paths.includes(required), `controller artifact is missing ${required}`)
+  }
+  assert(
+    !paths.some((entry) => entry.includes("/node_modules/")),
+    "nested node_modules leaked into controller artifact",
+  )
+
+  await writeFile(
+    path.join(installDir, "package.json"),
+    `${JSON.stringify({ name: "jaeger-controller-artifact-test", private: true }, null, 2)}\n`,
+  )
+  const tarball = path.join(packDir, artifact.filename)
+  await run(
+    "npm",
+    [
+      "install",
+      "--no-audit",
+      "--no-fund",
+      "--package-lock=false",
+      tarball,
+    ],
+    installDir,
+  )
+  const installedRoot = path.join(installDir, "node_modules", "jaeger-workflows")
+  const installedPackage = JSON.parse(
+    await readFile(path.join(installedRoot, "package.json"), "utf8"),
+  )
+  assert.deepEqual(installedPackage.os, ["linux", "win32"])
+  await access(path.join(installedRoot, "AGENT_INSTALL.md"))
+
+  const binary = path.join(
+    installDir,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "jaeger.cmd" : "jaeger",
+  )
+  const help = await run(binary, ["--help"], installDir)
+  assert.match(help.stdout, /Windows\s+is supported as an SSH controller/)
+  assert.match(help.stdout, /jaeger runtime default/)
+  assert.match(help.stdout, /--default/)
+
+  const runtimeList = JSON.parse(
+    (
+      await run(binary, ["runtime", "list", "--json"], installDir, {
+        ...process.env,
+        APPDATA: appData,
+        XDG_CONFIG_HOME: appData,
+      })
+    ).stdout,
+  )
+  assert.equal(runtimeList.platform, process.platform)
+  assert.equal(runtimeList.defaultRuntime, "local")
+  assert.equal(
+    runtimeList.runtimes.find((runtime) => runtime.name === "local")?.supported,
+    process.platform === "linux",
+  )
+
+  process.stdout.write(
+    `${JSON.stringify({
+      artifact: artifact.filename,
+      platform: process.platform,
+      controllerCommands: [
+        "--help",
+        "runtime list",
+      ],
+    }, null, 2)}\n`,
+  )
+} finally {
+  await rm(tempRoot, { recursive: true, force: true })
+}
+
+async function run(command, args, cwd, env = process.env) {
+  try {
+    return await execFileAsync(command, args, {
+      cwd,
+      env,
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 20 * 1024 * 1024,
+    })
+  } catch (error) {
+    const stdout = typeof error?.stdout === "string" ? error.stdout : ""
+    const stderr = typeof error?.stderr === "string" ? error.stderr : ""
+    throw new Error(
+      `${command} ${args.join(" ")} failed: ${error?.message ?? String(error)}\n${stdout}\n${stderr}`,
+      { cause: error },
+    )
+  }
+}

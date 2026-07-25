@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.test-dist/
+.jaeger/
+*.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/

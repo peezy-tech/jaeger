@@ -1,0 +1,12 @@
+version = 1
+name = "example"
+
+[providers.codex]
+instructions = ["snippets/jaeger.md"]
+# Skills are copied into the provider's native directory. Plugins are installed
+# through the provider's native plugin manager.
+# skills = ["skills/example-skill"]
+# plugins = ["github@openai-curated"]
+
+[providers.claude]
+instructions = ["snippets/jaeger.md"]

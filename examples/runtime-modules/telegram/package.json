@@ -1,0 +1,8 @@
+{
+  "name": "jaeger-telegram-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "grammy": "^1.38.3"
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Jaeger Workflows"
+  short_description: "Author and operate durable Jaeger workflows"
+  default_prompt: "Use $jaeger-workflows to author, validate, launch, inspect, and safely resume a Jaeger workflow."

@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Jaeger architecture</title>
+  <desc id="desc">The Jaeger CLI submits workflows and continued session turns through a persistent local backend, which owns atomic claims, durable state, and independently supervised workers.</desc>
+  <defs>
+    <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10Z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10Z" fill="#fbbf24"/>
+    </marker>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="1" stop-color="#0d1b2e"/>
+    </linearGradient>
+    <style>
+      .title { font: 700 38px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .subtitle { font: 400 19px ui-sans-serif, system-ui, sans-serif; fill: #94a3b8; }
+      .heading { font: 700 27px ui-sans-serif, system-ui, sans-serif; fill: #f8fafc; }
+      .label { font: 600 20px ui-sans-serif, system-ui, sans-serif; fill: #e2e8f0; }
+      .small { font: 500 17px ui-sans-serif, system-ui, sans-serif; fill: #cbd5e1; }
+      .mono { font: 500 17px ui-monospace, SFMono-Regular, Consolas, monospace; fill: #c4b5fd; }
+      .box { fill: #101e32; stroke: #334155; stroke-width: 2; }
+      .cyan-box { fill: #0b2535; stroke: #22d3ee; stroke-width: 3; }
+      .amber-box { fill: #2a2114; stroke: #fbbf24; stroke-width: 2.5; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="80" y="82" class="title">Jaeger: prompt-first orchestration across native agent harnesses</text>
+  <text x="80" y="118" class="subtitle">One CLI crosses a local runtime protocol. The backend owns durable control; transient workers keep native harness capabilities.</text>
+
+  <!-- Workflow -->
+  <rect x="80" y="190" width="390" height="500" rx="24" class="box"/>
+  <rect x="80" y="190" width="390" height="72" rx="24" fill="#17253b"/>
+  <path d="M80 238V214Q80 190 104 190H446Q470 190 470 214V238Z" fill="#17253b"/>
+  <text x="115" y="237" class="heading">CLI + workflow file</text>
+  <text x="115" y="304" class="mono">phase("Review")</text>
+  <text x="115" y="346" class="mono">const result = await agent(…)</text>
+  <text x="115" y="388" class="mono">await parallel([…])</text>
+  <text x="115" y="430" class="mono">if (result.clean) return result</text>
+  <line x1="115" y1="467" x2="435" y2="467" stroke="#334155" stroke-width="2"/>
+  <text x="115" y="510" class="label">CLI submits</text>
+  <circle cx="127" cy="550" r="5" fill="#a78bfa"/><text x="147" y="557" class="small">source + reusable submission ID</text>
+  <circle cx="127" cy="591" r="5" fill="#a78bfa"/><text x="147" y="598" class="small">wait or detach attachment</text>
+  <circle cx="127" cy="632" r="5" fill="#a78bfa"/><text x="147" y="639" class="small">opaque run + turn controls</text>
+
+  <!-- Jaeger -->
+  <rect x="605" y="190" width="390" height="500" rx="28" class="cyan-box"/>
+  <text x="800" y="255" text-anchor="middle" class="heading">JAEGER BACKEND</text>
+  <text x="800" y="287" text-anchor="middle" class="subtitle">persistent same-user control plane</text>
+  <rect x="650" y="330" width="135" height="92" rx="16" fill="#12394a" stroke="#1d6175" stroke-width="2"/>
+  <rect x="815" y="330" width="135" height="92" rx="16" fill="#12394a" stroke="#1d6175" stroke-width="2"/>
+  <rect x="650" y="446" width="135" height="92" rx="16" fill="#12394a" stroke="#1d6175" stroke-width="2"/>
+  <rect x="815" y="446" width="135" height="92" rx="16" fill="#12394a" stroke="#1d6175" stroke-width="2"/>
+  <text x="717" y="385" text-anchor="middle" class="label">Claim index</text>
+  <text x="882" y="385" text-anchor="middle" class="label">Recover</text>
+  <text x="717" y="501" text-anchor="middle" class="label">Turn ledger</text>
+  <text x="882" y="501" text-anchor="middle" class="label">Artifacts</text>
+  <text x="800" y="590" text-anchor="middle" class="small">durable state · atomic idempotent creation</text>
+  <text x="800" y="625" text-anchor="middle" class="small">versioned Unix-socket protocol</text>
+  <text x="800" y="660" text-anchor="middle" class="small">transient run + session-turn workers</text>
+
+  <!-- Harnesses -->
+  <rect x="1130" y="190" width="390" height="220" rx="24" class="amber-box"/>
+  <text x="1165" y="245" class="heading">CODEX</text>
+  <text x="1165" y="284" class="small">persistent app-server thread</text>
+  <line x1="1165" y1="312" x2="1485" y2="312" stroke="#76591b" stroke-width="2"/>
+  <text x="1165" y="352" class="small">commands · edits · tools · skills · MCP · hooks</text>
+
+  <rect x="1130" y="470" width="390" height="220" rx="24" class="amber-box"/>
+  <text x="1165" y="525" class="heading">CLAUDE CODE</text>
+  <text x="1165" y="564" class="small">persistent Agent SDK session</text>
+  <line x1="1165" y1="592" x2="1485" y2="592" stroke="#76591b" stroke-width="2"/>
+  <text x="1165" y="632" class="small">commands · edits · tools · skills · MCP · hooks</text>
+
+  <!-- Flow -->
+  <path d="M470 370H605" fill="none" stroke="#22d3ee" stroke-width="5" marker-end="url(#arrow-cyan)"/>
+  <text x="537" y="348" text-anchor="middle" class="small">runtime RPC</text>
+  <path d="M995 330C1052 330 1065 300 1130 300" fill="none" stroke="#22d3ee" stroke-width="5" marker-end="url(#arrow-cyan)"/>
+  <path d="M995 500C1052 500 1065 580 1130 580" fill="none" stroke="#22d3ee" stroke-width="5" marker-end="url(#arrow-cyan)"/>
+  <path d="M1325 690V760H275V690" fill="none" stroke="#fbbf24" stroke-width="4" stroke-dasharray="12 10" marker-end="url(#arrow-amber)"/>
+  <rect x="646" y="727" width="308" height="66" rx="18" fill="#171e29" stroke="#fbbf24" stroke-width="2"/>
+  <text x="800" y="769" text-anchor="middle" class="label">structured JSON results</text>
+
+  <!-- Boundary note -->
+  <rect x="80" y="826" width="1440" height="2" fill="#334155"/>
+  <text x="800" y="865" text-anchor="middle" class="subtitle">Security boundary: constrain the service and workers together; transient systemd scopes provide lifecycle containment, not a sandbox.</text>
+</svg>
