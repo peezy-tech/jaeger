@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url"
 const execFileAsync = promisify(execFile)
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "jaeger-controller-package-"))
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm"
 
 try {
   const packDir = path.join(tempRoot, "pack")
@@ -20,7 +21,7 @@ try {
     mkdir(appData),
   ])
   const pack = JSON.parse(
-    (await run("npm", ["pack", "--json", "--pack-destination", packDir], root))
+    (await run(npmCommand, ["pack", "--json", "--pack-destination", packDir], root))
       .stdout,
   )
   assert.equal(pack.length, 1)
@@ -47,7 +48,7 @@ try {
   )
   const tarball = path.join(packDir, artifact.filename)
   await run(
-    "npm",
+    npmCommand,
     [
       "install",
       "--no-audit",
