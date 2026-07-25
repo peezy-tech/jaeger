@@ -1,7 +1,7 @@
 # Jaeger
 
-[![CI](https://github.com/peezy-tech/jaeger-workflows/actions/workflows/ci.yml/badge.svg)](https://github.com/peezy-tech/jaeger-workflows/actions/workflows/ci.yml)
-[![Windows controller](https://github.com/peezy-tech/jaeger-workflows/actions/workflows/windows-controller.yml/badge.svg)](https://github.com/peezy-tech/jaeger-workflows/actions/workflows/windows-controller.yml)
+[![CI](https://github.com/peezy-tech/jaeger/actions/workflows/ci.yml/badge.svg)](https://github.com/peezy-tech/jaeger/actions/workflows/ci.yml)
+[![Windows controller](https://github.com/peezy-tech/jaeger/actions/workflows/windows-controller.yml/badge.svg)](https://github.com/peezy-tech/jaeger/actions/workflows/windows-controller.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Jaeger is a prompt-first workflow runner for coordinating native coding-agent
@@ -9,8 +9,9 @@ harnesses. A workflow is an ordinary JavaScript or TypeScript file: normal
 control flow connects structured agent outputs while Jaeger owns routing,
 concurrency, durable run state, and inspection.
 
-The distribution and repository are named `jaeger-workflows`; the installed
-command is `jaeger`. This project is not affiliated with the
+The npm distribution is named `jaeger-workflows`; the repository is
+`peezy-tech/jaeger`, and the installed command is `jaeger`. This project is not
+affiliated with the
 [CNCF Jaeger distributed tracing project](https://github.com/jaegertracing/jaeger).
 Jaeger's source is MIT licensed. Provider SDKs, native harnesses, accounts, and
 services remain subject to their own terms; see
@@ -99,7 +100,7 @@ controller-only clients with Node.js and the built-in OpenSSH client; execution
 still belongs to a prepared Linux runtime.
 
 For a fresh machine, give an agent the raw GitHub URL for
-[AGENT_INSTALL.md](https://raw.githubusercontent.com/peezy-tech/jaeger-workflows/main/AGENT_INSTALL.md).
+[AGENT_INSTALL.md](https://raw.githubusercontent.com/peezy-tech/jaeger/main/AGENT_INSTALL.md).
 That runbook detects the controller/runtime role, installs an exact source
 artifact per-user, preserves existing Jaeger configuration, exposes the
 packaged skill, and proves the installed path with a provider-free workflow.
