@@ -5,11 +5,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/matamune-peezy/jaeger-workflows.git"
+    "url": "git+https://github.com/peezy-tech/jaeger-workflows.git"
   },
-  "homepage": "https://github.com/matamune-peezy/jaeger-workflows#readme",
+  "homepage": "https://github.com/peezy-tech/jaeger-workflows#readme",
   "bugs": {
-    "url": "https://github.com/matamune-peezy/jaeger-workflows/issues"
+    "url": "https://github.com/peezy-tech/jaeger-workflows/issues"
   },
   "keywords": [
     "agents",

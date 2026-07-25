@@ -5,7 +5,7 @@
 Please do not open a public issue for a suspected vulnerability. Use GitHub's
 private vulnerability reporting for this repository:
 
-https://github.com/matamune-peezy/jaeger-workflows/security/advisories/new
+https://github.com/peezy-tech/jaeger-workflows/security/advisories/new
 
 Include the affected revision, platform, reproduction steps, impact, and any
 suggested mitigation. Do not include live credentials, private prompts,
