@@ -202,6 +202,37 @@ test("Claude preserves xhigh effort and applies its native session label", async
   ]);
 });
 
+test("Claude session label failures do not abort a successful turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-claude-label-failure-"));
+  const session = new FakeSession();
+  let renameAttempts = 0;
+  const factory = (): Query =>
+    fakeQuery([
+      systemMessage("claude-session"),
+      successResult("claude-session", { answer: "claude" }),
+    ]);
+  const input: AgentRequest = {
+    ...request(root, "claude", session),
+    label: "test",
+  };
+
+  const result = await new ClaudeHarness(
+    "claude",
+    factory,
+    "claude",
+    async () => {
+      renameAttempts++;
+      throw new Error("Session not found in project directory");
+    },
+  ).execute(input);
+
+  assert.deepEqual(result.output, { answer: "claude" });
+  assert.equal(result.nativeSessionId, "claude-session");
+  assert.equal(renameAttempts, 1);
+  assert.equal(session.providerId, "claude-session");
+  assert.equal(session.turnStartedCount, 1);
+});
+
 test("a custom Claude surface uses its launcher while preserving Agent SDK sessions", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-custom-claude-sdk-"));
   let captured:
@@ -318,6 +349,7 @@ class FakeSession implements SessionTurn {
   nativeSessionId: string | undefined;
   providerId: string | undefined;
   turnId: string | undefined;
+  turnStartedCount = 0;
   readonly controlResults: Array<Record<string, unknown>> = [];
 
   constructor(
@@ -333,6 +365,7 @@ class FakeSession implements SessionTurn {
   }
 
   async turnStarted(nativeTurnId?: string): Promise<void> {
+    this.turnStartedCount++;
     this.turnId = nativeTurnId;
   }
 

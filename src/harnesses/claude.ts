@@ -129,9 +129,13 @@ export class ClaudeHarness implements HarnessAdapter {
             await request.session.turnStarted();
             sessionPublished = true;
             if (sessionTitle) {
-              await this.renameSession(sessionId, sessionTitle, {
-                dir: request.cwd,
-              });
+              try {
+                await this.renameSession(sessionId, sessionTitle, {
+                  dir: request.cwd,
+                });
+              } catch {
+                // Session titles are cosmetic and may be stored outside this process's config.
+              }
             }
           }
         }
