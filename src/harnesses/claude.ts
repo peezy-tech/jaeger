@@ -1,5 +1,6 @@
 import {
   query as claudeQuery,
+  renameSession as claudeRenameSession,
   type Options as ClaudeOptions,
   type Query,
   type SDKMessage,
@@ -26,6 +27,8 @@ type QueryFactory = (input: {
   readonly options?: ClaudeOptions;
 }) => Query;
 
+type SessionRenamer = typeof claudeRenameSession;
+
 export class ClaudeHarness implements HarnessAdapter {
   readonly driver = "claude-agent-sdk" as const;
 
@@ -33,6 +36,7 @@ export class ClaudeHarness implements HarnessAdapter {
     private readonly command = "claude",
     private readonly queryFactory: QueryFactory = claudeQuery,
     readonly name = "claude",
+    private readonly renameSession: SessionRenamer = claudeRenameSession,
   ) {}
 
   validateOptions(options: AgentOptions): void {
@@ -46,6 +50,10 @@ export class ClaudeHarness implements HarnessAdapter {
 
   async execute(request: AgentRequest): Promise<HarnessResult> {
     this.validateOptions(request);
+    const sessionTitle =
+      request.label && !request.session.nativeSessionId
+        ? `Jaeger: ${request.label}`
+        : undefined;
     const abort = turnAbortController(request);
     const messages = new AsyncMessageQueue();
     messages.push(userMessage(request.prompt));
@@ -79,7 +87,6 @@ export class ClaudeHarness implements HarnessAdapter {
         ...(request.schema
           ? { outputFormat: { type: "json_schema", schema: request.schema } }
           : {}),
-        ...(request.label ? { title: `Jaeger: ${request.label}` } : {}),
         spawnClaudeCodeProcess: (options) => {
           processHandle = spawnStreamingHarnessProcess({
             command: options.command,
@@ -121,6 +128,11 @@ export class ClaudeHarness implements HarnessAdapter {
             await request.session.providerStarted(sessionId);
             await request.session.turnStarted();
             sessionPublished = true;
+            if (sessionTitle) {
+              await this.renameSession(sessionId, sessionTitle, {
+                dir: request.cwd,
+              });
+            }
           }
         }
         if (message.type !== "result") continue;
@@ -246,11 +258,12 @@ async function closeQuery(
   return await processHandle?.done;
 }
 
-function claudeEffort(value: string): "low" | "medium" | "high" | "max" {
-  if (["low", "medium", "high", "max"].includes(value)) {
-    return value as "low" | "medium" | "high" | "max";
+function claudeEffort(value: string): NonNullable<ClaudeOptions["effort"]> {
+  if (["low", "medium", "high", "xhigh", "max"].includes(value)) {
+    // SDK 0.2.85 omits xhigh from its type even though Jaeger already supported it.
+    return value as NonNullable<ClaudeOptions["effort"]>;
   }
-  throw new TypeError("Claude effort must be low, medium, high, or max");
+  throw new TypeError("Claude effort must be low, medium, high, xhigh, or max");
 }
 
 function toJsonValue(value: unknown): JsonValue {
