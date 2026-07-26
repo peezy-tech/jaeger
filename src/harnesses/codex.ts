@@ -8,6 +8,7 @@ import type {
   JsonValue,
   SessionControlRequest,
 } from "../types.js";
+import { JAEGER_VERSION } from "../version.js";
 import { spawnStreamingHarnessProcess } from "./process.js";
 import { jsonObject, nonEmptyString, stepScratchDirectory } from "./support.js";
 
@@ -40,7 +41,7 @@ export class CodexHarness implements HarnessAdapter {
     let controlAbort: AbortController | undefined;
     try {
       await client.request("initialize", {
-        clientInfo: { name: "jaeger", title: "Jaeger", version: "0.1.0" },
+        clientInfo: { name: "jaeger", title: "Jaeger", version: JAEGER_VERSION },
       });
       client.notify("initialized", {});
 

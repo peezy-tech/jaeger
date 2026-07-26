@@ -94,8 +94,15 @@ try {
     installDir,
   )
 
-  const installedRoot = path.join(installDir, "node_modules", "jaeger-workflows")
+  const installedRoot = path.join(
+    installDir,
+    "node_modules",
+    "@peezy.tech",
+    "jaeger",
+  )
   const installedPackage = JSON.parse(await readFile(path.join(installedRoot, "package.json"), "utf8"))
+  assert.equal(installedPackage.name, "@peezy.tech/jaeger")
+  assert.equal(installedPackage.version, "0.1.1")
   assert(installedPackage.dependencies?.typescript, "typescript must be a runtime dependency")
   assert(
     installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],

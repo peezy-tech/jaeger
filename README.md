@@ -9,7 +9,7 @@ harnesses. A workflow is an ordinary JavaScript or TypeScript file: normal
 control flow connects structured agent outputs while Jaeger owns routing,
 concurrency, durable run state, and inspection.
 
-The npm distribution is named `jaeger-workflows`; the repository is
+The npm distribution is named `@peezy.tech/jaeger`; the repository is
 `peezy-tech/jaeger`, and the installed command is `jaeger`. This project is not
 affiliated with the
 [CNCF Jaeger distributed tracing project](https://github.com/jaegertracing/jaeger).
@@ -105,11 +105,32 @@ That runbook detects the controller/runtime role, installs an exact source
 artifact per-user, preserves existing Jaeger configuration, exposes the
 packaged skill, and proves the installed path with a provider-free workflow.
 
+Registry consumers can install the exact release into a user-owned prefix:
+
+Jaeger 0.1.0 used the unscoped package name `jaeger-workflows`. Uninstall that
+package from the same prefix before installing the scoped package so npm can
+replace its `jaeger` executable shim.
+
 ```bash
+npm uninstall --global --prefix "$HOME/.local" jaeger-workflows
+npm install --global --prefix "$HOME/.local" @peezy.tech/jaeger@0.1.1
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
 jaeger backend install
 jaeger backend status
 jaeger doctor
 ```
+
+```powershell
+$InstallRoot = Join-Path $env:LOCALAPPDATA "Jaeger"
+npm uninstall --global --prefix $InstallRoot jaeger-workflows
+npm install --global --prefix $InstallRoot @peezy.tech/jaeger@0.1.1
+$env:Path = "$InstallRoot;$env:Path"
+jaeger --help
+```
+
+Persist `$HOME/.local/bin` on Linux or `%LOCALAPPDATA%\Jaeger` on Windows in
+the user's `PATH` if it is not already present.
 
 ```bash
 pnpm install --frozen-lockfile

@@ -17,6 +17,12 @@ gate below.
 10. Tag and publish release notes that describe behavior, security impact, and
     migrations.
 
-Publishing to npm is a separate maintainer action. The package name is
-`jaeger-workflows`; the command remains `jaeger`. Never publish the unrelated
-`jaeger` package name.
+Publishing to npm is performed by `.github/workflows/publish.yml` from a
+published GitHub release whose tag exactly matches `v<package.version>`. The
+public package is `@peezy.tech/jaeger`; the command remains `jaeger`. Never
+publish the unrelated unscoped `jaeger` package.
+
+The workflow uses npm trusted publishing when the package has a GitHub Actions
+publisher configured for the `peezy-tech/jaeger` repository and
+`publish.yml`. The first publish may be bootstrapped with a repository
+`NPM_TOKEN`; remove that secret after configuring trusted publishing.

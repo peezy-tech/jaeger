@@ -1,6 +1,6 @@
 {
-  "name": "jaeger-workflows",
-  "version": "0.1.0",
+  "name": "@peezy.tech/jaeger",
+  "version": "0.1.1",
   "description": "Prompt-first workflows across native agent harnesses",
   "license": "MIT",
   "repository": {
