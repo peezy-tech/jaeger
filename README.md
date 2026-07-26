@@ -107,19 +107,30 @@ packaged skill, and proves the installed path with a provider-free workflow.
 
 Registry consumers can install the exact release into a user-owned prefix:
 
+Jaeger 0.1.0 used the unscoped package name `jaeger-workflows`. Uninstall that
+package from the same prefix before installing the scoped package so npm can
+replace its `jaeger` executable shim.
+
 ```bash
+npm uninstall --global --prefix "$HOME/.local" jaeger-workflows
 npm install --global --prefix "$HOME/.local" @peezy.tech/jaeger@0.1.1
-```
-
-```powershell
-npm install --global --prefix "$env:LOCALAPPDATA\Jaeger" @peezy.tech/jaeger@0.1.1
-```
-
-```bash
+export PATH="$HOME/.local/bin:$PATH"
+hash -r
 jaeger backend install
 jaeger backend status
 jaeger doctor
 ```
+
+```powershell
+$InstallRoot = Join-Path $env:LOCALAPPDATA "Jaeger"
+npm uninstall --global --prefix $InstallRoot jaeger-workflows
+npm install --global --prefix $InstallRoot @peezy.tech/jaeger@0.1.1
+$env:Path = "$InstallRoot;$env:Path"
+jaeger --help
+```
+
+Persist `$HOME/.local/bin` on Linux or `%LOCALAPPDATA%\Jaeger` on Windows in
+the user's `PATH` if it is not already present.
 
 ```bash
 pnpm install --frozen-lockfile
