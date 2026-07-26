@@ -22,9 +22,9 @@ emulate the Linux backend with WSL, Docker, or a new HTTP service.
   path.
 - Do not overwrite an unrelated executable at the chosen install prefix. Inspect
   any existing `jaeger` command and stop if it is not recognizably this project.
-- Do not install a floating package named `jaeger` or `jaeger-workflows` from a registry. This
-  repository is the source authority; build its tarball and install that exact
-  artifact.
+- Do not install a floating package named `jaeger` or `@peezy.tech/jaeger` from
+  a registry. This repository is the source authority; build its tarball and
+  install that exact artifact.
 - Do not claim success from a development checkout or test suite alone. Prove
   the installed binary and its persistent backend.
 
@@ -158,9 +158,10 @@ jaeger --help
 ```
 
 On Linux, the resolved executable must be the newly installed
-`$HOME/.local/lib/node_modules/jaeger-workflows/dist/cli.js`. If `$HOME/.local/bin` is not
-already in the user's persistent `PATH`, add it through the user's existing
-shell configuration conventions without replacing unrelated configuration.
+`$HOME/.local/lib/node_modules/@peezy.tech/jaeger/dist/cli.js`. If
+`$HOME/.local/bin` is not already in the user's persistent `PATH`, add it
+through the user's existing shell configuration conventions without replacing
+unrelated configuration.
 
 On Windows, use a user-owned prefix under `%LOCALAPPDATA%`:
 
@@ -179,8 +180,9 @@ jaeger --help
 ```
 
 The installed package root is
-`%LOCALAPPDATA%\Jaeger\node_modules\jaeger-workflows`. Add `%LOCALAPPDATA%\Jaeger` to the
-user `PATH` only if absent, preserving every existing entry.
+`%LOCALAPPDATA%\Jaeger\node_modules\@peezy.tech\jaeger`. Add
+`%LOCALAPPDATA%\Jaeger` to the user `PATH` only if absent, preserving every
+existing entry.
 
 ## 5. Connect the execution runtime
 

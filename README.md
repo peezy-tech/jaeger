@@ -9,7 +9,7 @@ harnesses. A workflow is an ordinary JavaScript or TypeScript file: normal
 control flow connects structured agent outputs while Jaeger owns routing,
 concurrency, durable run state, and inspection.
 
-The npm distribution is named `jaeger-workflows`; the repository is
+The npm distribution is named `@peezy.tech/jaeger`; the repository is
 `peezy-tech/jaeger`, and the installed command is `jaeger`. This project is not
 affiliated with the
 [CNCF Jaeger distributed tracing project](https://github.com/jaegertracing/jaeger).
@@ -104,6 +104,16 @@ For a fresh machine, give an agent the raw GitHub URL for
 That runbook detects the controller/runtime role, installs an exact source
 artifact per-user, preserves existing Jaeger configuration, exposes the
 packaged skill, and proves the installed path with a provider-free workflow.
+
+Registry consumers can install the exact release into a user-owned prefix:
+
+```bash
+npm install --global --prefix "$HOME/.local" @peezy.tech/jaeger@0.1.1
+```
+
+```powershell
+npm install --global --prefix "$env:LOCALAPPDATA\Jaeger" @peezy.tech/jaeger@0.1.1
+```
 
 ```bash
 jaeger backend install
