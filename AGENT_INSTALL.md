@@ -139,6 +139,11 @@ check.
 Use a temporary pack directory and a user-owned prefix. The default prefix is
 `$HOME/.local`:
 
+Jaeger 0.1.0 used the unscoped package name `jaeger-workflows`. Uninstall that
+legacy package from the same prefix before installing the scoped artifact so
+npm can replace its `jaeger` executable shim. This package-identity migration
+does not remove Jaeger state or configuration.
+
 ```bash
 artifact_root="$(mktemp -d)"
 pack_result="$(npm pack --json --pack-destination "$artifact_root")"
@@ -148,6 +153,8 @@ artifact_name="$(
 )"
 artifact_path="$artifact_root/$artifact_name"
 sha256sum "$artifact_path"
+npm uninstall --global --prefix "$HOME/.local" --no-audit --no-fund \
+  jaeger-workflows
 npm install --global --prefix "$HOME/.local" --no-audit --no-fund \
   "$artifact_path"
 export PATH="$HOME/.local/bin:$PATH"
@@ -173,6 +180,7 @@ if ($PackResult.Count -ne 1) { throw "Expected exactly one Jaeger artifact" }
 $ArtifactPath = Join-Path $ArtifactRoot $PackResult[0].filename
 Get-FileHash -Algorithm SHA256 $ArtifactPath
 $InstallRoot = Join-Path $env:LOCALAPPDATA "Jaeger"
+npm uninstall --global --prefix $InstallRoot --no-audit --no-fund jaeger-workflows
 npm install --global --prefix $InstallRoot --no-audit --no-fund $ArtifactPath
 $env:Path = "$InstallRoot;$env:Path"
 Get-Command jaeger.cmd
@@ -250,7 +258,7 @@ test -f "$skill_source/SKILL.md"
 On Windows:
 
 ```powershell
-$JaegerPackageRoot = Join-Path $env:LOCALAPPDATA "Jaeger\node_modules\jaeger"
+$JaegerPackageRoot = Join-Path $env:LOCALAPPDATA "Jaeger\node_modules\@peezy.tech\jaeger"
 $SkillSource = Join-Path $JaegerPackageRoot "skills\jaeger-workflows"
 if (-not (Test-Path (Join-Path $SkillSource "SKILL.md"))) {
   throw "Packaged Jaeger skill is missing"
