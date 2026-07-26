@@ -53,11 +53,11 @@ try {
       "install",
       "--no-audit",
       "--no-fund",
-      "--package-lock=false",
       tarball,
     ],
     installDir,
   )
+  await run(npmCommand, ["audit", "--omit=dev", "--audit-level=low"], installDir)
   const installedRoot = path.join(
     installDir,
     "node_modules",
@@ -68,7 +68,7 @@ try {
     await readFile(path.join(installedRoot, "package.json"), "utf8"),
   )
   assert.equal(installedPackage.name, "@peezy.tech/jaeger")
-  assert.equal(installedPackage.version, "0.1.1")
+  assert.equal(installedPackage.version, "0.1.2")
   assert.deepEqual(installedPackage.os, ["linux", "win32"])
   await access(path.join(installedRoot, "AGENT_INSTALL.md"))
 

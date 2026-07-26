@@ -11,10 +11,13 @@ gate below.
 6. On native Windows, require the `Windows controller` GitHub Actions job.
 7. Inspect `npm pack --dry-run` and verify that source, tests, credentials,
    local state, and research-only machine details are absent.
-8. Run a history-aware secret scan.
-9. Install the exact packed artifact and prove `jaeger doctor`, backend
+8. Install the exact packed artifact into a fresh npm consumer and run
+   `npm audit --omit=dev --audit-level=low` against the consumer-resolved
+   dependency graph.
+9. Run a history-aware secret scan.
+10. Install the exact packed artifact and prove `jaeger doctor`, backend
    continuity, and one detached workflow on Linux.
-10. Tag and publish release notes that describe behavior, security impact, and
+11. Tag and publish release notes that describe behavior, security impact, and
     migrations.
 
 Publishing to npm is performed by `.github/workflows/publish.yml` from a

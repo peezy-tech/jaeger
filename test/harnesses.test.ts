@@ -239,7 +239,6 @@ test("Claude maps Jaeger steer to interrupt plus a queued message in the same se
       ],
       async () => {
         interrupted++;
-        return { subtype: "success", request_id: "interrupt", still_queued: [] };
       },
     );
   };

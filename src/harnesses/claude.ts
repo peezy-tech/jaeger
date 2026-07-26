@@ -98,21 +98,15 @@ export class ClaudeHarness implements HarnessAdapter {
     const controls = request.session.processControls(async (control) => {
       if (control.kind === "interrupt") {
         explicitlyInterrupted = true;
-        const receipt = await queryHandle.interrupt();
-        return {
-          interrupted: true,
-          ...(receipt ? { receipt: toJsonValue(receipt) } : {}),
-        };
+        await queryHandle.interrupt();
+        return { interrupted: true };
       }
       if (!control.message) throw new Error("steer requires a message");
       pendingInterruptedResult++;
       try {
-        const receipt = await queryHandle.interrupt();
+        await queryHandle.interrupt();
         messages.push(userMessage(control.message));
-        return {
-          steered: true,
-          ...(receipt ? { receipt: toJsonValue(receipt) } : {}),
-        };
+        return { steered: true };
       } catch (error) {
         pendingInterruptedResult--;
         throw error;
@@ -225,7 +219,7 @@ function userMessage(text: string): SDKUserMessage {
     type: "user",
     message: { role: "user", content: text },
     parent_tool_use_id: null,
-    origin: { kind: "human" },
+    session_id: "",
   };
 }
 
@@ -252,11 +246,11 @@ async function closeQuery(
   return await processHandle?.done;
 }
 
-function claudeEffort(value: string): "low" | "medium" | "high" | "xhigh" | "max" {
-  if (["low", "medium", "high", "xhigh", "max"].includes(value)) {
-    return value as "low" | "medium" | "high" | "xhigh" | "max";
+function claudeEffort(value: string): "low" | "medium" | "high" | "max" {
+  if (["low", "medium", "high", "max"].includes(value)) {
+    return value as "low" | "medium" | "high" | "max";
   }
-  throw new TypeError("Claude effort must be low, medium, high, xhigh, or max");
+  throw new TypeError("Claude effort must be low, medium, high, or max");
 }
 
 function toJsonValue(value: unknown): JsonValue {
