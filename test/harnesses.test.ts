@@ -156,6 +156,83 @@ test("Claude adapter uses a persistent Agent SDK streaming session and resumes b
   assert.deepEqual(captured?.options?.tools, { type: "preset", preset: "claude_code" });
 });
 
+test("Claude preserves xhigh effort and applies its native session label", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-claude-compat-"));
+  let captured:
+    | { prompt: string | AsyncIterable<SDKUserMessage>; options?: ClaudeOptions }
+    | undefined;
+  const renamed: Array<{
+    sessionId: string;
+    title: string;
+    options: { dir?: string } | undefined;
+  }> = [];
+  const factory = (input: {
+    prompt: string | AsyncIterable<SDKUserMessage>;
+    options?: ClaudeOptions;
+  }): Query => {
+    captured = input;
+    return fakeQuery([
+      systemMessage("claude-session"),
+      successResult("claude-session", { answer: "claude" }),
+    ]);
+  };
+  const input: AgentRequest = {
+    ...request(root, "claude", new FakeSession()),
+    label: "test",
+    effort: "xhigh",
+  };
+
+  await new ClaudeHarness(
+    "claude",
+    factory,
+    "claude",
+    async (sessionId, title, options) => {
+      renamed.push({ sessionId, title, options });
+    },
+  ).execute(input);
+
+  assert.equal((captured?.options as { effort?: string } | undefined)?.effort, "xhigh");
+  assert.ok(!("title" in (captured?.options ?? {})));
+  assert.deepEqual(renamed, [
+    {
+      sessionId: "claude-session",
+      title: "Jaeger: test",
+      options: { dir: root },
+    },
+  ]);
+});
+
+test("Claude session label failures do not abort a successful turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-claude-label-failure-"));
+  const session = new FakeSession();
+  let renameAttempts = 0;
+  const factory = (): Query =>
+    fakeQuery([
+      systemMessage("claude-session"),
+      successResult("claude-session", { answer: "claude" }),
+    ]);
+  const input: AgentRequest = {
+    ...request(root, "claude", session),
+    label: "test",
+  };
+
+  const result = await new ClaudeHarness(
+    "claude",
+    factory,
+    "claude",
+    async () => {
+      renameAttempts++;
+      throw new Error("Session not found in project directory");
+    },
+  ).execute(input);
+
+  assert.deepEqual(result.output, { answer: "claude" });
+  assert.equal(result.nativeSessionId, "claude-session");
+  assert.equal(renameAttempts, 1);
+  assert.equal(session.providerId, "claude-session");
+  assert.equal(session.turnStartedCount, 1);
+});
+
 test("a custom Claude surface uses its launcher while preserving Agent SDK sessions", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-custom-claude-sdk-"));
   let captured:
@@ -239,7 +316,6 @@ test("Claude maps Jaeger steer to interrupt plus a queued message in the same se
       ],
       async () => {
         interrupted++;
-        return { subtype: "success", request_id: "interrupt", still_queued: [] };
       },
     );
   };
@@ -270,20 +346,26 @@ test("Claude requires the dedicated structured output field when a schema is req
 
 class FakeSession implements SessionTurn {
   readonly id = "session-test";
+  nativeSessionId: string | undefined;
   providerId: string | undefined;
   turnId: string | undefined;
+  turnStartedCount = 0;
   readonly controlResults: Array<Record<string, unknown>> = [];
 
   constructor(
-    readonly nativeSessionId?: string,
+    nativeSessionId?: string,
     private readonly controls: SessionControlRequest[] = [],
-  ) {}
+  ) {
+    this.nativeSessionId = nativeSessionId;
+  }
 
   async providerStarted(nativeSessionId: string): Promise<void> {
     this.providerId = nativeSessionId;
+    this.nativeSessionId = nativeSessionId;
   }
 
   async turnStarted(nativeTurnId?: string): Promise<void> {
+    this.turnStartedCount++;
     this.turnId = nativeTurnId;
   }
 
@@ -311,7 +393,6 @@ function request(
   return {
     harness,
     prompt: "Return an answer",
-    label: "test",
     model: "test-model",
     effort: "low",
     ...(harness === "codex" ? { serviceTier: "default", profile: "test-profile" } : {}),
