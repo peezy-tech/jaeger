@@ -9,6 +9,7 @@
     "declaration": true,
     "sourceMap": true,
     "strict": true,
+    "types": ["node"],
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "skipLibCheck": true
