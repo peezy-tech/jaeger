@@ -1,5 +1,5 @@
 import { createContext, Script, type Context } from "node:vm";
-import ts from "typescript";
+import ts from "@typescript/typescript6";
 import { WorkflowCompileError } from "./errors.js";
 import type { WorkflowContext } from "./types.js";
 
@@ -352,7 +352,7 @@ ${body}
     reportDiagnostics: true,
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.None,
+      module: ts.ModuleKind.ESNext,
       strict: true,
     },
   });
