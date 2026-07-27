@@ -55,6 +55,10 @@ try {
     "dist/service-manager.js",
     "dist/status.js",
     "dist/submission-index.js",
+    "dist/vendor/claude-agent-sdk/LICENSE.md",
+    "dist/vendor/claude-agent-sdk/package.json",
+    "dist/vendor/claude-agent-sdk/README.md",
+    "dist/vendor/claude-agent-sdk/sdk.mjs",
     "docs/design/jaeger-runtime-modules.md",
     "docs/design/jaeger-workflows.md",
     "examples/runtime-modules/telegram/README.md",
@@ -80,9 +84,10 @@ try {
   assert(!paths.some((entry) => entry.startsWith(".test-dist/")), "test build leaked into package")
   assert(!paths.some((entry) => entry.startsWith("dist/src/")), "stale nested build tree leaked into package")
   assert(
-    !paths.some((entry) => entry.includes("/node_modules/")),
+    !paths.some((entry) => entry.startsWith("node_modules/")),
     "nested node_modules leaked into package",
   )
+  assert.deepEqual(artifact.bundled, [], "npm dependency bundles leaked into package")
 
   await writeFile(
     path.join(installDir, "package.json"),
@@ -106,8 +111,8 @@ try {
   assert.equal(installedPackage.version, "0.1.2")
   assert(installedPackage.dependencies?.typescript, "typescript must be a runtime dependency")
   assert(
-    installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],
-    "Claude Agent SDK must be a runtime dependency",
+    !installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],
+    "Claude Agent SDK must not expose its declaration-only peer graph at runtime",
   )
   assert.deepEqual(
     installedPackage.os,
@@ -115,8 +120,24 @@ try {
     "artifact must support Linux runtime hosts and Windows SSH controllers",
   )
   await access(path.join(installDir, "node_modules", "typescript", "package.json"))
-  await access(
-    path.join(installDir, "node_modules", "@anthropic-ai", "claude-agent-sdk", "package.json"),
+  const vendoredClaudeRoot = path.join(
+    installedRoot,
+    "dist",
+    "vendor",
+    "claude-agent-sdk",
+  )
+  const vendoredClaudePackage = JSON.parse(
+    await readFile(path.join(vendoredClaudeRoot, "package.json"), "utf8"),
+  )
+  assert.equal(vendoredClaudePackage.name, "@anthropic-ai/claude-agent-sdk")
+  assert.equal(vendoredClaudePackage.version, "0.3.220")
+  await access(path.join(vendoredClaudeRoot, "LICENSE.md"))
+  await access(path.join(vendoredClaudeRoot, "README.md"))
+  await access(path.join(vendoredClaudeRoot, "sdk.mjs"))
+  assert.doesNotMatch(
+    await readFile(path.join(installedRoot, "dist", "harnesses", "claude.d.ts"), "utf8"),
+    /@anthropic-ai\/claude-agent-sdk/,
+    "public declarations must not require the vendored SDK's type-only peers",
   )
   for (const hook of ["preinstall", "install", "postinstall"]) {
     assert(!installedPackage.scripts?.[hook], `package must not define an ${hook} hook`)

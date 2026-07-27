@@ -34,13 +34,18 @@ try {
     "dist/runtime-targets.js",
     "dist/ssh-runtime-client.js",
     "dist/stdio-bridge.js",
+    "dist/vendor/claude-agent-sdk/LICENSE.md",
+    "dist/vendor/claude-agent-sdk/package.json",
+    "dist/vendor/claude-agent-sdk/README.md",
+    "dist/vendor/claude-agent-sdk/sdk.mjs",
   ]) {
     assert(paths.includes(required), `controller artifact is missing ${required}`)
   }
   assert(
-    !paths.some((entry) => entry.includes("/node_modules/")),
-    "nested node_modules leaked into controller artifact",
+    !paths.some((entry) => entry.startsWith("node_modules/")),
+    "nested node_modules leaked into the controller package",
   )
+  assert.deepEqual(artifact.bundled, [], "npm dependency bundles leaked into controller package")
 
   await writeFile(
     path.join(installDir, "package.json"),
@@ -70,6 +75,24 @@ try {
   assert.equal(installedPackage.name, "@peezy.tech/jaeger")
   assert.equal(installedPackage.version, "0.1.2")
   assert.deepEqual(installedPackage.os, ["linux", "win32"])
+  assert(
+    !installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],
+    "Claude Agent SDK must not expose its declaration-only peer graph at runtime",
+  )
+  const vendoredClaudeRoot = path.join(
+    installedRoot,
+    "dist",
+    "vendor",
+    "claude-agent-sdk",
+  )
+  const vendoredClaudePackage = JSON.parse(
+    await readFile(path.join(vendoredClaudeRoot, "package.json"), "utf8"),
+  )
+  assert.equal(vendoredClaudePackage.name, "@anthropic-ai/claude-agent-sdk")
+  assert.equal(vendoredClaudePackage.version, "0.3.220")
+  await access(path.join(vendoredClaudeRoot, "LICENSE.md"))
+  await access(path.join(vendoredClaudeRoot, "README.md"))
+  await access(path.join(vendoredClaudeRoot, "sdk.mjs"))
   await access(path.join(installedRoot, "AGENT_INSTALL.md"))
 
   const binary = path.join(
