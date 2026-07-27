@@ -23,6 +23,12 @@
     "access": "public"
   },
   "type": "module",
+  "imports": {
+    "#claude-agent-sdk-runtime": {
+      "types": "@anthropic-ai/claude-agent-sdk",
+      "default": "./dist/vendor/claude-agent-sdk/sdk.mjs"
+    }
+  },
   "bin": {
     "jaeger": "./dist/cli.js"
   },
@@ -47,11 +53,11 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs dist .test-dist",
-    "build": "node scripts/clean.mjs dist && tsc -p tsconfig.json",
+    "build": "node scripts/clean.mjs dist && tsc -p tsconfig.json && node scripts/vendor-claude-sdk.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/clean.mjs .test-dist && tsc -p tsconfig.test.json && node --test .test-dist/test/*.test.js",
-    "test:portable": "node scripts/clean.mjs .test-dist && tsc -p tsconfig.test.json && node --test .test-dist/test/compiler.test.js .test-dist/test/environments.test.js .test-dist/test/hooks.test.js .test-dist/test/runtime-durability.test.js .test-dist/test/runtime-modules.test.js .test-dist/test/runtime-view.test.js .test-dist/test/runtime.test.js .test-dist/test/session-turns.test.js .test-dist/test/windows-controller.test.js",
-    "test:controller": "node scripts/clean.mjs .test-dist && tsc -p tsconfig.test.json && node --test .test-dist/test/runtime-view.test.js .test-dist/test/windows-controller.test.js",
+    "test": "node scripts/clean.mjs .test-dist && tsc -p tsconfig.test.json && node scripts/vendor-claude-sdk.mjs && node --test .test-dist/test/*.test.js",
+    "test:portable": "node scripts/clean.mjs .test-dist && tsc -p tsconfig.test.json && node scripts/vendor-claude-sdk.mjs && node --test .test-dist/test/compiler.test.js .test-dist/test/environments.test.js .test-dist/test/hooks.test.js .test-dist/test/runtime-durability.test.js .test-dist/test/runtime-modules.test.js .test-dist/test/runtime-view.test.js .test-dist/test/runtime.test.js .test-dist/test/session-turns.test.js .test-dist/test/windows-controller.test.js",
+    "test:controller": "node scripts/clean.mjs .test-dist && tsc -p tsconfig.test.json && node scripts/vendor-claude-sdk.mjs && node --test .test-dist/test/runtime-view.test.js .test-dist/test/windows-controller.test.js",
     "jaeger": "node dist/cli.js",
     "verify": "npm run clean && npm run check && npm test && npm run build && node scripts/verify-package.mjs && git diff --check",
     "verify:portable": "npm run clean && npm run check && npm run test:portable && npm run build && node scripts/verify-controller-package.mjs && git diff --check",
@@ -67,13 +73,16 @@
   ],
   "packageManager": "pnpm@11.1.3",
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@typescript/typescript6": "^6.0.2",
     "ajv": "^8.17.1",
     "smol-toml": "^1.7.0",
     "typescript": "^7.0.2"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1"
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
+    "@anthropic-ai/sdk": "0.115.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@types/node": "^26.1.1",
+    "zod": "4.4.3"
   }
 }

@@ -1,11 +1,13 @@
 import {
   query as claudeQuery,
   renameSession as claudeRenameSession,
-  type Options as ClaudeOptions,
-  type Query,
-  type SDKMessage,
-  type SDKResultMessage,
-  type SDKUserMessage,
+} from "#claude-agent-sdk-runtime";
+import type {
+  Options as ClaudeOptions,
+  Query,
+  SDKMessage,
+  SDKResultMessage,
+  SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { validateStructuredOutput } from "../schema.js";
 import { StructuredOutputError } from "../errors.js";
@@ -32,12 +34,28 @@ type SessionRenamer = typeof claudeRenameSession;
 export class ClaudeHarness implements HarnessAdapter {
   readonly driver = "claude-agent-sdk" as const;
 
+  private readonly command: string;
+  private readonly queryFactory: QueryFactory;
+  readonly name: string;
+  private readonly renameSession: SessionRenamer;
+
   constructor(
-    private readonly command = "claude",
-    private readonly queryFactory: QueryFactory = claudeQuery,
-    readonly name = "claude",
-    private readonly renameSession: SessionRenamer = claudeRenameSession,
-  ) {}
+    command?: string,
+    queryFactory?: (...args: any[]) => any,
+    name?: string,
+    renameSession?: (...args: any[]) => Promise<void>,
+  );
+  constructor(
+    command = "claude",
+    queryFactory: QueryFactory = claudeQuery,
+    name = "claude",
+    renameSession: SessionRenamer = claudeRenameSession,
+  ) {
+    this.command = command;
+    this.queryFactory = queryFactory;
+    this.name = name;
+    this.renameSession = renameSession;
+  }
 
   validateOptions(options: AgentOptions): void {
     if (options.profile !== undefined) {

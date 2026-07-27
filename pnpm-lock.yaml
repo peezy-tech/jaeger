@@ -11,9 +11,6 @@ importers:
 
   .:
     dependencies:
-      '@anthropic-ai/claude-agent-sdk':
-        specifier: 0.3.220
-        version: 0.3.220(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
       '@typescript/typescript6':
         specifier: ^6.0.2
         version: 6.0.2
@@ -27,9 +24,21 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
     devDependencies:
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: 0.3.220
+        version: 0.3.220(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk':
+        specifier: 0.115.0
+        version: 0.115.0(zod@4.4.3)
+      '@modelcontextprotocol/sdk':
+        specifier: 1.29.0
+        version: 1.29.0(zod@4.4.3)
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
 packages:
 
