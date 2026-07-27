@@ -15,7 +15,7 @@ test("status renderer produces a neofetch-style operational overview", () => {
   const rendered = renderStatus(statusFixture());
 
   assert.match(rendered, /JAEGER/);
-  assert.match(rendered, /Version\s+0\.1\.2 · Node v24\.0\.0/);
+  assert.match(rendered, /Version\s+0\.1\.3 · Node v24\.0\.0/);
   assert.match(rendered, /Harnesses\s+2\/2 available/);
   assert.match(rendered, /codex · codex-cli 1\.2\.3/);
   assert.match(rendered, /Workflows\s+1 active · 7 recorded/);
@@ -92,7 +92,7 @@ function statusFixture(): JaegerStatus {
   return {
     schemaVersion: 1,
     generatedAt: "2026-07-23T00:00:00.000Z",
-    version: "0.1.2",
+    version: "0.1.3",
     node: "v24.0.0",
     host: "workstation",
     runtime: "local-service",
@@ -102,7 +102,7 @@ function statusFixture(): JaegerStatus {
       active: true,
       connected: true,
       pid: 123,
-      version: "0.1.2",
+      version: "0.1.3",
       stateDir: "/tmp/jaeger",
     },
     harnesses: [

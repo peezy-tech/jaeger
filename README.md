@@ -113,7 +113,7 @@ replace its `jaeger` executable shim.
 
 ```bash
 npm uninstall --global --prefix "$HOME/.local" jaeger-workflows
-npm install --global --prefix "$HOME/.local" @peezy.tech/jaeger@0.1.2
+npm install --global --prefix "$HOME/.local" @peezy.tech/jaeger@0.1.3
 export PATH="$HOME/.local/bin:$PATH"
 hash -r
 jaeger backend install
@@ -124,7 +124,7 @@ jaeger doctor
 ```powershell
 $InstallRoot = Join-Path $env:LOCALAPPDATA "Jaeger"
 npm uninstall --global --prefix $InstallRoot jaeger-workflows
-npm install --global --prefix $InstallRoot @peezy.tech/jaeger@0.1.2
+npm install --global --prefix $InstallRoot @peezy.tech/jaeger@0.1.3
 $env:Path = "$InstallRoot;$env:Path"
 jaeger --help
 ```

@@ -73,7 +73,7 @@ try {
     await readFile(path.join(installedRoot, "package.json"), "utf8"),
   )
   assert.equal(installedPackage.name, "@peezy.tech/jaeger")
-  assert.equal(installedPackage.version, "0.1.2")
+  assert.equal(installedPackage.version, "0.1.3")
   assert.deepEqual(installedPackage.os, ["linux", "win32"])
   assert(
     !installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],

@@ -108,7 +108,7 @@ try {
   )
   const installedPackage = JSON.parse(await readFile(path.join(installedRoot, "package.json"), "utf8"))
   assert.equal(installedPackage.name, "@peezy.tech/jaeger")
-  assert.equal(installedPackage.version, "0.1.2")
+  assert.equal(installedPackage.version, "0.1.3")
   assert(installedPackage.dependencies?.typescript, "typescript must be a runtime dependency")
   assert(
     !installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],
