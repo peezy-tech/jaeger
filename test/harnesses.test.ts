@@ -221,6 +221,8 @@ test("Pi forks a read-only side-query with a distinct deterministic session", as
   ) as string[];
   assert.equal(args[args.indexOf("--fork") + 1], "pi-parent");
   assert.equal(args[args.indexOf("--session-id") + 1], "session-test");
+  assert.equal(args.includes("--no-approve"), true);
+  assert.equal(args.includes("--approve"), false);
   assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls");
 });
 

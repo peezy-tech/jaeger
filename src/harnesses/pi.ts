@@ -66,7 +66,7 @@ export class PiHarness implements HarnessAdapter {
     const args = [
       "--mode",
       "rpc",
-      "--approve",
+      request.readOnly ? "--no-approve" : "--approve",
       "--session-dir",
       sessionDirectory,
       ...(request.forkSessionId
