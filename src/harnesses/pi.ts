@@ -79,6 +79,7 @@ export class PiHarness implements HarnessAdapter {
       if (request.effort === "max") {
         assertPiMaxThinkingSupported(this.version);
       }
+      abort.signal.throwIfAborted();
     } catch (error) {
       abort.dispose();
       throw error;

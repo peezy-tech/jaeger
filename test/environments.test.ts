@@ -466,12 +466,205 @@ target = "$PI_CODING_AGENT_DIR/settings.json"
       theme: "dark",
       packages: ["npm:unrelated@1.0.0"],
     });
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        theme: "dark",
+        packages: [
+          "npm:unrelated@1.0.0",
+          "npm:added-while-active@2.0.0",
+        ],
+      }),
+    );
 
     await uninstallEnvironment(paths, "pi_settings");
     assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
       theme: "light",
-      packages: ["npm:unrelated@1.0.0"],
+      packages: [
+        "npm:unrelated@1.0.0",
+        "npm:added-while-active@2.0.0",
+      ],
     });
+  });
+});
+
+test("Pi settings removal retains unrelated packages added while active", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const directory = await writeEnvironment(root, "pi_settings", {
+      manifest: `
+version = 1
+name = "pi_settings"
+[providers.pi]
+packages = ["npm:managed@1.0.0"]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json": `{"theme":"dark"}\n`,
+      },
+    });
+    const settingsPath = path.join(piHome, "settings.json");
+    const packageManager: NativePackageManager = {
+      async isInstalled(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8").catch(() => "{}"),
+        ) as { readonly packages?: readonly string[] };
+        return settings.packages?.includes(source) === true;
+      },
+      async install(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as Record<string, unknown>;
+        const packages = Array.isArray(settings.packages)
+          ? settings.packages
+          : [];
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ ...settings, packages: [...packages, source] }),
+        );
+      },
+      async uninstall(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as Record<string, unknown>;
+        const packages = Array.isArray(settings.packages)
+          ? settings.packages.filter((entry) => entry !== source)
+          : [];
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ ...settings, packages }),
+        );
+      },
+    };
+    const plan = await loadEnvironmentPlan(
+      "pi_settings",
+      paths,
+      path.join(directory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    await applyEnvironment(plan, paths, { packageManager });
+    const activeSettings = JSON.parse(
+      await readFile(settingsPath, "utf8"),
+    ) as Record<string, unknown>;
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        ...activeSettings,
+        packages: [
+          "npm:managed@1.0.0",
+          "npm:added-while-active@2.0.0",
+        ],
+      }),
+    );
+
+    assert.equal(
+      (
+        await uninstallEnvironment(paths, "pi_settings", {
+          packageManager,
+        })
+      ).removedPackages,
+      1,
+    );
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      packages: ["npm:added-while-active@2.0.0"],
+    });
+  });
+});
+
+test("restoring obsolete Pi settings retains a desired package registration", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const firstDirectory = await writeEnvironment(root, "pi_first", {
+      manifest: `
+version = 1
+name = "pi_first"
+[providers.pi]
+packages = ["npm:managed@1.0.0"]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json": `{"theme":"managed"}\n`,
+      },
+    });
+    const secondDirectory = await writeEnvironment(root, "pi_second", {
+      manifest: `
+version = 1
+name = "pi_second"
+[providers.pi]
+packages = ["npm:managed@1.0.0"]
+`,
+      files: {},
+    });
+    await mkdir(piHome, { recursive: true });
+    const settingsPath = path.join(piHome, "settings.json");
+    await writeFile(settingsPath, `{"theme":"original"}\n`);
+    const packageManager: NativePackageManager = {
+      async isInstalled(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as { readonly packages?: readonly string[] };
+        return settings.packages?.includes(source) === true;
+      },
+      async installedSource(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as { readonly packages?: readonly string[] };
+        return settings.packages?.includes(source) === true
+          ? source
+          : undefined;
+      },
+      async install(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as Record<string, unknown>;
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ ...settings, packages: [source] }),
+        );
+      },
+      async uninstall() {
+        assert.fail("retained package should not be uninstalled");
+      },
+    };
+    const firstPlan = await loadEnvironmentPlan(
+      "pi_first",
+      paths,
+      path.join(firstDirectory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+    const secondPlan = await loadEnvironmentPlan(
+      "pi_second",
+      paths,
+      path.join(secondDirectory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    await applyEnvironment(firstPlan, paths, {
+      force: true,
+      packageManager,
+    });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      theme: "managed",
+      packages: ["npm:managed@1.0.0"],
+    });
+    assert.equal(
+      (await applyEnvironment(secondPlan, paths, { packageManager }))
+        .installedPackages,
+      0,
+    );
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      theme: "original",
+      packages: ["npm:managed@1.0.0"],
+    });
+    assert.equal(
+      await packageManager.isInstalled("npm:managed@1.0.0"),
+      true,
+    );
   });
 });
 

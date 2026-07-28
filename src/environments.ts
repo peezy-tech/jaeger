@@ -729,12 +729,33 @@ async function preflightManagedChanges(
 }
 
 async function removeManagedResource(resource: ManagedResource): Promise<void> {
+  const preservedPiPackages = await readPiSettingsPackages(resource);
+  if (
+    resource.backup &&
+    (await digestPath(resource.backup)) === undefined
+  ) {
+    throw new Error(`Environment backup is missing: ${resource.backup}`);
+  }
   await rm(resource.target, { recursive: true, force: true });
   if (resource.backup) {
-    if ((await digestPath(resource.backup)) === undefined) {
-      throw new Error(`Environment backup is missing: ${resource.backup}`);
-    }
     await copyPath(resource.backup, resource.target);
+  }
+  if (
+    preservedPiPackages !== undefined &&
+    (resource.backup || !isEmptyPiPackageList(preservedPiPackages))
+  ) {
+    const restoredContent = resource.backup
+      ? await readFile(resource.target, "utf8")
+      : "{}";
+    await atomicWrite(
+      resource.target,
+      mergePiSettingsPackages(
+        resource,
+        restoredContent,
+        preservedPiPackages,
+      ),
+      0o600,
+    );
   }
 }
 
@@ -831,6 +852,10 @@ function mergePiSettingsPackages(
     settings.packages = packages;
   }
   return `${JSON.stringify(settings, null, 2)}\n`;
+}
+
+function isEmptyPiPackageList(packages: unknown): boolean {
+  return Array.isArray(packages) && packages.length === 0;
 }
 
 function isPiSettingsResource(

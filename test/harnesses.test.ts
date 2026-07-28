@@ -260,6 +260,31 @@ test("Pi cancellation and timeout cover the version probe", async () => {
       error instanceof Error && "code" in error && error.code === "ENOENT",
   );
 
+  const cachedRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-version-cached-"),
+  );
+  const cachedCommand = path.join(cachedRoot, "fake-pi");
+  await executable(cachedCommand, piRpcScript());
+  const cachedHarness = new PiHarness(cachedCommand);
+  await cachedHarness.execute(request(cachedRoot, "pi", new FakeSession()));
+  const preAbortedRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-pre-aborted-"),
+  );
+  const preAbortedController = new AbortController();
+  preAbortedController.abort(new Error("cancelled before cached Pi launch"));
+  await assert.rejects(
+    cachedHarness.execute({
+      ...request(preAbortedRoot, "pi", new FakeSession()),
+      signal: preAbortedController.signal,
+    }),
+    /cancelled before cached Pi launch/,
+  );
+  await assert.rejects(
+    readFile(path.join(preAbortedRoot, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+
   const timedOutRoot = await mkdtemp(
     path.join(os.tmpdir(), "jaeger-pi-version-timeout-"),
   );
