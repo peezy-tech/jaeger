@@ -1130,11 +1130,16 @@ const nativePluginManager = createNativePluginManager();
 
 export function createNativePackageManager(
   runner: PackageCommandRunner = executePackageCommand,
+  settingsDirectory: string = piHome(process.env),
 ): NativePackageManager {
   return {
     async isInstalled(source) {
       const { stdout } = await runner("pi", ["list", "--no-approve"]);
-      return parsePiPackageSources(stdout).includes(source);
+      const expected = normalizePiPackageSource(source, settingsDirectory);
+      return parsePiPackageSources(stdout).some(
+        (installed) =>
+          normalizePiPackageSource(installed, settingsDirectory) === expected,
+      );
     },
     async install(source) {
       await runner("pi", ["install", source, "--no-approve"]);
@@ -1223,6 +1228,16 @@ function parsePiPackageSources(output: string): readonly string[] {
     if (match) sources.push(match[1] as string);
   }
   return sources;
+}
+
+function normalizePiPackageSource(
+  source: string,
+  settingsDirectory: string,
+): string {
+  return path.isAbsolute(source) ||
+    !/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source)
+    ? path.resolve(settingsDirectory, source)
+    : source;
 }
 
 function validatePiPackageSource(source: string): void {

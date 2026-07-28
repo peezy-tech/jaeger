@@ -522,6 +522,32 @@ test("native Pi package manager uses package commands and parses user package so
   ]);
 });
 
+test("native Pi package manager matches local packages relative to Pi settings", async () => {
+  const settingsDirectory = path.join(
+    path.parse(process.cwd()).root,
+    "tmp",
+    "pi",
+    "agent",
+  );
+  const localPackage = path.join(
+    path.parse(process.cwd()).root,
+    "tmp",
+    "jaeger",
+    "packages",
+    "local-tools",
+  );
+  const configuredSource = path.relative(settingsDirectory, localPackage);
+  const manager = createNativePackageManager(
+    async () => ({
+      stdout: `User packages:\n  ${configuredSource}\n    ${localPackage}\n`,
+      stderr: "",
+    }),
+    settingsDirectory,
+  );
+
+  assert.equal(await manager.isInstalled(localPackage), true);
+});
+
 async function withEnvironment(
   callback: (context: {
     readonly root: string;
