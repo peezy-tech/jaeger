@@ -473,6 +473,28 @@ export async function applyEnvironment(
   let removedPlugins = 0;
   let installedPackages = 0;
   let removedPackages = 0;
+  const statePath = path.join(paths.stateRoot, "active.json");
+  const appliedAt = new Date().toISOString();
+  const persistState = async (
+    resources: readonly ManagedResource[],
+    plugins: readonly ManagedPlugin[],
+    packages: readonly ManagedPackage[],
+  ): Promise<void> => {
+    const state: EnvironmentState = {
+      version: 1,
+      environment: plan.name,
+      manifestPath: plan.manifestPath,
+      appliedAt,
+      resources,
+      plugins,
+      packages,
+    };
+    await atomicWrite(
+      statePath,
+      `${JSON.stringify(state, null, 2)}\n`,
+      0o600,
+    );
+  };
   const nextResources: ManagedResource[] = [];
   for (const old of previous?.resources ?? []) {
     if (desiredByTarget.has(old.target)) continue;
@@ -507,6 +529,11 @@ export async function applyEnvironment(
       ...(backup ? { backup } : {}),
     });
   }
+  await persistState(
+    nextResources,
+    previous?.plugins ?? [],
+    previous?.packages ?? [],
+  );
   const pluginManager = options.pluginManager ?? nativePluginManager;
   const desiredPluginKeys = new Set(plan.plugins.map(pluginKey));
   const previousPlugins = new Map((previous?.plugins ?? []).map((plugin) => [pluginKey(plugin), plugin]));
@@ -530,6 +557,11 @@ export async function applyEnvironment(
       installedByEnvironment: previousPlugin?.installedByEnvironment === true || !installed,
     });
   }
+  await persistState(
+    nextResources,
+    nextPlugins,
+    previous?.packages ?? [],
+  );
   const packageManager = options.packageManager ?? nativePackageManager;
   const desiredPackageKeys = new Set(plan.packages.map(packageKey));
   const previousPackages = new Map(
@@ -551,26 +583,6 @@ export async function applyEnvironment(
     }
   }
   const nextPackages: ManagedPackage[] = [];
-  const statePath = path.join(paths.stateRoot, "active.json");
-  const appliedAt = new Date().toISOString();
-  const persistState = async (
-    packages: readonly ManagedPackage[],
-  ): Promise<void> => {
-    const state: EnvironmentState = {
-      version: 1,
-      environment: plan.name,
-      manifestPath: plan.manifestPath,
-      appliedAt,
-      resources: nextResources,
-      plugins: nextPlugins,
-      packages,
-    };
-    await atomicWrite(
-      statePath,
-      `${JSON.stringify(state, null, 2)}\n`,
-      0o600,
-    );
-  };
   for (const [index, packageDefinition] of plan.packages.entries()) {
     const previousPackage = previousPackages.get(packageKey(packageDefinition));
     const installed = await packageManager.isInstalled(packageDefinition.source);
@@ -588,12 +600,16 @@ export async function applyEnvironment(
           );
           return previousPackage ? [previousPackage] : [];
         });
-      await persistState([...nextPackages, ...remainingPreviousPackages]);
+      await persistState(
+        nextResources,
+        nextPlugins,
+        [...nextPackages, ...remainingPreviousPackages],
+      );
       await packageManager.install(packageDefinition.source);
       installedPackages += 1;
     }
   }
-  await persistState(nextPackages);
+  await persistState(nextResources, nextPlugins, nextPackages);
   return {
     environment: plan.name,
     changed,

@@ -256,6 +256,71 @@ packages = ["npm:first@1.0.0", "npm:second@2.0.0"]
   });
 });
 
+test("resource ownership survives a Pi package probe failure", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const directory = await writeEnvironment(root, "pi_probe", {
+      manifest: `
+version = 1
+name = "pi_probe"
+[providers.pi]
+instructions = ["snippets/pi.md"]
+packages = ["npm:managed@1.0.0"]
+`,
+      files: {
+        "snippets/pi.md": "# Managed Pi instructions\n",
+      },
+    });
+    await mkdir(piHome, { recursive: true });
+    const instructionsTarget = path.join(piHome, "AGENTS.md");
+    await writeFile(instructionsTarget, "# Original Pi instructions\n");
+    let probeFails = true;
+    const installed = new Set<string>();
+    const packageManager: NativePackageManager = {
+      async isInstalled(source) {
+        if (probeFails) {
+          probeFails = false;
+          throw new Error("Pi unavailable");
+        }
+        return installed.has(source);
+      },
+      async install(source) {
+        installed.add(source);
+      },
+      async uninstall(source) {
+        installed.delete(source);
+      },
+    };
+    const plan = await loadEnvironmentPlan(
+      "pi_probe",
+      paths,
+      path.join(directory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    await assert.rejects(
+      () => applyEnvironment(plan, paths, { force: true, packageManager }),
+      /Pi unavailable/,
+    );
+    const checkpoint = JSON.parse(
+      await readFile(path.join(paths.stateRoot, "active.json"), "utf8"),
+    ) as {
+      readonly resources: readonly {
+        readonly target: string;
+        readonly backup?: string;
+      }[];
+    };
+    assert.equal(checkpoint.resources[0]?.target, instructionsTarget);
+    assert.ok(checkpoint.resources[0]?.backup);
+
+    await applyEnvironment(plan, paths, { packageManager });
+    await uninstallEnvironment(paths, "pi_probe", { packageManager });
+    assert.equal(
+      await readFile(instructionsTarget, "utf8"),
+      "# Original Pi instructions\n",
+    );
+  });
+});
+
 test("apply is idempotent, detects drift, and uninstall restores prior content", async () => {
   await withEnvironment(async ({ root, paths, codexHome }) => {
     const directory = await writeEnvironment(root, "default", {
