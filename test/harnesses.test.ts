@@ -171,7 +171,7 @@ test("Pi adapter uses strict RPC, persists its session, and validates structured
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(
     requests.map((entry) => entry.type),
-    ["get_state", "prompt"],
+    ["get_state", "prompt", "get_state"],
   );
   assert.match(String(requests[1]?.message), /Return only one JSON value/);
   assert.match(String(requests[1]?.message), /Return an answer/);
@@ -200,9 +200,12 @@ test("Pi resumes a native session and maps Jaeger steer to RPC steer", async () 
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   assert.deepEqual(
     requests.map((entry) => entry.type),
-    ["get_state", "prompt", "steer"],
+    ["get_state", "prompt", "get_state", "steer"],
   );
-  assert.equal(requests[2]?.message, "Take the safer approach.");
+  assert.equal(
+    requests.find((entry) => entry.type === "steer")?.message,
+    "Take the safer approach.",
+  );
 });
 
 test("Pi forks a read-only side-query with a distinct deterministic session", async () => {
@@ -242,11 +245,34 @@ test("Pi cancels blocking extension UI dialogs instead of hanging headless RPC",
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.deepEqual(requests.at(-1), {
-    type: "extension_ui_response",
-    id: "dialog-1",
-    cancelled: true,
-  });
+  assert.deepEqual(
+    requests.find((entry) => entry.type === "extension_ui_response"),
+    {
+      type: "extension_ui_response",
+      id: "dialog-1",
+      cancelled: true,
+    },
+  );
+});
+
+test("Pi fails promptly when an extension command starts no agent turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-command-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ extensionCommand: true }));
+  const { schema: requestSchema, ...schemaLessRequest } = request(
+    root,
+    "pi",
+    new FakeSession(),
+  );
+  assert.equal(requestSchema, schema);
+  await assert.rejects(
+    () => new PiHarness(command).execute({
+      ...schemaLessRequest,
+      prompt: "/handled",
+      timeoutMs: 1_000,
+    }),
+    /Pi prompt completed without starting an agent turn/,
+  );
 });
 
 test("Pi RPC ignores accumulated partial-message volume in bounded transcripts", async () => {
@@ -582,6 +608,7 @@ function piRpcScript(
     waitForSteer?: boolean;
     requestUi?: boolean;
     floodUpdates?: boolean;
+    extensionCommand?: boolean;
   } = {},
 ): string {
   return `
@@ -594,7 +621,11 @@ const requests = path.join(process.cwd(), "pi-requests.jsonl")
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
 const sessionIndex = args.indexOf("--session-id")
 const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "pi-session"
+let streaming = false
+let messageCount = 0
 const complete = (answer) => {
+  streaming = false
+  messageCount += 2
   const message = {
     role: "assistant",
     content: [{ type: "text", text: JSON.stringify({ answer }) }],
@@ -618,21 +649,22 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       data: {
         sessionId,
         thinkingLevel: "low",
-        isStreaming: false,
+        isStreaming: streaming,
         isCompacting: false,
         steeringMode: "one-at-a-time",
         followUpMode: "one-at-a-time",
         autoCompactionEnabled: true,
-        messageCount: 0,
+        messageCount,
         pendingMessageCount: 0
       }
     })
     return
   }
   if (message.type === "prompt") {
+    streaming = ${options.extensionCommand ? "false" : "true"}
     send({ id: message.id, type: "response", command: "prompt", success: true })
     ${options.floodUpdates ? 'for (let index = 0; index < 18; index++) send({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] } })' : ""}
-    ${options.requestUi ? 'send({ type: "extension_ui_request", id: "dialog-1", method: "confirm", title: "Continue?", message: "Approve" })' : options.waitForSteer ? "" : 'setImmediate(() => complete("pi\\u2028rpc"))'}
+    ${options.extensionCommand ? "" : options.requestUi ? 'send({ type: "extension_ui_request", id: "dialog-1", method: "confirm", title: "Continue?", message: "Approve" })' : options.waitForSteer ? "" : 'setImmediate(() => complete("pi\\u2028rpc"))'}
     return
   }
   if (message.type === "extension_ui_response") {

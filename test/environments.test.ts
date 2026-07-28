@@ -172,6 +172,52 @@ packages = ["npm:managed@1.0.0", "npm:existing@2.0.0"]
   });
 });
 
+test("Pi environments do not claim a pre-existing package with another version", async () => {
+  await withEnvironment(async ({ root, paths }) => {
+    const directory = await writeEnvironment(root, "pi_packages", {
+      manifest: `
+version = 1
+name = "pi_packages"
+[providers.pi]
+packages = ["npm:existing@2.0.0"]
+`,
+      files: {},
+    });
+    const calls: string[] = [];
+    const packageManager = createNativePackageManager(
+      async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        return {
+          stdout: args[0] === "list"
+            ? "User packages:\n  npm:existing@1.0.0\n"
+            : "",
+          stderr: "",
+        };
+      },
+    );
+    const plan = await loadEnvironmentPlan(
+      "pi_packages",
+      paths,
+      path.join(directory, "environment.toml"),
+    );
+
+    assert.equal(
+      (await applyEnvironment(plan, paths, { packageManager }))
+        .installedPackages,
+      0,
+    );
+    assert.equal(
+      (
+        await uninstallEnvironment(paths, "pi_packages", {
+          packageManager,
+        })
+      ).removedPackages,
+      0,
+    );
+    assert.deepEqual(calls, ["pi list --no-approve"]);
+  });
+});
+
 test("Pi package ownership survives a later install failure", async () => {
   await withEnvironment(async ({ root, paths }) => {
     const directory = await writeEnvironment(root, "pi_packages", {
@@ -506,14 +552,21 @@ test("native Pi package manager uses package commands and parses user package so
     return { stdout: "", stderr: "" };
   });
   assert.equal(await manager.isInstalled("npm:@acme/tools@1.2.3"), true);
+  assert.equal(await manager.isInstalled("npm:@acme/tools@9.9.9"), true);
   assert.equal(
     await manager.isInstalled("git:github.com/acme/pi-ext@v2"),
+    true,
+  );
+  assert.equal(
+    await manager.isInstalled("https://github.com/acme/pi-ext.git@v3"),
     true,
   );
   assert.equal(await manager.isInstalled("npm:project-only@1.0.0"), false);
   await manager.install("npm:@acme/tools@1.2.3");
   await manager.uninstall("npm:@acme/tools@1.2.3");
   assert.deepEqual(calls, [
+    "pi list --no-approve",
+    "pi list --no-approve",
     "pi list --no-approve",
     "pi list --no-approve",
     "pi list --no-approve",

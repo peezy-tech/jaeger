@@ -107,6 +107,20 @@ export class PiHarness implements HarnessAdapter {
         message: piPrompt(request),
       });
       await request.session.turnStarted();
+      const promptState = requiredObject(
+        (await client.request("get_state")).data,
+        "Pi post-prompt get_state data",
+      );
+      const promptIsStreaming = requiredBoolean(
+        promptState.isStreaming,
+        "Pi post-prompt streaming state",
+      );
+      if (
+        !promptIsStreaming &&
+        client.settledGeneration <= settledGeneration
+      ) {
+        throw new Error("Pi prompt completed without starting an agent turn");
+      }
 
       controlAbort = new AbortController();
       const controls = request.session.processControls(async (control) => {
@@ -398,6 +412,11 @@ function requiredString(value: unknown, label: string): string {
   const result = nonEmptyString(value);
   if (!result) throw new Error(`${label} must be a non-empty string`);
   return result;
+}
+
+function requiredBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
+  return value;
 }
 
 function optionalNonNegativeInteger(value: unknown): number | undefined {

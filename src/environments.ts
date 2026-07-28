@@ -1135,10 +1135,10 @@ export function createNativePackageManager(
   return {
     async isInstalled(source) {
       const { stdout } = await runner("pi", ["list", "--no-approve"]);
-      const expected = normalizePiPackageSource(source, settingsDirectory);
+      const expected = piPackageIdentity(source, settingsDirectory);
       return parsePiPackageSources(stdout).some(
         (installed) =>
-          normalizePiPackageSource(installed, settingsDirectory) === expected,
+          piPackageIdentity(installed, settingsDirectory) === expected,
       );
     },
     async install(source) {
@@ -1230,14 +1230,62 @@ function parsePiPackageSources(output: string): readonly string[] {
   return sources;
 }
 
-function normalizePiPackageSource(
+function piPackageIdentity(
   source: string,
   settingsDirectory: string,
 ): string {
-  return path.isAbsolute(source) ||
-    !/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source)
-    ? path.resolve(settingsDirectory, source)
+  if (source.startsWith("npm:")) {
+    const spec = source.slice("npm:".length).trim();
+    const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/);
+    return `npm:${match?.[1] ?? spec}`;
+  }
+  if (/^(?:git:|https:\/\/|ssh:\/\/)/.test(source)) {
+    const repository = piGitRepository(source);
+    if (repository) return `git:${repository}`;
+  }
+  return `local:${path.resolve(settingsDirectory, source)}`;
+}
+
+function piGitRepository(source: string): string | undefined {
+  const value = source.startsWith("git:")
+    ? source.slice("git:".length)
     : source;
+  const scpMatch = value.match(/^git@([^:]+):(.+)$/);
+  if (scpMatch) {
+    return normalizedPiGitRepository(
+      scpMatch[1] as string,
+      scpMatch[2] as string,
+    );
+  }
+  if (/^(?:https?|ssh|git):\/\//.test(value)) {
+    try {
+      const parsed = new URL(value);
+      return normalizedPiGitRepository(
+        parsed.hostname,
+        parsed.pathname.replace(/^\/+/, ""),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+  const slash = value.indexOf("/");
+  if (slash < 0) return undefined;
+  return normalizedPiGitRepository(
+    value.slice(0, slash),
+    value.slice(slash + 1),
+  );
+}
+
+function normalizedPiGitRepository(
+  host: string,
+  pathWithRef: string,
+): string | undefined {
+  const repositoryPath = pathWithRef.split("@", 1)[0]
+    ?.replace(/\.git$/, "")
+    .replace(/^\/+/, "");
+  return host && repositoryPath
+    ? `${host.toLowerCase()}/${repositoryPath}`
+    : undefined;
 }
 
 function validatePiPackageSource(source: string): void {
