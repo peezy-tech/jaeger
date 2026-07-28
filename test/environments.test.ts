@@ -172,6 +172,90 @@ packages = ["npm:managed@1.0.0", "npm:existing@2.0.0"]
   });
 });
 
+test("Pi package ownership survives a later install failure", async () => {
+  await withEnvironment(async ({ root, paths }) => {
+    const directory = await writeEnvironment(root, "pi_packages", {
+      manifest: `
+version = 1
+name = "pi_packages"
+[providers.pi]
+packages = ["npm:first@1.0.0", "npm:second@2.0.0"]
+`,
+      files: {},
+    });
+    const installed = new Set<string>();
+    const events: string[] = [];
+    let failSecondInstall = true;
+    const packageManager: NativePackageManager = {
+      async isInstalled(source) {
+        return installed.has(source);
+      },
+      async install(source) {
+        events.push(`install:${source}`);
+        if (source === "npm:second@2.0.0" && failSecondInstall) {
+          failSecondInstall = false;
+          throw new Error("second install failed");
+        }
+        installed.add(source);
+      },
+      async uninstall(source) {
+        installed.delete(source);
+        events.push(`uninstall:${source}`);
+      },
+    };
+    const plan = await loadEnvironmentPlan(
+      "pi_packages",
+      paths,
+      path.join(directory, "environment.toml"),
+    );
+
+    await assert.rejects(
+      () => applyEnvironment(plan, paths, { packageManager }),
+      /second install failed/,
+    );
+    assert.deepEqual([...installed], ["npm:first@1.0.0"]);
+    const checkpoint = JSON.parse(
+      await readFile(path.join(paths.stateRoot, "active.json"), "utf8"),
+    ) as {
+      readonly packages: readonly {
+        readonly source: string;
+        readonly installedByEnvironment: boolean;
+      }[];
+    };
+    assert.deepEqual(
+      checkpoint.packages.map(({ source, installedByEnvironment }) => ({
+        source,
+        installedByEnvironment,
+      })),
+      [
+        { source: "npm:first@1.0.0", installedByEnvironment: true },
+        { source: "npm:second@2.0.0", installedByEnvironment: true },
+      ],
+    );
+
+    assert.equal(
+      (await applyEnvironment(plan, paths, { packageManager }))
+        .installedPackages,
+      1,
+    );
+    assert.equal(
+      (
+        await uninstallEnvironment(paths, "pi_packages", {
+          packageManager,
+        })
+      ).removedPackages,
+      2,
+    );
+    assert.deepEqual(events, [
+      "install:npm:first@1.0.0",
+      "install:npm:second@2.0.0",
+      "install:npm:second@2.0.0",
+      "uninstall:npm:first@1.0.0",
+      "uninstall:npm:second@2.0.0",
+    ]);
+  });
+});
+
 test("apply is idempotent, detects drift, and uninstall restores prior content", async () => {
   await withEnvironment(async ({ root, paths, codexHome }) => {
     const directory = await writeEnvironment(root, "default", {

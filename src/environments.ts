@@ -551,29 +551,49 @@ export async function applyEnvironment(
     }
   }
   const nextPackages: ManagedPackage[] = [];
-  for (const packageDefinition of plan.packages) {
+  const statePath = path.join(paths.stateRoot, "active.json");
+  const appliedAt = new Date().toISOString();
+  const persistState = async (
+    packages: readonly ManagedPackage[],
+  ): Promise<void> => {
+    const state: EnvironmentState = {
+      version: 1,
+      environment: plan.name,
+      manifestPath: plan.manifestPath,
+      appliedAt,
+      resources: nextResources,
+      plugins: nextPlugins,
+      packages,
+    };
+    await atomicWrite(
+      statePath,
+      `${JSON.stringify(state, null, 2)}\n`,
+      0o600,
+    );
+  };
+  for (const [index, packageDefinition] of plan.packages.entries()) {
     const previousPackage = previousPackages.get(packageKey(packageDefinition));
     const installed = await packageManager.isInstalled(packageDefinition.source);
-    if (!installed) {
-      await packageManager.install(packageDefinition.source);
-      installedPackages += 1;
-    }
     nextPackages.push({
       ...packageDefinition,
       installedByEnvironment:
         previousPackage?.installedByEnvironment === true || !installed,
     });
+    if (!installed) {
+      const remainingPreviousPackages = plan.packages
+        .slice(index + 1)
+        .flatMap((remainingPackage) => {
+          const previousPackage = previousPackages.get(
+            packageKey(remainingPackage),
+          );
+          return previousPackage ? [previousPackage] : [];
+        });
+      await persistState([...nextPackages, ...remainingPreviousPackages]);
+      await packageManager.install(packageDefinition.source);
+      installedPackages += 1;
+    }
   }
-  const state: EnvironmentState = {
-    version: 1,
-    environment: plan.name,
-    manifestPath: plan.manifestPath,
-    appliedAt: new Date().toISOString(),
-    resources: nextResources,
-    plugins: nextPlugins,
-    packages: nextPackages,
-  };
-  await atomicWrite(path.join(paths.stateRoot, "active.json"), `${JSON.stringify(state, null, 2)}\n`, 0o600);
+  await persistState(nextPackages);
   return {
     environment: plan.name,
     changed,
@@ -583,7 +603,7 @@ export async function applyEnvironment(
     removedPlugins,
     installedPackages,
     removedPackages,
-    statePath: path.join(paths.stateRoot, "active.json"),
+    statePath,
   };
 }
 
