@@ -177,10 +177,45 @@ test("Pi adapter uses strict RPC, persists its session, and validates structured
   assert.match(String(requests[1]?.message), /Return an answer/);
 });
 
-test("Pi rejects thinking levels unavailable on every supported version", () => {
+test("Pi accepts max thinking and rejects unknown thinking levels", () => {
+  assert.doesNotThrow(() =>
+    new PiHarness().validateOptions({ harness: "pi", effort: "max" }),
+  );
   assert.throws(
-    () => new PiHarness().validateOptions({ harness: "pi", effort: "max" }),
-    /pi effort must be off, minimal, low, medium, high, or xhigh/,
+    () => new PiHarness().validateOptions({ harness: "pi", effort: "extreme" }),
+    /pi effort must be off, minimal, low, medium, high, xhigh, or max/,
+  );
+});
+
+test("Pi version-gates max thinking while allowing compatible installations", async () => {
+  const compatibleRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-max-compatible-"),
+  );
+  const compatibleCommand = path.join(compatibleRoot, "fake-pi");
+  await executable(compatibleCommand, piRpcScript({ version: "0.80.6" }));
+  const compatibleRequest = {
+    ...request(compatibleRoot, "pi", new FakeSession()),
+    effort: "max",
+  };
+
+  await new PiHarness(compatibleCommand).execute(compatibleRequest);
+  const args = JSON.parse(
+    await readFile(path.join(compatibleRoot, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.equal(args[args.indexOf("--thinking") + 1], "max");
+
+  const incompatibleRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-max-incompatible-"),
+  );
+  const incompatibleCommand = path.join(incompatibleRoot, "fake-pi");
+  await executable(incompatibleCommand, piRpcScript({ version: "0.80.5" }));
+  await assert.rejects(
+    () =>
+      new PiHarness(incompatibleCommand).execute({
+        ...request(incompatibleRoot, "pi", new FakeSession()),
+        effort: "max",
+      }),
+    /max requires Pi 0\.80\.6 or newer/,
   );
 });
 
@@ -616,6 +651,7 @@ function piRpcScript(
     requestUi?: boolean;
     floodUpdates?: boolean;
     extensionCommand?: boolean;
+    version?: string;
   } = {},
 ): string {
   return `
@@ -623,6 +659,10 @@ const fs = require("node:fs")
 const path = require("node:path")
 const readline = require("node:readline")
 const args = process.argv.slice(2)
+if (args.includes("--version")) {
+  process.stdout.write(${JSON.stringify(options.version ?? "0.82.1")} + "\\n")
+  process.exit(0)
+}
 fs.writeFileSync(path.join(process.cwd(), "pi-args.json"), JSON.stringify(args))
 const requests = path.join(process.cwd(), "pi-requests.jsonl")
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")

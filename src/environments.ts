@@ -739,6 +739,7 @@ async function removeManagedResource(resource: ManagedResource): Promise<void> {
 }
 
 async function materializeResource(resource: EnvironmentResource): Promise<void> {
+  const preservedPiPackages = await readPiSettingsPackages(resource);
   await mkdir(path.dirname(resource.target), { recursive: true });
   if (resource.content !== undefined) {
     const existing = await lstat(resource.target).catch((error: unknown) => {
@@ -746,14 +747,100 @@ async function materializeResource(resource: EnvironmentResource): Promise<void>
       throw error;
     });
     if (existing?.isDirectory()) await rm(resource.target, { recursive: true });
-    await atomicWrite(resource.target, resource.content, 0o600);
+    await atomicWrite(
+      resource.target,
+      mergePiSettingsPackages(
+        resource,
+        resource.content,
+        preservedPiPackages,
+      ),
+      0o600,
+    );
     return;
   }
   if (!resource.source) throw new Error(`Resource has no source: ${resource.target}`);
+  if (preservedPiPackages !== undefined) {
+    const sourceStat = await lstat(resource.source);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
+      throw new Error(
+        `Pi settings source must be a regular file: ${resource.source}`,
+      );
+    }
+    await atomicWrite(
+      resource.target,
+      mergePiSettingsPackages(
+        resource,
+        await readFile(resource.source, "utf8"),
+        preservedPiPackages,
+      ),
+      0o600,
+    );
+    return;
+  }
   const temporary = path.join(path.dirname(resource.target), `.${path.basename(resource.target)}.jaeger-${randomUUID()}`);
   await copyPath(resource.source, temporary);
   await rm(resource.target, { recursive: true, force: true });
   await rename(temporary, resource.target);
+}
+
+async function readPiSettingsPackages(
+  resource: EnvironmentResource,
+): Promise<unknown | undefined> {
+  if (!isPiSettingsResource(resource)) return undefined;
+  try {
+    const targetStat = await lstat(resource.target);
+    if (!targetStat.isFile() || targetStat.isSymbolicLink()) return undefined;
+    const value: unknown = JSON.parse(await readFile(resource.target, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+    const settings = value as Record<string, unknown>;
+    return Object.hasOwn(settings, "packages") ? settings.packages : undefined;
+  } catch (error) {
+    if (hasCode(error, "ENOENT") || error instanceof SyntaxError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function mergePiSettingsPackages(
+  resource: EnvironmentResource,
+  content: string,
+  packages: unknown | undefined,
+): string {
+  if (packages === undefined) return content;
+  let value: unknown;
+  try {
+    value = JSON.parse(content);
+  } catch (error) {
+    throw new Error(
+      `Cannot preserve existing Pi packages in invalid settings source: ${resource.source ?? resource.target}`,
+      { cause: error },
+    );
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `Cannot preserve existing Pi packages in non-object settings source: ${resource.source ?? resource.target}`,
+    );
+  }
+  const settings = value as Record<string, unknown>;
+  settings.packages = packages;
+  return `${JSON.stringify(settings, null, 2)}\n`;
+}
+
+function isPiSettingsResource(
+  resource: Pick<
+    EnvironmentResource,
+    "provider" | "category" | "target" | "kind"
+  >,
+): boolean {
+  return (
+    resource.provider === "pi" &&
+    resource.category === "config" &&
+    resource.kind === "file" &&
+    path.basename(resource.target) === "settings.json"
+  );
 }
 
 async function sourceResource(
@@ -936,12 +1023,7 @@ async function digestResourcePath(
   resource: Pick<EnvironmentResource, "provider" | "category" | "target" | "kind">,
   target: string = resource.target,
 ): Promise<string | undefined> {
-  if (
-    resource.provider !== "pi" ||
-    resource.category !== "config" ||
-    resource.kind !== "file" ||
-    path.basename(resource.target) !== "settings.json"
-  ) {
+  if (!isPiSettingsResource(resource)) {
     return await digestPath(target);
   }
   try {

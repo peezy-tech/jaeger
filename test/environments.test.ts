@@ -429,6 +429,52 @@ target = "$PI_CODING_AGENT_DIR/settings.json"
   });
 });
 
+test("Pi settings replacement preserves unrelated pre-existing packages", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const directory = await writeEnvironment(root, "pi_settings", {
+      manifest: `
+version = 1
+name = "pi_settings"
+[providers.pi]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json": `{"theme":"dark"}\n`,
+      },
+    });
+    await mkdir(piHome, { recursive: true });
+    const settingsPath = path.join(piHome, "settings.json");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        theme: "light",
+        packages: ["npm:unrelated@1.0.0"],
+      }),
+    );
+    const plan = await loadEnvironmentPlan(
+      "pi_settings",
+      paths,
+      path.join(directory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    await applyEnvironment(plan, paths, { force: true });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      theme: "dark",
+      packages: ["npm:unrelated@1.0.0"],
+    });
+
+    await uninstallEnvironment(paths, "pi_settings");
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      theme: "light",
+      packages: ["npm:unrelated@1.0.0"],
+    });
+  });
+});
+
 test("Pi package recovery retries when the managed version is absent", async () => {
   await withEnvironment(async ({ root, paths }) => {
     const directory = await writeEnvironment(root, "pi_packages", {

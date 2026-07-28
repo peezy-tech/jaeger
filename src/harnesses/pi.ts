@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { promisify } from "node:util";
 import { parseStructuredOutput } from "../schema.js";
 import type {
   AgentOptions,
@@ -19,6 +21,7 @@ import {
 import { jsonObject, nonEmptyString, stepScratchDirectory } from "./support.js";
 
 const PI_RPC_FRAME_LIMIT_BYTES = 8 * 1024 * 1024;
+const PI_MAX_THINKING_VERSION = [0, 80, 6] as const;
 const PI_THINKING_LEVELS = [
   "off",
   "minimal",
@@ -26,13 +29,16 @@ const PI_THINKING_LEVELS = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ] as const;
 const PI_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+const execFileAsync = promisify(execFile);
 
 type JsonObject = Record<string, unknown>;
 
 export class PiHarness implements HarnessAdapter {
   readonly driver = "pi-rpc" as const;
+  private maxThinkingSupport: Promise<void> | undefined;
 
   constructor(
     private readonly command = "pi",
@@ -51,13 +57,21 @@ export class PiHarness implements HarnessAdapter {
       !PI_THINKING_LEVELS.includes(options.effort as (typeof PI_THINKING_LEVELS)[number])
     ) {
       throw new TypeError(
-        `${this.name} effort must be off, minimal, low, medium, high, or xhigh`,
+        `${this.name} effort must be off, minimal, low, medium, high, xhigh, or max`,
       );
     }
   }
 
   async execute(request: AgentRequest): Promise<HarnessResult> {
     this.validateOptions(request);
+    if (request.effort === "max") {
+      this.maxThinkingSupport ??= assertPiMaxThinkingSupported(
+        this.command,
+        request.cwd,
+        request.timeoutMs,
+      );
+      await this.maxThinkingSupport;
+    }
     const abort = turnAbortController(request);
     const sessionDirectory = path.join(request.runDir, "harness", "pi-sessions");
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
@@ -190,6 +204,47 @@ export class PiHarness implements HarnessAdapter {
       throw error;
     } finally {
       abort.dispose();
+    }
+  }
+}
+
+async function assertPiMaxThinkingSupported(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+): Promise<void> {
+  let stdout: string;
+  let stderr: string;
+  try {
+    const result = await execFileAsync(command, ["--version"], {
+      cwd,
+      encoding: "utf8",
+      timeout: Math.min(timeoutMs, 10_000),
+    });
+    stdout = result.stdout;
+    stderr = result.stderr;
+  } catch (error) {
+    throw new Error(
+      `Could not determine Pi version required for max thinking`,
+      { cause: error },
+    );
+  }
+  const version = (stdout || stderr).trim();
+  const match = version.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\s|$)/);
+  if (!match) {
+    throw new Error(
+      `Could not parse Pi version required for max thinking: ${version || "(empty)"}`,
+    );
+  }
+  const installed = match.slice(1).map(Number);
+  for (let index = 0; index < PI_MAX_THINKING_VERSION.length; index++) {
+    const actual = installed[index] ?? 0;
+    const minimum = PI_MAX_THINKING_VERSION[index] as number;
+    if (actual > minimum) return;
+    if (actual < minimum) {
+      throw new Error(
+        `Pi ${version} does not support max thinking; max requires Pi 0.80.6 or newer`,
+      );
     }
   }
 }
