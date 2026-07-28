@@ -73,10 +73,11 @@ member access, or mutate captured state from async/`parallel` callbacks. Return
 each task's value and combine `parallel()` results after awaiting them. Numeric
 array indexes remain available; coerce a dynamic input with `Number(...)`.
 
-Select built-in `codex` or `claude`, or a custom harness listed by `jaeger
+Select built-in `codex`, `claude`, or `pi`, or a custom harness listed by `jaeger
 doctor`, and use native behavior with agent options such as `harness`, `model`,
 `effort`, `serviceTier`, `profile`, `cwd`, `schema`, `label`, and `timeoutMs`.
-Custom harnesses reuse a shipped Codex app-server or Claude Agent SDK driver;
+Custom harnesses reuse a shipped Codex app-server, Claude Agent SDK, or Pi RPC
+driver;
 omit `model` when their launcher owns the mapping. Do not add
 per-agent permission or session-persistence options. Every call starts a
 persisted native provider session with full non-interactive technical authority.
@@ -172,6 +173,9 @@ active turn. Prefer the exact state-appropriate command returned by list or
 inspect. Surfaces using the Codex app-server driver append steering to the active
 turn. Surfaces using the Claude Agent SDK driver use native interrupt and
 immediately continue with the message in the same persisted session.
+Surfaces using the Pi RPC driver use native steer and abort commands. Wait for
+Pi's `agent_settled` boundary, and issue Pi session queries only after the
+parent is idle.
 
 Persistent-backend session resumes run in independent durable turn workers. For
 a long continuation, use `--detach`, retain the printed turn ID, and use its

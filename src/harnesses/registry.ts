@@ -4,6 +4,7 @@ import path from "node:path";
 import { trustedDirectory, trustedRegularFile } from "../path-trust.js";
 import { ClaudeHarness } from "./claude.js";
 import { CodexHarness } from "./codex.js";
+import { PiHarness } from "./pi.js";
 import type {
   HarnessAdapter,
   HarnessDefinition,
@@ -24,6 +25,12 @@ const BUILTIN_DEFINITIONS: readonly HarnessDefinition[] = Object.freeze([
     driver: "claude-agent-sdk",
     command: "claude",
     description: "Native Claude Code through the Claude Agent SDK",
+  }),
+  Object.freeze({
+    name: "pi",
+    driver: "pi-rpc",
+    command: "pi",
+    description: "Native Pi coding agent through JSONL RPC",
   }),
 ]);
 const BUILTIN_NAMES = new Set(BUILTIN_DEFINITIONS.map((definition) => definition.name));
@@ -56,7 +63,10 @@ export async function loadHarnessDefinitions(
 
 export function validateHarnessDefinitions(
   value: unknown,
-  options: { readonly allowPinnedBuiltins?: boolean } = {},
+  options: {
+    readonly allowPinnedBuiltins?: boolean;
+    readonly allowMissingBuiltins?: boolean;
+  } = {},
 ): readonly HarnessDefinition[] {
   if (!Array.isArray(value)) throw new Error("Harness definitions must be an array");
   const definitions = value.map((definition, index) =>
@@ -71,6 +81,7 @@ export function validateHarnessDefinitions(
   }
   for (const builtin of BUILTIN_DEFINITIONS) {
     const pinned = definitions.find((definition) => definition.name === builtin.name);
+    if (!pinned && options.allowMissingBuiltins === true) continue;
     const pinnedCommand =
       pinned?.command === builtin.command ||
       (options.allowPinnedBuiltins === true &&
@@ -88,19 +99,33 @@ export async function pinHarnessDefinitions(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<readonly HarnessDefinition[]> {
   const definitions = validateHarnessDefinitions(value);
-  const pinned = await Promise.all(
-    definitions.map(async (definition) => ({
-      ...definition,
-      command: await resolveHarnessCommand(definition.command, env),
-    })),
-  );
-  return validateHarnessDefinitions(pinned, { allowPinnedBuiltins: true });
+  const pinned: HarnessDefinition[] = [];
+  for (const definition of definitions) {
+    try {
+      pinned.push({
+        ...definition,
+        command: await resolveHarnessCommand(definition.command, env),
+      });
+    } catch (error) {
+      // Built-ins describe supported surfaces, not mandatory host
+      // dependencies. Preserve every available built-in in the run record and
+      // fail closed for an explicitly configured custom launcher.
+      if (!BUILTIN_NAMES.has(definition.name)) throw error;
+    }
+  }
+  return validateHarnessDefinitions(pinned, {
+    allowPinnedBuiltins: true,
+    allowMissingBuiltins: true,
+  });
 }
 
 export function harnessesFromDefinitions(
   definitions: readonly HarnessDefinition[],
 ): ReadonlyMap<string, HarnessAdapter> {
-  const validated = validateHarnessDefinitions(definitions, { allowPinnedBuiltins: true });
+  const validated = validateHarnessDefinitions(definitions, {
+    allowPinnedBuiltins: true,
+    allowMissingBuiltins: true,
+  });
   return new Map(
     validated.map((definition) => [definition.name, adapterForDefinition(definition)]),
   );
@@ -110,7 +135,10 @@ export function harnessDefinitionsForRun(
   record: WorkflowRunRecord,
 ): readonly HarnessDefinition[] {
   return record.version === 3 || record.version === 4
-    ? validateHarnessDefinitions(record.harnesses, { allowPinnedBuiltins: true })
+    ? validateHarnessDefinitions(record.harnesses, {
+        allowPinnedBuiltins: true,
+        allowMissingBuiltins: true,
+      })
     : BUILTIN_DEFINITIONS;
 }
 
@@ -131,7 +159,10 @@ function adapterForDefinition(definition: HarnessDefinition): HarnessAdapter {
   if (definition.driver === "codex-app-server") {
     return new CodexHarness(definition.command, definition.name);
   }
-  return new ClaudeHarness(definition.command, undefined, definition.name);
+  if (definition.driver === "claude-agent-sdk") {
+    return new ClaudeHarness(definition.command, undefined, definition.name);
+  }
+  return new PiHarness(definition.command, definition.name);
 }
 
 function parseHarnessConfig(value: unknown, configPath: string): HarnessDefinition[] {
@@ -189,8 +220,14 @@ function parseHarnessDefinition(value: unknown, label: string): HarnessDefinitio
 }
 
 function parseDriver(value: unknown, label: string): HarnessDriver {
-  if (value !== "codex-app-server" && value !== "claude-agent-sdk") {
-    throw new Error(`${label} driver must be codex-app-server or claude-agent-sdk`);
+  if (
+    value !== "codex-app-server" &&
+    value !== "claude-agent-sdk" &&
+    value !== "pi-rpc"
+  ) {
+    throw new Error(
+      `${label} driver must be codex-app-server, claude-agent-sdk, or pi-rpc`,
+    );
   }
   return value;
 }

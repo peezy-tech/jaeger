@@ -1086,7 +1086,10 @@ function validateScheduleRevision(
   }
   validateCronExpression(revision.trigger.expression);
   validateTimezone(revision.trigger.timezone);
-  validateHarnessDefinitions(revision.harnesses, { allowPinnedBuiltins: true });
+  validateHarnessDefinitions(revision.harnesses, {
+    allowPinnedBuiltins: true,
+    allowMissingBuiltins: true,
+  });
   const {
     revision: _revision,
     revisionHash: _revisionHash,

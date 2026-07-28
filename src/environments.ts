@@ -21,10 +21,12 @@ import { syncDirectory } from "./durable-json.js";
 import { ensurePrivateDirectory } from "./paths.js";
 
 const ENVIRONMENT_NAME = /^[a-z][a-z0-9_-]{0,63}$/;
-const PROVIDERS = ["codex", "claude"] as const;
+const PROVIDERS = ["codex", "claude", "pi"] as const;
+const PLUGIN_PROVIDERS = ["codex", "claude"] as const;
 const PLUGIN_SELECTOR = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/;
 const execFileAsync = promisify(execFile);
 type ProviderName = (typeof PROVIDERS)[number];
+type PluginProviderName = (typeof PLUGIN_PROVIDERS)[number];
 type ResourceKind = "file" | "directory";
 type ResourceCategory = "instructions" | "skill" | "plugin" | "config" | "harness-config";
 
@@ -56,12 +58,18 @@ export interface EnvironmentPlan {
   readonly manifestPath: string;
   readonly resources: readonly EnvironmentResource[];
   readonly plugins: readonly EnvironmentPlugin[];
+  readonly packages: readonly EnvironmentPackage[];
   readonly snippets: readonly SnippetDecision[];
 }
 
 export interface EnvironmentPlugin {
-  readonly provider: ProviderName;
+  readonly provider: PluginProviderName;
   readonly selector: string;
+}
+
+export interface EnvironmentPackage {
+  readonly provider: "pi";
+  readonly source: string;
 }
 
 interface ManagedResource {
@@ -80,9 +88,14 @@ interface EnvironmentState {
   readonly appliedAt: string;
   readonly resources: readonly ManagedResource[];
   readonly plugins: readonly ManagedPlugin[];
+  readonly packages: readonly ManagedPackage[];
 }
 
 interface ManagedPlugin extends EnvironmentPlugin {
+  readonly installedByEnvironment: boolean;
+}
+
+interface ManagedPackage extends EnvironmentPackage {
   readonly installedByEnvironment: boolean;
 }
 
@@ -91,14 +104,30 @@ export interface EnvironmentPluginStatus extends EnvironmentPlugin {
   readonly installedByEnvironment?: boolean;
 }
 
+export interface EnvironmentPackageStatus extends EnvironmentPackage {
+  readonly status: "current" | "missing" | "obsolete";
+  readonly installedByEnvironment?: boolean;
+}
+
 export interface NativePluginManager {
-  isInstalled(provider: ProviderName, selector: string): Promise<boolean>;
-  install(provider: ProviderName, selector: string): Promise<void>;
-  uninstall(provider: ProviderName, selector: string): Promise<void>;
+  isInstalled(provider: PluginProviderName, selector: string): Promise<boolean>;
+  install(provider: PluginProviderName, selector: string): Promise<void>;
+  uninstall(provider: PluginProviderName, selector: string): Promise<void>;
 }
 
 export type PluginCommandRunner = (
   command: "codex" | "claude",
+  args: readonly string[],
+) => Promise<{ readonly stdout: string; readonly stderr: string }>;
+
+export interface NativePackageManager {
+  isInstalled(source: string): Promise<boolean>;
+  install(source: string): Promise<void>;
+  uninstall(source: string): Promise<void>;
+}
+
+export type PackageCommandRunner = (
+  command: "pi",
   args: readonly string[],
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
@@ -117,6 +146,7 @@ export interface EnvironmentStatus {
   readonly current: boolean;
   readonly resources: readonly ResourceStatus[];
   readonly plugins: readonly EnvironmentPluginStatus[];
+  readonly packages: readonly EnvironmentPackageStatus[];
 }
 
 export interface ApplyResult {
@@ -126,6 +156,8 @@ export interface ApplyResult {
   readonly removed: number;
   readonly installedPlugins: number;
   readonly removedPlugins: number;
+  readonly installedPackages: number;
+  readonly removedPackages: number;
   readonly statePath: string;
 }
 
@@ -134,6 +166,7 @@ export interface UninstallResult {
   readonly restored: number;
   readonly removed: number;
   readonly removedPlugins: number;
+  readonly removedPackages: number;
 }
 
 export function defaultEnvironmentPaths(env: NodeJS.ProcessEnv = process.env): EnvironmentPaths {
@@ -182,6 +215,7 @@ export async function loadEnvironmentPlan(
   if (manifest.name !== name) throw new Error(`Environment manifest name must be ${name}`);
   const resources: EnvironmentResource[] = [];
   const plugins: EnvironmentPlugin[] = [];
+  const packages: EnvironmentPackage[] = [];
   const snippets: SnippetDecision[] = [];
   if (manifest.harness_config !== undefined) {
     const source = await resolveSource(manifestDirectory, stringValue(manifest.harness_config, "harness_config"));
@@ -193,7 +227,13 @@ export async function loadEnvironmentPlan(
   for (const provider of PROVIDERS) {
     if (providers[provider] === undefined) continue;
     const providerConfig = objectValue(providers[provider], `providers.${provider}`);
-    rejectUnknown(providerConfig, ["instructions", "skills", "plugins", "configs"], `providers.${provider}`);
+    rejectUnknown(
+      providerConfig,
+      provider === "pi"
+        ? ["instructions", "skills", "packages", "configs"]
+        : ["instructions", "skills", "plugins", "configs"],
+      `providers.${provider}`,
+    );
     if (providerConfig.instructions !== undefined) {
       const names = stringArray(providerConfig.instructions, `providers.${provider}.instructions`);
       const bodies: string[] = [];
@@ -226,6 +266,9 @@ export async function loadEnvironmentPlan(
       }
     }
     if (providerConfig.plugins !== undefined) {
+      if (provider === "pi") {
+        throw new Error("providers.pi uses packages, not plugins");
+      }
       for (const selector of stringArray(providerConfig.plugins, `providers.${provider}.plugins`)) {
         if (!PLUGIN_SELECTOR.test(selector)) {
           throw new Error(
@@ -233,6 +276,20 @@ export async function loadEnvironmentPlan(
           );
         }
         plugins.push({ provider, selector });
+      }
+    }
+    if (providerConfig.packages !== undefined) {
+      if (provider !== "pi") {
+        throw new Error(`providers.${provider} uses plugins, not packages`);
+      }
+      for (const source of stringArray(
+        providerConfig.packages,
+        "providers.pi.packages",
+      )) {
+        packages.push({
+          provider: "pi",
+          source: await resolvePiPackageSource(source, manifestDirectory),
+        });
       }
     }
     if (providerConfig.configs !== undefined) {
@@ -265,13 +322,32 @@ export async function loadEnvironmentPlan(
     if (pluginKeys.has(key)) throw new Error(`Environment plugin is declared more than once: ${plugin.selector}`);
     pluginKeys.add(key);
   }
-  return { version: 1, name, manifestPath, resources, plugins, snippets };
+  const packageKeys = new Set<string>();
+  for (const packageDefinition of packages) {
+    const key = packageKey(packageDefinition);
+    if (packageKeys.has(key)) {
+      throw new Error(
+        `Environment Pi package is declared more than once: ${packageDefinition.source}`,
+      );
+    }
+    packageKeys.add(key);
+  }
+  return {
+    version: 1,
+    name,
+    manifestPath,
+    resources,
+    plugins,
+    packages,
+    snippets,
+  };
 }
 
 export async function inspectEnvironmentStatus(
   plan: EnvironmentPlan,
   paths: EnvironmentPaths,
   pluginManager: NativePluginManager = nativePluginManager,
+  packageManager: NativePackageManager = nativePackageManager,
 ): Promise<EnvironmentStatus> {
   const state = await readState(paths.stateRoot);
   const managed = new Map((state?.resources ?? []).map((resource) => [resource.target, resource]));
@@ -327,16 +403,41 @@ export async function inspectEnvironmentStatus(
     if (desiredPluginKeys.has(pluginKey(plugin))) continue;
     plugins.push({ ...plugin, status: "obsolete" });
   }
+  const desiredPackageKeys = new Set(plan.packages.map(packageKey));
+  const managedPackages = new Map(
+    (state?.packages ?? []).map((packageDefinition) => [
+      packageKey(packageDefinition),
+      packageDefinition,
+    ]),
+  );
+  const packages: EnvironmentPackageStatus[] = [];
+  for (const packageDefinition of plan.packages) {
+    const installed = await packageManager.isInstalled(packageDefinition.source);
+    const managedPackage = managedPackages.get(packageKey(packageDefinition));
+    packages.push({
+      ...packageDefinition,
+      status: installed ? "current" : "missing",
+      ...(managedPackage
+        ? { installedByEnvironment: managedPackage.installedByEnvironment }
+        : {}),
+    });
+  }
+  for (const packageDefinition of state?.packages ?? []) {
+    if (desiredPackageKeys.has(packageKey(packageDefinition))) continue;
+    packages.push({ ...packageDefinition, status: "obsolete" });
+  }
   const current =
     state?.environment === plan.name &&
     resources.every((resource) => resource.status === "current") &&
-    plugins.every((plugin) => plugin.status === "current");
+    plugins.every((plugin) => plugin.status === "current") &&
+    packages.every((packageDefinition) => packageDefinition.status === "current");
   return {
     environment: plan.name,
     ...(state ? { activeEnvironment: state.environment } : {}),
     current,
     resources,
     plugins,
+    packages,
   };
 }
 
@@ -346,6 +447,7 @@ export async function applyEnvironment(
   options: {
     readonly force?: boolean;
     readonly pluginManager?: NativePluginManager;
+    readonly packageManager?: NativePackageManager;
   } = {},
 ): Promise<ApplyResult> {
   await ensurePrivateDirectory(paths.stateRoot, "Jaeger environment state root");
@@ -369,6 +471,8 @@ export async function applyEnvironment(
   let removed = 0;
   let installedPlugins = 0;
   let removedPlugins = 0;
+  let installedPackages = 0;
+  let removedPackages = 0;
   const nextResources: ManagedResource[] = [];
   for (const old of previous?.resources ?? []) {
     if (desiredByTarget.has(old.target)) continue;
@@ -426,6 +530,40 @@ export async function applyEnvironment(
       installedByEnvironment: previousPlugin?.installedByEnvironment === true || !installed,
     });
   }
+  const packageManager = options.packageManager ?? nativePackageManager;
+  const desiredPackageKeys = new Set(plan.packages.map(packageKey));
+  const previousPackages = new Map(
+    (previous?.packages ?? []).map((packageDefinition) => [
+      packageKey(packageDefinition),
+      packageDefinition,
+    ]),
+  );
+  for (const old of previous?.packages ?? []) {
+    if (
+      desiredPackageKeys.has(packageKey(old)) ||
+      !old.installedByEnvironment
+    ) {
+      continue;
+    }
+    if (await packageManager.isInstalled(old.source)) {
+      await packageManager.uninstall(old.source);
+      removedPackages += 1;
+    }
+  }
+  const nextPackages: ManagedPackage[] = [];
+  for (const packageDefinition of plan.packages) {
+    const previousPackage = previousPackages.get(packageKey(packageDefinition));
+    const installed = await packageManager.isInstalled(packageDefinition.source);
+    if (!installed) {
+      await packageManager.install(packageDefinition.source);
+      installedPackages += 1;
+    }
+    nextPackages.push({
+      ...packageDefinition,
+      installedByEnvironment:
+        previousPackage?.installedByEnvironment === true || !installed,
+    });
+  }
   const state: EnvironmentState = {
     version: 1,
     environment: plan.name,
@@ -433,6 +571,7 @@ export async function applyEnvironment(
     appliedAt: new Date().toISOString(),
     resources: nextResources,
     plugins: nextPlugins,
+    packages: nextPackages,
   };
   await atomicWrite(path.join(paths.stateRoot, "active.json"), `${JSON.stringify(state, null, 2)}\n`, 0o600);
   return {
@@ -442,6 +581,8 @@ export async function applyEnvironment(
     removed,
     installedPlugins,
     removedPlugins,
+    installedPackages,
+    removedPackages,
     statePath: path.join(paths.stateRoot, "active.json"),
   };
 }
@@ -452,6 +593,7 @@ export async function uninstallEnvironment(
   options: {
     readonly force?: boolean;
     readonly pluginManager?: NativePluginManager;
+    readonly packageManager?: NativePackageManager;
   } = {},
 ): Promise<UninstallResult> {
   const state = await readState(paths.stateRoot);
@@ -463,6 +605,7 @@ export async function uninstallEnvironment(
   let restored = 0;
   let removed = 0;
   let removedPlugins = 0;
+  let removedPackages = 0;
   for (const resource of state.resources) {
     await removeManagedResource(resource);
     if (resource.backup) restored += 1;
@@ -478,8 +621,24 @@ export async function uninstallEnvironment(
       removedPlugins += 1;
     }
   }
+  const packageManager = options.packageManager ?? nativePackageManager;
+  for (const packageDefinition of state.packages) {
+    if (
+      packageDefinition.installedByEnvironment &&
+      (await packageManager.isInstalled(packageDefinition.source))
+    ) {
+      await packageManager.uninstall(packageDefinition.source);
+      removedPackages += 1;
+    }
+  }
   await rm(path.join(paths.stateRoot, "active.json"), { force: true });
-  return { environment: state.environment, restored, removed, removedPlugins };
+  return {
+    environment: state.environment,
+    restored,
+    removed,
+    removedPlugins,
+    removedPackages,
+  };
 }
 
 export async function activeEnvironment(paths: EnvironmentPaths): Promise<EnvironmentState | undefined> {
@@ -590,15 +749,22 @@ async function loadSnippet(
 
 function providerInstructionsTarget(provider: ProviderName, env: NodeJS.ProcessEnv): string {
   if (provider === "codex") return path.join(codexHome(env), "AGENTS.md");
-  return path.join(claudeHome(env), "CLAUDE.md");
+  if (provider === "claude") return path.join(claudeHome(env), "CLAUDE.md");
+  return path.join(piHome(env), "AGENTS.md");
 }
 
 function providerAssetRoot(
   provider: ProviderName,
-  field: "skills" | "plugins",
+  field: "skills",
   env: NodeJS.ProcessEnv,
 ): string {
-  return path.join(provider === "codex" ? codexHome(env) : claudeHome(env), field);
+  const root =
+    provider === "codex"
+      ? codexHome(env)
+      : provider === "claude"
+        ? claudeHome(env)
+        : piHome(env);
+  return path.join(root, field);
 }
 
 function codexHome(env: NodeJS.ProcessEnv): string {
@@ -609,11 +775,18 @@ function claudeHome(env: NodeJS.ProcessEnv): string {
   return path.resolve(expandHome(env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude")));
 }
 
+function piHome(env: NodeJS.ProcessEnv): string {
+  return path.resolve(
+    expandHome(env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent")),
+  );
+}
+
 function expandTarget(value: string, env: NodeJS.ProcessEnv): string {
   const replacements: Record<string, string> = {
     "$HOME": os.homedir(),
     "$CODEX_HOME": codexHome(env),
     "$CLAUDE_CONFIG_DIR": claudeHome(env),
+    "$PI_CODING_AGENT_DIR": piHome(env),
   };
   let expanded = expandHome(value);
   for (const [token, replacement] of Object.entries(replacements)) {
@@ -748,14 +921,27 @@ async function readState(stateRoot: string): Promise<EnvironmentState | undefine
     throw new Error(`Invalid Jaeger environment state: ${target}`, { cause: error });
   }
   const state = objectValue(value, "environment state");
-  rejectUnknown(state, ["version", "environment", "manifestPath", "appliedAt", "resources", "plugins"], "environment state");
+  rejectUnknown(
+    state,
+    [
+      "version",
+      "environment",
+      "manifestPath",
+      "appliedAt",
+      "resources",
+      "plugins",
+      "packages",
+    ],
+    "environment state",
+  );
   if (
     state.version !== 1 ||
     typeof state.environment !== "string" || !ENVIRONMENT_NAME.test(state.environment) ||
     typeof state.manifestPath !== "string" || !path.isAbsolute(state.manifestPath) ||
     typeof state.appliedAt !== "string" || Number.isNaN(Date.parse(state.appliedAt)) ||
     !Array.isArray(state.resources) ||
-    !Array.isArray(state.plugins)
+    !Array.isArray(state.plugins) ||
+    (state.packages !== undefined && !Array.isArray(state.packages))
   ) {
     throw new Error(`Invalid Jaeger environment state: ${target}`);
   }
@@ -800,7 +986,7 @@ async function readState(stateRoot: string): Promise<EnvironmentState | undefine
     const plugin = objectValue(raw, `environment state plugin ${index}`);
     rejectUnknown(plugin, ["provider", "selector", "installedByEnvironment"], `environment state plugin ${index}`);
     if (
-      !PROVIDERS.includes(plugin.provider as ProviderName) ||
+      !PLUGIN_PROVIDERS.includes(plugin.provider as PluginProviderName) ||
       typeof plugin.selector !== "string" ||
       !PLUGIN_SELECTOR.test(plugin.selector) ||
       typeof plugin.installedByEnvironment !== "boolean"
@@ -808,7 +994,7 @@ async function readState(stateRoot: string): Promise<EnvironmentState | undefine
       throw new Error(`Invalid Jaeger environment state plugin ${index}: ${target}`);
     }
     const parsed = {
-      provider: plugin.provider as ProviderName,
+      provider: plugin.provider as PluginProviderName,
       selector: plugin.selector,
       installedByEnvironment: plugin.installedByEnvironment,
     };
@@ -817,6 +1003,41 @@ async function readState(stateRoot: string): Promise<EnvironmentState | undefine
     pluginKeys.add(key);
     return parsed;
   });
+  const packageKeys = new Set<string>();
+  const packages = (state.packages ?? []).map(
+    (raw, index): ManagedPackage => {
+      const packageDefinition = objectValue(
+        raw,
+        `environment state package ${index}`,
+      );
+      rejectUnknown(
+        packageDefinition,
+        ["provider", "source", "installedByEnvironment"],
+        `environment state package ${index}`,
+      );
+      if (
+        packageDefinition.provider !== "pi" ||
+        typeof packageDefinition.source !== "string" ||
+        typeof packageDefinition.installedByEnvironment !== "boolean"
+      ) {
+        throw new Error(
+          `Invalid Jaeger environment state package ${index}: ${target}`,
+        );
+      }
+      validatePiPackageSource(packageDefinition.source);
+      const parsed: ManagedPackage = {
+        provider: "pi",
+        source: packageDefinition.source,
+        installedByEnvironment: packageDefinition.installedByEnvironment,
+      };
+      const key = packageKey(parsed);
+      if (packageKeys.has(key)) {
+        throw new Error(`Duplicate Jaeger environment state package: ${key}`);
+      }
+      packageKeys.add(key);
+      return parsed;
+    },
+  );
   return {
     version: 1,
     environment: state.environment,
@@ -824,6 +1045,7 @@ async function readState(stateRoot: string): Promise<EnvironmentState | undefine
     appliedAt: state.appliedAt,
     resources,
     plugins,
+    packages,
   };
 }
 
@@ -870,6 +1092,25 @@ export function createNativePluginManager(
 
 const nativePluginManager = createNativePluginManager();
 
+export function createNativePackageManager(
+  runner: PackageCommandRunner = executePackageCommand,
+): NativePackageManager {
+  return {
+    async isInstalled(source) {
+      const { stdout } = await runner("pi", ["list", "--no-approve"]);
+      return parsePiPackageSources(stdout).includes(source);
+    },
+    async install(source) {
+      await runner("pi", ["install", source, "--no-approve"]);
+    },
+    async uninstall(source) {
+      await runner("pi", ["remove", source, "--no-approve"]);
+    },
+  };
+}
+
+const nativePackageManager = createNativePackageManager();
+
 async function executePluginCommand(
   command: "codex" | "claude",
   args: readonly string[],
@@ -878,6 +1119,21 @@ async function executePluginCommand(
     return await execFileAsync(command, args, {
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (error) {
+    throw new Error(`Could not run ${command} ${args.join(" ")}`, { cause: error });
+  }
+}
+
+async function executePackageCommand(
+  command: "pi",
+  args: readonly string[],
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  try {
+    return await execFileAsync(command, args, {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, NO_COLOR: "1" },
     });
   } catch (error) {
     throw new Error(`Could not run ${command} ${args.join(" ")}`, { cause: error });
@@ -903,6 +1159,64 @@ function pluginEntrySelector(value: unknown): string | undefined {
 
 function pluginKey(plugin: EnvironmentPlugin): string {
   return `${plugin.provider}:${plugin.selector}`;
+}
+
+function packageKey(packageDefinition: EnvironmentPackage): string {
+  return `${packageDefinition.provider}:${packageDefinition.source}`;
+}
+
+function parsePiPackageSources(output: string): readonly string[] {
+  const lines = output.split(/\r?\n/);
+  if (
+    !lines.includes("User packages:") &&
+    !lines.includes("Project packages:") &&
+    !lines.includes("No packages installed.")
+  ) {
+    throw new Error("Pi package list returned an unrecognized format");
+  }
+  const sources: string[] = [];
+  let userPackages = false;
+  for (const line of lines) {
+    if (line === "User packages:") {
+      userPackages = true;
+      continue;
+    }
+    if (/^\S/.test(line)) userPackages = false;
+    if (!userPackages) continue;
+    const match = line.match(/^  (\S.*?)(?:\s+\(filtered\))?$/);
+    if (match) sources.push(match[1] as string);
+  }
+  return sources;
+}
+
+function validatePiPackageSource(source: string): void {
+  if (
+    source.trim() === "" ||
+    source !== source.trim() ||
+    /[\0\r\n]/.test(source) ||
+    (!path.isAbsolute(source) &&
+      !/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source))
+  ) {
+    throw new Error(
+      `providers.pi.packages entries must be npm:, git:, HTTPS, SSH, or local path sources: ${source}`,
+    );
+  }
+}
+
+async function resolvePiPackageSource(
+  source: string,
+  manifestDirectory: string,
+): Promise<string> {
+  if (path.isAbsolute(source)) {
+    throw new Error(
+      `Local providers.pi.packages paths must be relative to the manifest: ${source}`,
+    );
+  }
+  if (source === "." || source.startsWith("./") || source.startsWith("../")) {
+    return await resolveSource(manifestDirectory, source);
+  }
+  validatePiPackageSource(source);
+  return source;
 }
 
 function commandAvailable(command: string, env: NodeJS.ProcessEnv): boolean {

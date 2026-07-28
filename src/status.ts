@@ -59,6 +59,7 @@ export interface JaegerStatus {
     readonly name: string;
     readonly resources: number;
     readonly plugins: number;
+    readonly packages: number;
     readonly appliedAt: string;
   } | null;
   readonly warnings: readonly string[];
@@ -144,6 +145,7 @@ export async function collectStatus(
       name: state.environment,
       resources: state.resources.length,
       plugins: state.plugins.length,
+      packages: state.packages.length,
       appliedAt: state.appliedAt,
     };
   } else if (environmentResult.status === "rejected") {
@@ -195,7 +197,7 @@ export function renderStatus(
   const scheduleSummary =
     `${status.schedules.active} active · ${status.schedules.paused} paused · ${status.schedules.total} configured`;
   const environmentSummary = status.environment
-    ? `${status.environment.name} · ${status.environment.resources} resources · ${status.environment.plugins} plugins`
+    ? `${status.environment.name} · ${status.environment.resources} resources · ${status.environment.plugins} plugins · ${status.environment.packages} packages`
     : "none";
 
   const info: string[] = [

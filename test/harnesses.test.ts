@@ -12,6 +12,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeHarness } from "../src/harnesses/claude.js";
 import { CodexHarness } from "../src/harnesses/codex.js";
+import { PiHarness } from "../src/harnesses/pi.js";
 import type {
   AgentRequest,
   JsonSchema,
@@ -121,6 +122,137 @@ test("Codex forks a read-only side-query thread without resuming the parent", as
   assert.equal(requests[2]?.params?.threadId, "parent-thread");
   assert.equal(requests[2]?.params?.sandbox, "read-only");
   assert.deepEqual(requests[3]?.params?.sandboxPolicy, { type: "readOnly" });
+});
+
+test("Pi adapter uses strict RPC, persists its session, and validates structured output", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-rpc-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript());
+  const session = new FakeSession();
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", session),
+  );
+
+  assert.deepEqual(result.output, { answer: "pi\u2028rpc" });
+  assert.equal(result.nativeSessionId, "session-test");
+  assert.equal(session.providerId, "session-test");
+  assert.equal(session.turnStartedCount, 1);
+  assert.equal(result.metadata?.harness, "pi-rpc");
+  assert.equal(
+    result.metadata?.sessionDirectory,
+    path.join(root, "run", "harness", "pi-sessions"),
+  );
+  const transcripts = result.metadata?.transcripts as
+    | Record<string, unknown>
+    | undefined;
+  assert.equal(typeof transcripts?.stderr, "string");
+  assert.equal("stdout" in (transcripts ?? {}), false);
+
+  const args = JSON.parse(
+    await readFile(path.join(root, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.deepEqual(args, [
+    "--mode",
+    "rpc",
+    "--approve",
+    "--session-dir",
+    path.join(root, "run", "harness", "pi-sessions"),
+    "--session-id",
+    "session-test",
+    "--model",
+    "test-model",
+    "--thinking",
+    "low",
+  ]);
+  const requests = (await readFile(path.join(root, "pi-requests.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    requests.map((entry) => entry.type),
+    ["get_state", "prompt"],
+  );
+  assert.match(String(requests[1]?.message), /Return only one JSON value/);
+  assert.match(String(requests[1]?.message), /Return an answer/);
+});
+
+test("Pi resumes a native session and maps Jaeger steer to RPC steer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-steer-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ waitForSteer: true }));
+  const session = new FakeSession("pi-existing", [
+    { id: "control-1", kind: "steer", message: "Take the safer approach." },
+  ]);
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", session),
+  );
+
+  assert.deepEqual(result.output, { answer: "steered" });
+  assert.equal(session.controlResults[0]?.steered, true);
+  const args = JSON.parse(
+    await readFile(path.join(root, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.equal(args[args.indexOf("--session-id") + 1], "pi-existing");
+  const requests = (await readFile(path.join(root, "pi-requests.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    requests.map((entry) => entry.type),
+    ["get_state", "prompt", "steer"],
+  );
+  assert.equal(requests[2]?.message, "Take the safer approach.");
+});
+
+test("Pi forks a read-only side-query with a distinct deterministic session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-fork-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript());
+  const input: AgentRequest = {
+    ...request(root, "pi", new FakeSession()),
+    forkSessionId: "pi-parent",
+    readOnly: true,
+  };
+  const result = await new PiHarness(command).execute(input);
+
+  assert.equal(result.nativeSessionId, "session-test");
+  const args = JSON.parse(
+    await readFile(path.join(root, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.equal(args[args.indexOf("--fork") + 1], "pi-parent");
+  assert.equal(args[args.indexOf("--session-id") + 1], "session-test");
+  assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls");
+});
+
+test("Pi cancels blocking extension UI dialogs instead of hanging headless RPC", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-ui-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ requestUi: true }));
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", new FakeSession()),
+  );
+
+  assert.deepEqual(result.output, { answer: "pi\u2028rpc" });
+  const requests = (await readFile(path.join(root, "pi-requests.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(requests.at(-1), {
+    type: "extension_ui_response",
+    id: "dialog-1",
+    cancelled: true,
+  });
+});
+
+test("Pi RPC ignores accumulated partial-message volume in bounded transcripts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-volume-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ floodUpdates: true }));
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", new FakeSession()),
+  );
+
+  assert.deepEqual(result.output, { answer: "pi\u2028rpc" });
 });
 
 test("Claude adapter uses a persistent Agent SDK streaming session and resumes by ID", async () => {
@@ -421,6 +553,7 @@ const complete = (answer) => {
   ${options.unloadedTurnItems ? 'send({ method: "item/completed", params: { threadId: "codex-thread", turnId: "codex-turn", item: finalMessage } })' : ""}
   send({ method: "turn/completed", params: { threadId: "codex-thread", turn: { id: "codex-turn", status: "completed", items: ${options.unloadedTurnItems ? "[]" : "[finalMessage]"}${options.unloadedTurnItems ? ', itemsView: "notLoaded"' : ""} } } })
 }
+
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line)
   fs.appendFileSync(requests, JSON.stringify(message) + "\\n")
@@ -435,6 +568,76 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     setImmediate(() => complete("steered"))
   }
   if (message.method === "turn/interrupt") send({ id: message.id, result: {} })
+})
+`;
+}
+
+function piRpcScript(
+  options: {
+    waitForSteer?: boolean;
+    requestUi?: boolean;
+    floodUpdates?: boolean;
+  } = {},
+): string {
+  return `
+const fs = require("node:fs")
+const path = require("node:path")
+const readline = require("node:readline")
+const args = process.argv.slice(2)
+fs.writeFileSync(path.join(process.cwd(), "pi-args.json"), JSON.stringify(args))
+const requests = path.join(process.cwd(), "pi-requests.jsonl")
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+const sessionIndex = args.indexOf("--session-id")
+const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "pi-session"
+const complete = (answer) => {
+  const message = {
+    role: "assistant",
+    content: [{ type: "text", text: JSON.stringify({ answer }) }],
+    provider: "test-provider",
+    model: "test-model",
+    usage: { input: 3, output: 2 },
+    stopReason: "stop"
+  }
+  send({ type: "message_end", message })
+  send({ type: "agent_settled" })
+}
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  fs.appendFileSync(requests, JSON.stringify(message) + "\\n")
+  if (message.type === "get_state") {
+    send({
+      id: message.id,
+      type: "response",
+      command: "get_state",
+      success: true,
+      data: {
+        sessionId,
+        thinkingLevel: "low",
+        isStreaming: false,
+        isCompacting: false,
+        steeringMode: "one-at-a-time",
+        followUpMode: "one-at-a-time",
+        autoCompactionEnabled: true,
+        messageCount: 0,
+        pendingMessageCount: 0
+      }
+    })
+    return
+  }
+  if (message.type === "prompt") {
+    send({ id: message.id, type: "response", command: "prompt", success: true })
+    ${options.floodUpdates ? 'for (let index = 0; index < 18; index++) send({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] } })' : ""}
+    ${options.requestUi ? 'send({ type: "extension_ui_request", id: "dialog-1", method: "confirm", title: "Continue?", message: "Approve" })' : options.waitForSteer ? "" : 'setImmediate(() => complete("pi\\u2028rpc"))'}
+    return
+  }
+  if (message.type === "extension_ui_response") {
+    setImmediate(() => complete("pi\\u2028rpc"))
+    return
+  }
+  if (message.type === "steer") {
+    send({ id: message.id, type: "response", command: "steer", success: true })
+    setImmediate(() => complete("steered"))
+  }
 })
 `;
 }

@@ -16,11 +16,14 @@ test("status renderer produces a neofetch-style operational overview", () => {
 
   assert.match(rendered, /JAEGER/);
   assert.match(rendered, /Version\s+0\.1\.4 · Node v24\.0\.0/);
-  assert.match(rendered, /Harnesses\s+2\/2 available/);
+  assert.match(rendered, /Harnesses\s+3\/3 available/);
   assert.match(rendered, /codex · codex-cli 1\.2\.3/);
   assert.match(rendered, /Workflows\s+1 active · 7 recorded/);
   assert.match(rendered, /Schedules\s+2 active · 1 paused · 3 configured/);
-  assert.match(rendered, /Environment\s+default · 4 resources · 1 plugins/);
+  assert.match(
+    rendered,
+    /Environment\s+default · 4 resources · 1 plugins · 2 packages/,
+  );
   assert.match(rendered, /jaeger status --json/);
   assert.doesNotMatch(rendered, /\u001b\[/);
 });
@@ -32,6 +35,7 @@ test("bare CLI renders status while explicit help retains command documentation"
   for (const [name, version] of [
     ["codex", "codex fixture 1.0"],
     ["claude", "claude fixture 2.0"],
+    ["pi", "0.82.1"],
   ] as const) {
     const target = path.join(bin, name);
     await writeFile(
@@ -75,6 +79,7 @@ test("bare CLI renders status while explicit help retains command documentation"
     [
       { name: "codex", available: true },
       { name: "claude", available: true },
+      { name: "pi", available: true },
     ],
   );
 
@@ -118,6 +123,12 @@ function statusFixture(): JaegerStatus {
         available: true,
         version: "claude 4.5.6",
       },
+      {
+        name: "pi",
+        transport: "pi-rpc",
+        available: true,
+        version: "0.82.1",
+      },
     ],
     workflows: {
       total: 7,
@@ -135,6 +146,7 @@ function statusFixture(): JaegerStatus {
       name: "default",
       resources: 4,
       plugins: 1,
+      packages: 2,
       appliedAt: "2026-07-23T00:00:00.000Z",
     },
     warnings: [],

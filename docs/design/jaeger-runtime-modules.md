@@ -28,7 +28,7 @@ with normal package resolution.
 - Package installation remains the responsibility of an ordinary JavaScript
   package manager.
 
-This is not a second provider-plugin system. Codex and Claude continue to own
+This is not a second provider-plugin system. Codex, Claude, and Pi continue to own
 their native skills, hooks, MCP servers, and plugins.
 
 ## Configuration

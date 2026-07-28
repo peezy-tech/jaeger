@@ -397,7 +397,10 @@ function parseRunRecord(contents: string, runId: string): WorkflowRunRecord {
   }
   validateCommonRecord(parsed);
   if (parsed.version === 3 || parsed.version === 4) {
-    validateHarnessDefinitions(parsed.harnesses, { allowPinnedBuiltins: true });
+    validateHarnessDefinitions(parsed.harnesses, {
+      allowPinnedBuiltins: true,
+      allowMissingBuiltins: true,
+    });
   }
   if (parsed.version === 4) validateV4Record(parsed);
   return parsed;

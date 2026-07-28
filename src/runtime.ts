@@ -264,6 +264,7 @@ export async function openWorkflowForResume(
       journal.record.version === 3 || journal.record.version === 4
         ? validateHarnessDefinitions(journal.record.harnesses, {
             allowPinnedBuiltins: true,
+            allowMissingBuiltins: true,
           })
         : builtinHarnessDefinitions();
     if (

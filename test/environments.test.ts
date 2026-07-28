@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   applyEnvironment,
+  createNativePackageManager,
   createNativePluginManager,
   inspectEnvironmentStatus,
   listEnvironments,
@@ -12,6 +13,7 @@ import {
   uninstallEnvironment,
   type EnvironmentPaths,
   type NativePluginManager,
+  type NativePackageManager,
 } from "../src/environments.js";
 
 test("environment plans compose conditional instructions and provider assets", async () => {
@@ -65,6 +67,108 @@ requires = ["definitely-not-installed"]
       plan.resources.find((resource) => resource.category === "skill")?.target,
       path.join(codexHome, "skills", "example-skill"),
     );
+  });
+});
+
+test("Pi environments target native instructions, skills, configs, and packages", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const directory = await writeEnvironment(root, "pi_native", {
+      manifest: `
+version = 1
+name = "pi_native"
+
+[providers.pi]
+instructions = ["snippets/pi.md"]
+skills = ["skills/pi-skill"]
+packages = ["npm:@acme/pi-tools@1.2.3"]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "snippets/pi.md": "# Pi instructions\n",
+        "skills/pi-skill/SKILL.md": "# Pi skill\n",
+        "configs/settings.json": "{}\n",
+      },
+    });
+    const plan = await loadEnvironmentPlan(
+      "pi_native",
+      paths,
+      path.join(directory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    assert.deepEqual(plan.packages, [
+      { provider: "pi", source: "npm:@acme/pi-tools@1.2.3" },
+    ]);
+    assert.equal(
+      plan.resources.find((resource) => resource.category === "instructions")
+        ?.target,
+      path.join(piHome, "AGENTS.md"),
+    );
+    assert.equal(
+      plan.resources.find((resource) => resource.category === "skill")?.target,
+      path.join(piHome, "skills", "pi-skill"),
+    );
+    assert.equal(
+      plan.resources.find((resource) => resource.category === "config")?.target,
+      path.join(piHome, "settings.json"),
+    );
+  });
+});
+
+test("Pi package ownership is idempotent and removes only environment installs", async () => {
+  await withEnvironment(async ({ root, paths }) => {
+    const directory = await writeEnvironment(root, "pi_packages", {
+      manifest: `
+version = 1
+name = "pi_packages"
+[providers.pi]
+packages = ["npm:managed@1.0.0", "npm:existing@2.0.0"]
+`,
+      files: {},
+    });
+    const installed = new Set(["npm:existing@2.0.0"]);
+    const events: string[] = [];
+    const packageManager: NativePackageManager = {
+      async isInstalled(source) {
+        return installed.has(source);
+      },
+      async install(source) {
+        installed.add(source);
+        events.push(`install:${source}`);
+      },
+      async uninstall(source) {
+        installed.delete(source);
+        events.push(`uninstall:${source}`);
+      },
+    };
+    const plan = await loadEnvironmentPlan(
+      "pi_packages",
+      paths,
+      path.join(directory, "environment.toml"),
+    );
+    const applied = await applyEnvironment(plan, paths, { packageManager });
+    assert.equal(applied.installedPackages, 1);
+    assert.equal(
+      (await inspectEnvironmentStatus(
+        plan,
+        paths,
+        undefined,
+        packageManager,
+      )).current,
+      true,
+    );
+    const uninstalled = await uninstallEnvironment(paths, "pi_packages", {
+      packageManager,
+    });
+    assert.equal(uninstalled.removedPackages, 1);
+    assert.deepEqual(events, [
+      "install:npm:managed@1.0.0",
+      "uninstall:npm:managed@1.0.0",
+    ]);
+    assert.equal(installed.has("npm:existing@2.0.0"), true);
   });
 });
 
@@ -239,11 +343,42 @@ test("native plugin manager uses provider plugin commands and reads their JSON",
   ]);
 });
 
+test("native Pi package manager uses package commands and parses user package sources", async () => {
+  const calls: string[] = [];
+  const manager = createNativePackageManager(async (command, args) => {
+    calls.push(`${command} ${args.join(" ")}`);
+    if (args[0] === "list") {
+      return {
+        stdout:
+          "User packages:\n  npm:@acme/tools@1.2.3\n    /tmp/acme\n  git:github.com/acme/pi-ext@v2 (filtered)\nProject packages:\n  npm:project-only@1.0.0\n    /tmp/project\n",
+        stderr: "",
+      };
+    }
+    return { stdout: "", stderr: "" };
+  });
+  assert.equal(await manager.isInstalled("npm:@acme/tools@1.2.3"), true);
+  assert.equal(
+    await manager.isInstalled("git:github.com/acme/pi-ext@v2"),
+    true,
+  );
+  assert.equal(await manager.isInstalled("npm:project-only@1.0.0"), false);
+  await manager.install("npm:@acme/tools@1.2.3");
+  await manager.uninstall("npm:@acme/tools@1.2.3");
+  assert.deepEqual(calls, [
+    "pi list --no-approve",
+    "pi list --no-approve",
+    "pi list --no-approve",
+    "pi install npm:@acme/tools@1.2.3 --no-approve",
+    "pi remove npm:@acme/tools@1.2.3 --no-approve",
+  ]);
+});
+
 async function withEnvironment(
   callback: (context: {
     readonly root: string;
     readonly paths: EnvironmentPaths;
     readonly codexHome: string;
+    readonly piHome: string;
   }) => Promise<void>,
 ): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-environment-"));
@@ -252,8 +387,9 @@ async function withEnvironment(
     stateRoot: path.join(root, "state", "jaeger", "environment"),
   };
   const codexHome = path.join(root, "codex");
+  const piHome = path.join(root, "pi", "agent");
   try {
-    await callback({ root, paths, codexHome });
+    await callback({ root, paths, codexHome, piHome });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

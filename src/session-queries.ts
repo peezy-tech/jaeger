@@ -109,6 +109,19 @@ export async function submitSessionQuery(
   const timeoutMs = checkedTimeout(options.timeoutMs);
   const journal = await admittedJournal(options.stateDir, options.runId, options.backend);
   const session = await resolveSession(journal.runDir, options.selector);
+  const adapter = harnessesForRun(journal.record).get(session.harness);
+  if (!adapter) {
+    throw new BackendRpcError(
+      "session_not_available",
+      `No session adapter is installed for ${session.harness}`,
+    );
+  }
+  if (adapter.driver === "pi-rpc" && session.status === "running") {
+    throw new BackendRpcError(
+      "session_not_available",
+      `Pi session ${session.id} must be idle before it can be forked for a query`,
+    );
+  }
   if (!session.nativeSessionId) {
     throw new BackendRpcError(
       "session_not_available",

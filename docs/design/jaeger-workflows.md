@@ -231,7 +231,9 @@ native active-turn steering. The Claude Agent SDK exposes streaming input and
 native interrupt but no equivalent append-to-active-turn call, so every surface
 using the Claude Agent SDK driver defines steering as interrupting the current
 response and immediately continuing with the supplied message in the same
-persisted session.
+persisted session. Pi RPC exposes native `steer` and `abort` commands; Jaeger
+does not checkpoint a Pi turn until `agent_settled`, which follows provider
+retry, compaction retry, and queued continuation processing.
 
 A user-initiated session continuation is a durable turn job, not work performed
 inside the control-plane process. The backend records the immutable request and
@@ -249,9 +251,12 @@ provider interaction, so no durable request remains indefinitely `queued`.
 A session query is a different operation from continuation. It forks the latest
 provider-native conversation into a read-only child and records an independent
 durable query job. Codex uses app-server `thread/fork`; Claude uses the Agent
-SDK fork option. Query completion never advances or rewrites the workflow-owned
-session. Claimed queries without durable results become uncertain and are not
-replayed automatically.
+SDK fork option; Pi launches `--fork` into a distinct deterministic child
+session and enables only `read`, `grep`, `find`, and `ls`. Pi parents must be
+idle before query admission because an active first turn may not yet have a
+forkable session file. Query completion never advances or rewrites the
+workflow-owned session. Claimed queries without durable results become
+uncertain and are not replayed automatically.
 
 ## Runtime and inspection contract
 
@@ -489,8 +494,10 @@ Harness environment management is an orthogonal Jaeger control plane. Workflow
 files choose a named execution surface; they do not install or mutate that
 surface. `jaeger env` instead reconciles provider-native instruction files,
 skills, plugins, configuration, and the optional Jaeger harness registry from a
-declarative user environment. Codex and Claude remain responsible for loading
-and executing their own native capabilities.
+declarative user environment. Codex, Claude, and Pi remain responsible for
+loading and executing their own native capabilities. Pi packages are a distinct
+native resource, reconciled through Pi's package commands rather than projected
+into the Codex/Claude `plugin@marketplace` model.
 
 Only one environment is active at a time. Jaeger records exact content digests
 and any displaced user content in a private state root. Updates and profile
@@ -515,18 +522,29 @@ the outer runtime boundary, not to individual agent calls. Each `agent()` call
 starts a persisted provider session; session-persistence controls are not part
 of the workflow language because persistence is unconditional.
 
-Jaeger ships two drivers. The Codex driver uses the versioned app-server protocol
+Jaeger ships three drivers. The Codex driver uses the versioned app-server protocol
 over stdio, with no `codex exec` compatibility path. The Claude Code driver uses
 the official streaming Claude Agent SDK with persisted sessions, with no
-print-mode fallback. Transport processes may be recreated between turns;
+print-mode fallback. The Pi driver uses strict-LF JSONL RPC, persisted sessions,
+and the `agent_settled` terminal event, with no print-mode fallback. Pi's RPC
+stdout is parsed but not copied into the generic bounded transcript because its
+accumulated partial-message events can grow quadratically; stderr remains
+bounded and persisted, and each individual JSONL frame is bounded separately.
+Transport processes may be recreated between turns;
 provider-native thread/session identity is the continuity boundary.
 
 Workflow-facing harness names are registry entries, not additional protocol
-implementations. The built-in `codex` and `claude` entries select the shipped
-drivers and native commands. A user-owned configuration may add names that
+implementations. The built-in `codex`, `claude`, and `pi` entries select the
+shipped drivers and native commands. A user-owned configuration may add names that
 select one shipped driver and one launcher executable. Built-in names are
 reserved, project-local configuration is not discovered implicitly, and Jaeger
 does not store credentials or reinterpret model aliases.
+
+Built-in definitions describe supported surfaces rather than mandatory host
+dependencies. Admission pins the available built-in launchers and omits
+unavailable ones; an unavailable operator-configured custom launcher fails
+admission. Historical pinned registries remain valid when a later Jaeger
+version adds another built-in.
 
 The resolved registry is pinned into each new run record, including an absolute
 launcher path resolved at acceptance. Detached execution and later session turns
@@ -562,9 +580,9 @@ The implementation follows this boundary:
 
 - `access` and `fresh` are rejected rather than retained as compatibility
   options;
-- `codex` and `claude` are the reserved built-in harness names;
-- user-owned registry entries may add names over the shipped app-server or
-  streaming Agent SDK drivers;
+- `codex`, `claude`, and `pi` are the reserved built-in harness names;
+- user-owned registry entries may add names over the shipped app-server,
+  streaming Agent SDK, or Pi RPC drivers;
 - resolved registry definitions are pinned into new durable run records;
 - all operational CLI commands route through the shared runtime client/service
   contract;

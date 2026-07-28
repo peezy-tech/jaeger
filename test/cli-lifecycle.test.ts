@@ -623,6 +623,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const claudePath = path.join(binDir, "claude");
   await writeFile(claudePath, "#!/bin/sh\nexit 0\n", "utf8");
   await chmod(claudePath, 0o755);
+  const piPath = path.join(binDir, "pi");
+  await writeFile(piPath, "#!/bin/sh\nexit 0\n", "utf8");
+  await chmod(piPath, 0o755);
   return {
     root,
     workflowPath,

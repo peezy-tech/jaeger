@@ -3,7 +3,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonSchema = Record<string, unknown>;
 
 export type HarnessName = string;
-export type HarnessDriver = "codex-app-server" | "claude-agent-sdk";
+export type HarnessDriver = "codex-app-server" | "claude-agent-sdk" | "pi-rpc";
 
 export interface HarnessDefinition {
   readonly name: HarnessName;

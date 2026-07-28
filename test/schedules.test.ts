@@ -39,6 +39,11 @@ const harnesses: readonly HarnessDefinition[] = [
     driver: "claude-agent-sdk",
     command: "/bin/true",
   },
+  {
+    name: "pi",
+    driver: "pi-rpc",
+    command: "/bin/true",
+  },
 ];
 const cliPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/cli.js");
 
@@ -110,7 +115,7 @@ test("remote schedule admission pins local source paths and resolves only the ta
   const remoteWorkspace = path.join(root, "remote-workspace");
   const binDir = path.join(root, "bin");
   await Promise.all([mkdir(remoteWorkspace), mkdir(binDir)]);
-  for (const name of ["codex", "claude"]) {
+  for (const name of ["codex", "claude", "pi"]) {
     const command = path.join(binDir, name);
     await writeFile(command, "#!/bin/sh\nexit 0\n");
     await chmod(command, 0o755);
@@ -416,7 +421,7 @@ test(
     const fixture = await scheduleFixture(t);
     const binDir = path.join(fixture.root, "bin");
     await mkdir(binDir);
-    for (const name of ["codex", "claude"]) {
+    for (const name of ["codex", "claude", "pi"]) {
       const command = path.join(binDir, name);
       await writeFile(command, "#!/bin/sh\nexit 0\n");
       await chmod(command, 0o755);

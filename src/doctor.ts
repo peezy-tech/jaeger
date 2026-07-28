@@ -5,6 +5,7 @@ import { builtinHarnessDefinitions } from "./harnesses/registry.js";
 import type { HarnessDefinition } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const MINIMUM_PI_RPC_VERSION = [0, 80, 4] as const;
 
 export async function doctor(
   definitions: readonly HarnessDefinition[] = builtinHarnessDefinitions(),
@@ -52,7 +53,9 @@ export async function inspectHarnesses(
           ["--version"],
           definition.driver === "codex-app-server"
             ? ["app-server", "--help"]
-            : ["--version"],
+            : definition.driver === "pi-rpc"
+              ? ["--help"]
+              : ["--version"],
           timeoutMs,
         ),
     ),
@@ -76,11 +79,13 @@ async function inspectHarness(
       encoding: "utf8",
       timeout: timeoutMs,
     });
+    const version = (stdout || stderr).trim();
+    if (transport === "pi-rpc") assertSupportedPiVersion(version);
     return {
       name,
       transport,
       available: true,
-      version: (stdout || stderr).trim(),
+      version,
     };
   } catch (error) {
     return {
@@ -89,5 +94,23 @@ async function inspectHarness(
       available: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+export function assertSupportedPiVersion(version: string): void {
+  const match = version.match(/(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:\s|$)/);
+  if (!match) {
+    throw new Error(`Could not parse Pi version: ${version || "(empty)"}`);
+  }
+  const installed = match.slice(1).map(Number);
+  for (let index = 0; index < MINIMUM_PI_RPC_VERSION.length; index++) {
+    const actual = installed[index] ?? 0;
+    const minimum = MINIMUM_PI_RPC_VERSION[index] as number;
+    if (actual > minimum) return;
+    if (actual < minimum) {
+      throw new Error(
+        `Pi ${version} is unsupported; pi-rpc requires Pi 0.80.4 or newer`,
+      );
+    }
   }
 }
