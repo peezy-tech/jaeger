@@ -247,7 +247,6 @@ packages = ["npm:existing@2.0.0"]
       "pi list --no-approve",
       "pi install npm:existing@2.0.0 --no-approve",
       "pi list --no-approve",
-      "pi list --no-approve",
       "pi install npm:existing@1.0.0 --no-approve",
     ]);
   });
@@ -295,9 +294,162 @@ packages = ["https://github.com/acme/pi-ext.git@v2"]
     assert.deepEqual(calls, [
       "pi list --no-approve",
       "pi install https://github.com/acme/pi-ext.git@v2 --no-approve",
-      "pi list --no-approve",
       "pi install git:git@github.com:acme/pi-ext@v1 --no-approve",
     ]);
+  });
+});
+
+test("Pi environments capture a displaced package before replacing managed settings", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const directory = await writeEnvironment(root, "pi_settings", {
+      manifest: `
+version = 1
+name = "pi_settings"
+[providers.pi]
+packages = ["npm:existing@2.0.0"]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json": `{"theme":"dark"}\n`,
+      },
+    });
+    await mkdir(piHome, { recursive: true });
+    const settingsPath = path.join(piHome, "settings.json");
+    await writeFile(
+      settingsPath,
+      JSON.stringify({
+        theme: "light",
+        packages: ["npm:existing@1.0.0"],
+      }),
+    );
+    const calls: string[] = [];
+    const packageManager = createNativePackageManager(
+      async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as Record<string, unknown>;
+        if (args[0] === "install") {
+          await writeFile(
+            settingsPath,
+            JSON.stringify({ ...settings, packages: [args[1]] }),
+          );
+        }
+        return {
+          stdout:
+            args[0] === "list"
+              ? `User packages:\n  ${(settings.packages as string[])[0] ?? ""}\n`
+              : "",
+          stderr: "",
+        };
+      },
+    );
+    const plan = await loadEnvironmentPlan(
+      "pi_settings",
+      paths,
+      path.join(directory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    await applyEnvironment(plan, paths, { force: true, packageManager });
+    const state = JSON.parse(
+      await readFile(path.join(paths.stateRoot, "active.json"), "utf8"),
+    ) as {
+      readonly packages: readonly {
+        readonly previousSource?: string;
+      }[];
+    };
+    assert.equal(
+      state.packages[0]?.previousSource,
+      "npm:existing@1.0.0",
+    );
+    await uninstallEnvironment(paths, "pi_settings", { packageManager });
+    const restoredSettings = JSON.parse(
+      await readFile(settingsPath, "utf8"),
+    ) as {
+      readonly theme: string;
+      readonly packages: readonly string[];
+    };
+    assert.deepEqual(restoredSettings, {
+      theme: "light",
+      packages: ["npm:existing@1.0.0"],
+    });
+    assert.deepEqual(calls, [
+      "pi list --no-approve",
+      "pi install npm:existing@2.0.0 --no-approve",
+      "pi install npm:existing@1.0.0 --no-approve",
+    ]);
+  });
+});
+
+test("Pi package recovery retries when the managed version is absent", async () => {
+  await withEnvironment(async ({ root, paths }) => {
+    const directory = await writeEnvironment(root, "pi_packages", {
+      manifest: `
+version = 1
+name = "pi_packages"
+[providers.pi]
+packages = ["npm:existing@2.0.0"]
+`,
+      files: {},
+    });
+    let installedSource = "npm:existing@1.0.0";
+    let failRecovery = true;
+    const packageManager = createNativePackageManager(
+      async (_command, args) => {
+        if (
+          args[0] === "install" &&
+          args[1] === "npm:existing@1.0.0" &&
+          failRecovery
+        ) {
+          failRecovery = false;
+          throw new Error("recovery failed");
+        }
+        if (args[0] === "install") installedSource = args[1] as string;
+        return {
+          stdout:
+            args[0] === "list"
+              ? installedSource
+                ? `User packages:\n  ${installedSource}\n`
+                : "No packages installed.\n"
+              : "",
+          stderr: "",
+        };
+      },
+    );
+    const plan = await loadEnvironmentPlan(
+      "pi_packages",
+      paths,
+      path.join(directory, "environment.toml"),
+    );
+    await applyEnvironment(plan, paths, { packageManager });
+    installedSource = "";
+
+    await assert.rejects(
+      () => uninstallEnvironment(paths, "pi_packages", { packageManager }),
+      /recovery failed/,
+    );
+    const checkpoint = JSON.parse(
+      await readFile(path.join(paths.stateRoot, "active.json"), "utf8"),
+    ) as {
+      readonly packages: readonly {
+        readonly previousSource?: string;
+      }[];
+    };
+    assert.equal(
+      checkpoint.packages[0]?.previousSource,
+      "npm:existing@1.0.0",
+    );
+
+    await uninstallEnvironment(paths, "pi_packages", { packageManager });
+    assert.equal(installedSource, "npm:existing@1.0.0");
+    await assert.rejects(
+      () => readFile(path.join(paths.stateRoot, "active.json")),
+      /ENOENT/,
+    );
   });
 });
 
@@ -323,7 +475,17 @@ target = "$PI_CODING_AGENT_DIR/settings.json"
     const packageManager: NativePackageManager = {
       async isInstalled(source) {
         const settings = JSON.parse(
-          await readFile(settingsPath, "utf8"),
+          await readFile(settingsPath, "utf8").catch((error: unknown) => {
+            if (
+              error &&
+              typeof error === "object" &&
+              "code" in error &&
+              error.code === "ENOENT"
+            ) {
+              return "{}";
+            }
+            throw error;
+          }),
         ) as { readonly packages?: readonly string[] };
         return settings.packages?.includes(source) === true;
       },
@@ -494,7 +656,7 @@ packages = ["npm:first@1.0.0", "npm:second@2.0.0"]
   });
 });
 
-test("resource ownership survives a Pi package probe failure", async () => {
+test("a Pi package probe failure leaves managed resources untouched", async () => {
   await withEnvironment(async ({ root, paths, piHome }) => {
     const directory = await writeEnvironment(root, "pi_probe", {
       manifest: `
@@ -539,18 +701,16 @@ packages = ["npm:managed@1.0.0"]
       () => applyEnvironment(plan, paths, { force: true, packageManager }),
       /Pi unavailable/,
     );
-    const checkpoint = JSON.parse(
-      await readFile(path.join(paths.stateRoot, "active.json"), "utf8"),
-    ) as {
-      readonly resources: readonly {
-        readonly target: string;
-        readonly backup?: string;
-      }[];
-    };
-    assert.equal(checkpoint.resources[0]?.target, instructionsTarget);
-    assert.ok(checkpoint.resources[0]?.backup);
+    assert.equal(
+      await readFile(instructionsTarget, "utf8"),
+      "# Original Pi instructions\n",
+    );
+    await assert.rejects(
+      () => readFile(path.join(paths.stateRoot, "active.json")),
+      /ENOENT/,
+    );
 
-    await applyEnvironment(plan, paths, { packageManager });
+    await applyEnvironment(plan, paths, { force: true, packageManager });
     await uninstallEnvironment(paths, "pi_probe", { packageManager });
     assert.equal(
       await readFile(instructionsTarget, "utf8"),

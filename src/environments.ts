@@ -477,6 +477,17 @@ export async function applyEnvironment(
   let removedPackages = 0;
   const statePath = path.join(paths.stateRoot, "active.json");
   const appliedAt = new Date().toISOString();
+  const packageManager = options.packageManager ?? nativePackageManager;
+  const installedPackageSources = new Map<string, string | undefined>();
+  for (const packageDefinition of plan.packages) {
+    installedPackageSources.set(
+      packageIdentityKey(packageDefinition),
+      await findInstalledPackageSource(
+        packageManager,
+        packageDefinition.source,
+      ),
+    );
+  }
   const persistState = async (
     resources: readonly ManagedResource[],
     plugins: readonly ManagedPlugin[],
@@ -564,7 +575,6 @@ export async function applyEnvironment(
     nextPlugins,
     previous?.packages ?? [],
   );
-  const packageManager = options.packageManager ?? nativePackageManager;
   const desiredPackageIdentities = new Set(
     plan.packages.map(packageIdentityKey),
   );
@@ -576,10 +586,12 @@ export async function applyEnvironment(
   );
   for (const old of previous?.packages ?? []) {
     if (desiredPackageIdentities.has(packageIdentityKey(old))) continue;
-    if (!(await packageManager.isInstalled(old.source))) continue;
     if (old.previousSource) {
       await packageManager.install(old.previousSource);
-    } else if (old.installedByEnvironment) {
+    } else if (
+      old.installedByEnvironment &&
+      (await packageManager.isInstalled(old.source))
+    ) {
       await packageManager.uninstall(old.source);
       removedPackages += 1;
     }
@@ -589,9 +601,8 @@ export async function applyEnvironment(
     const previousPackage = previousPackages.get(
       packageIdentityKey(packageDefinition),
     );
-    const installedSource = await findInstalledPackageSource(
-      packageManager,
-      packageDefinition.source,
+    const installedSource = installedPackageSources.get(
+      packageIdentityKey(packageDefinition),
     );
     const installed =
       installedSource !== undefined &&
@@ -674,12 +685,12 @@ export async function uninstallEnvironment(
   }
   const packageManager = options.packageManager ?? nativePackageManager;
   for (const packageDefinition of state.packages) {
-    if (!(await packageManager.isInstalled(packageDefinition.source))) {
-      continue;
-    }
     if (packageDefinition.previousSource) {
       await packageManager.install(packageDefinition.previousSource);
-    } else if (packageDefinition.installedByEnvironment) {
+    } else if (
+      packageDefinition.installedByEnvironment &&
+      (await packageManager.isInstalled(packageDefinition.source))
+    ) {
       await packageManager.uninstall(packageDefinition.source);
       removedPackages += 1;
     }
