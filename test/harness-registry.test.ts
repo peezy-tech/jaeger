@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -52,6 +52,53 @@ test("loads custom harness surfaces without replacing built-in drivers", async (
   );
   assert.equal(adapters.get("gateway-pi")?.driver, "pi-rpc");
   assert.equal(adapters.get("gateway-pi")?.name, "gateway-pi");
+});
+
+test("loads and pins a legacy custom harness named pi", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-harness-legacy-pi-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const bin = path.join(root, "bin");
+  const configPath = path.join(root, "harnesses.json");
+  await mkdir(bin);
+  for (const command of ["codex", "claude"]) {
+    const executable = path.join(bin, command);
+    await writeFile(executable, "#!/bin/sh\nexit 0\n");
+    await chmod(executable, 0o755);
+  }
+  await writeFile(
+    configPath,
+    `${JSON.stringify({
+      version: 1,
+      harnesses: {
+        pi: {
+          driver: "codex-app-server",
+          command: process.execPath,
+          description: "Legacy Pi gateway",
+        },
+      },
+    })}\n`,
+  );
+
+  const loaded = await loadHarnessDefinitions(configPath);
+  assert.deepEqual(
+    loaded.map((definition) => definition.name),
+    ["codex", "claude", "pi"],
+  );
+  assert.equal(loaded.find((definition) => definition.name === "pi")?.driver, "codex-app-server");
+  const pinned = await pinHarnessDefinitions(loaded, { PATH: bin });
+  assert.equal(pinned.find((definition) => definition.name === "pi")?.command, process.execPath);
+  assert.equal(harnessesFromDefinitions(pinned).get("pi")?.driver, "codex-app-server");
+  await assert.rejects(
+    pinHarnessDefinitions(
+      loaded.map((definition) =>
+        definition.name === "pi"
+          ? { ...definition, command: "missing-legacy-pi" }
+          : definition,
+      ),
+      { PATH: bin },
+    ),
+    /Cannot pin unavailable harness command: missing-legacy-pi/,
+  );
 });
 
 test("pins every service harness launcher to an absolute executable", async () => {

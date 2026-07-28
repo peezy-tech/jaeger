@@ -87,6 +87,43 @@ return "ok"
   assert.equal(resumed.result, "ok");
 });
 
+test("workflow admission and resume preserve a legacy custom harness named pi", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-legacy-pi-registry-"));
+  const workflowPath = path.join(root, "workflow.js");
+  const stateDir = path.join(root, "state");
+  await writeFile(
+    workflowPath,
+    `
+export const meta = { name: "legacy pi registry" }
+return "ok"
+`,
+  );
+  const definitions = [
+    ...builtinHarnessDefinitions().filter((definition) => definition.name !== "pi"),
+    {
+      name: "pi",
+      driver: "codex-app-server" as const,
+      command: process.execPath,
+    },
+  ];
+
+  const first = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir,
+    harnessDefinitions: definitions,
+  });
+  const resumed = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir,
+    resumeRunId: first.runId,
+    harnessDefinitions: definitions,
+  });
+  assert.equal(resumed.runId, first.runId);
+  assert.equal(resumed.result, "ok");
+});
+
 test("mixes harnesses, preserves parallel order, and replays a completed run", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-runtime-"));
   const workflowPath = path.join(root, "workflow.js");

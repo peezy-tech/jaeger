@@ -145,7 +145,11 @@ export async function prepareWorkflowRun(
   const harnesses = validateHarnessDefinitions(
     options.harnessDefinitions ?? builtinHarnessDefinitions(),
     options.harnessDefinitions
-      ? { allowPinnedBuiltins: true, allowMissingBuiltins: true }
+      ? {
+          allowPinnedBuiltins: true,
+          allowMissingBuiltins: true,
+          allowLegacyCustomBuiltins: true,
+        }
       : {},
   );
   const backend = options.backend ?? "embedded";
@@ -264,12 +268,14 @@ export async function openWorkflowForResume(
     const requested = validateHarnessDefinitions(options.harnessDefinitions, {
       allowPinnedBuiltins: true,
       allowMissingBuiltins: true,
+      allowLegacyCustomBuiltins: true,
     });
     const pinned =
       journal.record.version === 3 || journal.record.version === 4
         ? validateHarnessDefinitions(journal.record.harnesses, {
             allowPinnedBuiltins: true,
             allowMissingBuiltins: true,
+            allowLegacyCustomBuiltins: true,
           })
         : builtinHarnessDefinitions();
     if (

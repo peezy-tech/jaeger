@@ -59,7 +59,14 @@ export async function loadHarnessDefinitions(
     throw new Error(`Jaeger harness config is not valid JSON: ${resolvedPath}`, { cause: error });
   }
   const custom = parseHarnessConfig(value, resolvedPath);
-  return validateHarnessDefinitions([...BUILTIN_DEFINITIONS, ...custom]);
+  const customNames = new Set(custom.map((definition) => definition.name));
+  return validateHarnessDefinitions(
+    [
+      ...BUILTIN_DEFINITIONS.filter((definition) => !customNames.has(definition.name)),
+      ...custom,
+    ],
+    { allowLegacyCustomBuiltins: true },
+  );
 }
 
 export function validateHarnessDefinitions(
@@ -108,7 +115,9 @@ export async function pinHarnessDefinitions(
   value: unknown,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<readonly HarnessDefinition[]> {
-  const definitions = validateHarnessDefinitions(value);
+  const definitions = validateHarnessDefinitions(value, {
+    allowLegacyCustomBuiltins: true,
+  });
   const pinned: HarnessDefinition[] = [];
   for (const definition of definitions) {
     try {
@@ -120,12 +129,13 @@ export async function pinHarnessDefinitions(
       // Built-ins describe supported surfaces, not mandatory host
       // dependencies. Preserve every available built-in in the run record and
       // fail closed for an explicitly configured custom launcher.
-      if (!BUILTIN_NAMES.has(definition.name)) throw error;
+      if (!isCurrentBuiltinDefinition(definition)) throw error;
     }
   }
   return validateHarnessDefinitions(pinned, {
     allowPinnedBuiltins: true,
     allowMissingBuiltins: true,
+    allowLegacyCustomBuiltins: true,
   });
 }
 
@@ -135,6 +145,7 @@ export function harnessesFromDefinitions(
   const validated = validateHarnessDefinitions(definitions, {
     allowPinnedBuiltins: true,
     allowMissingBuiltins: true,
+    allowLegacyCustomBuiltins: true,
   });
   return adaptersFromDefinitions(validated);
 }
@@ -198,14 +209,31 @@ function parseHarnessConfig(value: unknown, configPath: string): HarnessDefiniti
   }
   return Object.entries(config.harnesses as Record<string, unknown>).map(([name, definition]) => {
     validateHarnessName(name);
-    if (BUILTIN_NAMES.has(name)) {
-      throw new Error(`Custom harness cannot replace built-in harness ${name}`);
-    }
     if (!definition || typeof definition !== "object" || Array.isArray(definition)) {
       throw new Error(`Custom harness ${name} must be an object`);
     }
-    return parseHarnessDefinition({ name, ...(definition as Record<string, unknown>) }, name);
+    const parsed = parseHarnessDefinition(
+      { name, ...(definition as Record<string, unknown>) },
+      name,
+    );
+    if (BUILTIN_NAMES.has(name) && !isLegacyCustomBuiltinDefinition(parsed)) {
+      throw new Error(`Custom harness cannot replace built-in harness ${name}`);
+    }
+    return parsed;
   });
+}
+
+function isCurrentBuiltinDefinition(definition: HarnessDefinition): boolean {
+  return BUILTIN_DEFINITIONS.some(
+    (builtin) => builtin.name === definition.name && builtin.driver === definition.driver,
+  );
+}
+
+function isLegacyCustomBuiltinDefinition(definition: HarnessDefinition): boolean {
+  return (
+    LEGACY_CUSTOM_BUILTIN_NAMES.has(definition.name) &&
+    !isCurrentBuiltinDefinition(definition)
+  );
 }
 
 function parseHarnessDefinition(value: unknown, label: string): HarnessDefinition {

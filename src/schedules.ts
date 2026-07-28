@@ -1089,6 +1089,7 @@ function validateScheduleRevision(
   validateHarnessDefinitions(revision.harnesses, {
     allowPinnedBuiltins: true,
     allowMissingBuiltins: true,
+    allowLegacyCustomBuiltins: true,
   });
   const {
     revision: _revision,
