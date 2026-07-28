@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -208,19 +209,21 @@ test("Pi forks a read-only side-query with a distinct deterministic session", as
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-fork-"));
   const command = path.join(root, "fake-pi");
   await executable(command, piRpcScript());
+  const queryId = "query-abcd:efgh";
   const input: AgentRequest = {
-    ...request(root, "pi", new FakeSession()),
+    ...request(root, "pi", new FakeSession(undefined, [], queryId)),
     forkSessionId: "pi-parent",
     readOnly: true,
   };
   const result = await new PiHarness(command).execute(input);
 
-  assert.equal(result.nativeSessionId, "session-test");
+  const expectedSessionId = `jaeger-${createHash("sha256").update(queryId).digest("hex")}`;
+  assert.equal(result.nativeSessionId, expectedSessionId);
   const args = JSON.parse(
     await readFile(path.join(root, "pi-args.json"), "utf8"),
   ) as string[];
   assert.equal(args[args.indexOf("--fork") + 1], "pi-parent");
-  assert.equal(args[args.indexOf("--session-id") + 1], "session-test");
+  assert.equal(args[args.indexOf("--session-id") + 1], expectedSessionId);
   assert.equal(args.includes("--no-approve"), true);
   assert.equal(args.includes("--approve"), false);
   assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls");
@@ -479,7 +482,6 @@ test("Claude requires the dedicated structured output field when a schema is req
 });
 
 class FakeSession implements SessionTurn {
-  readonly id = "session-test";
   nativeSessionId: string | undefined;
   providerId: string | undefined;
   turnId: string | undefined;
@@ -489,6 +491,7 @@ class FakeSession implements SessionTurn {
   constructor(
     nativeSessionId?: string,
     private readonly controls: SessionControlRequest[] = [],
+    readonly id = "session-test",
   ) {
     this.nativeSessionId = nativeSessionId;
   }

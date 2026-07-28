@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { UncertainAgentRunError } from "../src/errors.js";
+import { builtinHarnessDefinitions } from "../src/harnesses/registry.js";
 import { prepareWorkflowRun, runWorkflow } from "../src/runtime.js";
 import type { AgentRequest, HarnessAdapter, HarnessResult } from "../src/types.js";
 
@@ -39,6 +40,34 @@ return "ok"
   });
   assert.equal(prepared.scriptPath, workflowPath);
   assert.equal(prepared.staged?.record.workflowPath, workflowPath);
+});
+
+test("workflow admission accepts a pinned registry with unavailable built-ins omitted", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-partial-registry-"));
+  const workflowPath = path.join(root, "workflow.js");
+  await writeFile(
+    workflowPath,
+    `
+export const meta = { name: "partial registry" }
+return "ok"
+`,
+  );
+  const codex = builtinHarnessDefinitions().find((definition) => definition.name === "codex");
+  assert.ok(codex);
+  const prepared = await prepareWorkflowRun({
+    workflowPath,
+    cwd: root,
+    stateDir: path.join(root, "state"),
+    harnessDefinitions: [{ ...codex, command: process.execPath }],
+    stageOnly: true,
+  });
+  const record = prepared.staged?.record;
+  assert.equal(record?.version, 4);
+  if (!record || record.version !== 4) assert.fail("expected a version 4 run record");
+  assert.deepEqual(
+    record.harnesses.map((definition) => definition.name),
+    ["codex"],
+  );
 });
 
 test("mixes harnesses, preserves parallel order, and replays a completed run", async () => {

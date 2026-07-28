@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -62,7 +63,9 @@ export class PiHarness implements HarnessAdapter {
     const sessionDirectory = path.join(request.runDir, "harness", "pi-sessions");
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
     await chmod(sessionDirectory, 0o700);
-    const nativeSessionId = request.session.nativeSessionId ?? request.session.id;
+    const nativeSessionId = piSessionId(
+      request.session.nativeSessionId ?? request.session.id,
+    );
     const args = [
       "--mode",
       "rpc",
@@ -176,6 +179,11 @@ export class PiHarness implements HarnessAdapter {
       abort.dispose();
     }
   }
+}
+
+function piSessionId(value: string): string {
+  if (/^[A-Za-z0-9._-]+$/.test(value)) return value;
+  return `jaeger-${createHash("sha256").update(value).digest("hex")}`;
 }
 
 class PiRpcClient {

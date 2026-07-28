@@ -33,6 +33,10 @@ import {
   isProcessIdentityActive,
 } from "./process-identity.js";
 import { resolveSession } from "./sessions.js";
+import {
+  clearSessionQueryReservation,
+  reserveSessionForQuery,
+} from "./session-turns.js";
 import type {
   AgentRequest,
   JsonValue,
@@ -116,7 +120,7 @@ export async function submitSessionQuery(
       `No session adapter is installed for ${session.harness}`,
     );
   }
-  if (adapter.driver === "pi-rpc" && session.status === "running") {
+  if (adapter.driver === "pi-rpc" && session.status !== "idle") {
     throw new BackendRpcError(
       "session_not_available",
       `Pi session ${session.id} must be idle before it can be forked for a query`,
@@ -169,6 +173,9 @@ export async function submitSessionQuery(
     backend: options.backend,
   });
   if (summary.status !== "queued") return summary;
+  if (adapter.driver === "pi-rpc") {
+    await reserveSessionForQuery(journal.runDir, request);
+  }
   if (options.launch === false) return summary;
   await launchSessionQueryWorker(options, request, journal.runDir);
   return await inspectSessionQuery({
@@ -191,7 +198,10 @@ export async function inspectSessionQuery(input: {
     if (hasCode(error, "ENOENT")) return undefined;
     throw error;
   });
-  if (result) return publicSummary(request, result.status, result);
+  if (result) {
+    await clearSessionQueryReservation(journal.runDir, request);
+    return publicSummary(request, result.status, result);
+  }
   const owner = await readOwner(journal.runDir, request).catch((error: unknown) => {
     if (hasCode(error, "ENOENT")) return undefined;
     throw error;
@@ -219,6 +229,7 @@ export async function inspectSessionQuery(input: {
     finishedAt: new Date().toISOString(),
   };
   await publishResult(journal.runDir, request, uncertain);
+  await clearSessionQueryReservation(journal.runDir, request);
   return publicSummary(request, "uncertain", uncertain);
 }
 
@@ -295,9 +306,17 @@ export async function executeSessionQueryWorker(input: {
   }
   try {
     await readResult(journal.runDir, request);
+    await clearSessionQueryReservation(journal.runDir, request);
     return;
   } catch (error) {
     if (!hasCode(error, "ENOENT")) throw error;
+  }
+  const session = await resolveSession(journal.runDir, request.sessionId);
+  const adapter = harnessesForRun(journal.record).get(session.harness);
+  if (!adapter) throw new Error(`No session adapter is installed for ${session.harness}`);
+  const reserved = adapter.driver === "pi-rpc";
+  if (reserved) {
+    await reserveSessionForQuery(journal.runDir, request);
   }
   const owner: SessionQueryOwner = {
     version: 1,
@@ -308,9 +327,6 @@ export async function executeSessionQueryWorker(input: {
     claimedAt: new Date().toISOString(),
   };
   if (!(await publishJsonExclusive(ownerPath(journal.runDir, request), owner))) return;
-  const session = await resolveSession(journal.runDir, request.sessionId);
-  const adapter = harnessesForRun(journal.record).get(session.harness);
-  if (!adapter) throw new Error(`No session adapter is installed for ${session.harness}`);
   const passive = new QuerySession(request.queryId);
   const agentRequest: AgentRequest = {
     harness: session.harness,
@@ -356,6 +372,10 @@ export async function executeSessionQueryWorker(input: {
       if (!hasCode(publishError, "EEXIST")) throw publishError;
     });
     throw error;
+  } finally {
+    if (reserved) {
+      await clearSessionQueryReservation(journal.runDir, request);
+    }
   }
 }
 

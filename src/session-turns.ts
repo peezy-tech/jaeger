@@ -89,6 +89,14 @@ interface ActiveSessionTurn {
   readonly createdAt: string;
 }
 
+interface ActiveSessionQuery {
+  readonly version: 1;
+  readonly queryId: string;
+  readonly requestHash: string;
+  readonly parentNativeSessionId: string;
+  readonly createdAt: string;
+}
+
 export interface SessionTurnServiceOptions {
   readonly stateDir: string;
   readonly entrypoint: string;
@@ -98,6 +106,109 @@ export interface SessionTurnServiceOptions {
 
 export function createSessionTurnId(): string {
   return `turn-${randomBytes(16).toString("hex")}`;
+}
+
+export async function reserveSessionForQuery(
+  runDir: string,
+  request: {
+    readonly sessionId: string;
+    readonly queryId: string;
+    readonly requestHash: string;
+    readonly parentNativeSessionId: string;
+    readonly createdAt: string;
+  },
+): Promise<void> {
+  const lease = await acquireActiveTurnLease(runDir, request.sessionId);
+  try {
+    let currentQuery: ActiveSessionQuery | undefined;
+    try {
+      currentQuery = await readActiveQuery(runDir, request.sessionId);
+    } catch (error) {
+      if (!hasCode(error, "ENOENT")) throw error;
+    }
+    if (
+      currentQuery?.queryId === request.queryId &&
+      currentQuery.requestHash === request.requestHash
+    ) {
+      return;
+    }
+    if (currentQuery) {
+      throw new BackendRpcError(
+        "session_busy",
+        `Pi session ${request.sessionId} already has unresolved query ${currentQuery.queryId}`,
+      );
+    }
+    try {
+      const activeTurn = await readActiveTurn(runDir, request.sessionId);
+      throw new BackendRpcError(
+        "session_busy",
+        `Pi session ${request.sessionId} already has unresolved turn ${activeTurn.turnId}`,
+      );
+    } catch (error) {
+      if (!hasCode(error, "ENOENT")) throw error;
+    }
+    const session = await resolveSession(runDir, request.sessionId);
+    if (
+      session.status !== "idle" ||
+      session.nativeSessionId !== request.parentNativeSessionId
+    ) {
+      throw new BackendRpcError(
+        "session_busy",
+        `Pi session ${request.sessionId} must remain idle at native session ${request.parentNativeSessionId} before it can be forked for a query`,
+      );
+    }
+    const active: ActiveSessionQuery = {
+      version: 1,
+      queryId: request.queryId,
+      requestHash: request.requestHash,
+      parentNativeSessionId: request.parentNativeSessionId,
+      createdAt: request.createdAt,
+    };
+    if (!(await publishJsonExclusive(activeQueryPath(runDir, request.sessionId), active))) {
+      throw new BackendRpcError(
+        "session_busy",
+        `Pi session ${request.sessionId} accepted another query before ${request.queryId}`,
+      );
+    }
+  } finally {
+    await releaseProcessLease(activeTurnLeasePath(runDir, request.sessionId), lease);
+  }
+}
+
+export async function clearSessionQueryReservation(
+  runDir: string,
+  request: {
+    readonly sessionId: string;
+    readonly queryId: string;
+    readonly requestHash: string;
+  },
+): Promise<void> {
+  try {
+    await readActiveQuery(runDir, request.sessionId);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
+    throw error;
+  }
+  const lease = await acquireActiveTurnLease(runDir, request.sessionId);
+  try {
+    let current: ActiveSessionQuery;
+    try {
+      current = await readActiveQuery(runDir, request.sessionId);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) return;
+      throw error;
+    }
+    if (
+      current.queryId !== request.queryId ||
+      current.requestHash !== request.requestHash
+    ) {
+      return;
+    }
+    await unlink(activeQueryPath(runDir, request.sessionId));
+    await syncDirectory(path.join(runDir, "sessions", request.sessionId));
+  } finally {
+    await releaseProcessLease(activeTurnLeasePath(runDir, request.sessionId), lease);
+  }
 }
 
 export async function submitSessionTurn(
@@ -583,6 +694,15 @@ async function reserveActiveTurn(runDir: string, request: SessionTurnRequest): P
     const lease = await acquireActiveTurnLease(runDir, request.sessionId);
     try {
       try {
+        const activeQuery = await readActiveQuery(runDir, request.sessionId);
+        throw new BackendRpcError(
+          "session_busy",
+          `Session ${request.sessionId} already has unresolved query ${activeQuery.queryId}`,
+        );
+      } catch (error) {
+        if (!hasCode(error, "ENOENT")) throw error;
+      }
+      try {
         current = await readActiveTurn(runDir, request.sessionId);
       } catch (error) {
         if (!hasCode(error, "ENOENT")) throw error;
@@ -655,7 +775,7 @@ async function acquireActiveTurnLease(runDir: string, sessionId: string) {
     if (error instanceof ProcessLeaseBusyError) {
       throw new BackendRpcError(
         "session_busy",
-        `Timed out serializing session ${sessionId} turn state behind PID ${error.owner.pid}`,
+        `Timed out serializing session ${sessionId} activity behind PID ${error.owner.pid}`,
       );
     }
     throw error;
@@ -699,6 +819,14 @@ async function readActiveTurn(runDir: string, sessionId: string): Promise<Active
   await assertRegularFile(target, "Jaeger active session turn");
   const value = JSON.parse(await readFile(target, "utf8")) as unknown;
   validateActiveTurn(value);
+  return value;
+}
+
+async function readActiveQuery(runDir: string, sessionId: string): Promise<ActiveSessionQuery> {
+  const target = activeQueryPath(runDir, sessionId);
+  await assertRegularFile(target, "Jaeger active session query");
+  const value = JSON.parse(await readFile(target, "utf8")) as unknown;
+  validateActiveQuery(value);
   return value;
 }
 
@@ -877,6 +1005,13 @@ function activeTurnPath(runDir: string, sessionId: string): string {
   return path.join(runDir, "sessions", sessionId, "active-turn.json");
 }
 
+function activeQueryPath(runDir: string, sessionId: string): string {
+  if (!SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error(`Invalid Jaeger session id: ${sessionId}`);
+  }
+  return path.join(runDir, "sessions", sessionId, "active-query.json");
+}
+
 function activeTurnLeasePath(runDir: string, sessionId: string): string {
   if (!SESSION_ID_PATTERN.test(sessionId)) throw new Error(`Invalid Jaeger session id: ${sessionId}`);
   return path.join(runDir, "sessions", sessionId, "active-turn.lock");
@@ -998,6 +1133,26 @@ function validateActiveTurn(value: unknown): asserts value is ActiveSessionTurn 
     Number.isNaN(Date.parse(active.createdAt))
   ) {
     throw new Error("Invalid active Jaeger session turn");
+  }
+}
+
+function validateActiveQuery(value: unknown): asserts value is ActiveSessionQuery {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid active Jaeger session query");
+  }
+  const active = value as Record<string, unknown>;
+  if (
+    active.version !== 1 ||
+    typeof active.queryId !== "string" ||
+    !/^query-[A-Za-z0-9._:-]{8,122}$/.test(active.queryId) ||
+    typeof active.requestHash !== "string" ||
+    !HASH_PATTERN.test(active.requestHash) ||
+    typeof active.parentNativeSessionId !== "string" ||
+    active.parentNativeSessionId.length === 0 ||
+    typeof active.createdAt !== "string" ||
+    Number.isNaN(Date.parse(active.createdAt))
+  ) {
+    throw new Error("Invalid active Jaeger session query");
   }
 }
 

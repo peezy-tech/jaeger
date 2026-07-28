@@ -144,7 +144,9 @@ export async function prepareWorkflowRun(
   const maxConcurrency = checkedConcurrency(options.maxConcurrency);
   const harnesses = validateHarnessDefinitions(
     options.harnessDefinitions ?? builtinHarnessDefinitions(),
-    options.harnessDefinitions ? { allowPinnedBuiltins: true } : {},
+    options.harnessDefinitions
+      ? { allowPinnedBuiltins: true, allowMissingBuiltins: true }
+      : {},
   );
   const backend = options.backend ?? "embedded";
   const observedWorkspace = await describeLocalWorkspace(cwd);
