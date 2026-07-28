@@ -10,3 +10,9 @@ instructions = ["snippets/jaeger.md"]
 
 [providers.claude]
 instructions = ["snippets/jaeger.md"]
+
+[providers.pi]
+instructions = ["snippets/jaeger.md"]
+# Pi packages use Pi-native sources and commands, not plugin@marketplace.
+# skills = ["skills/example-skill"]
+# packages = ["npm:@acme/pi-tools@1.2.3"]

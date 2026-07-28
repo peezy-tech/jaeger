@@ -3,7 +3,10 @@ import { access, mkdtemp, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { runHarnessProcess } from "../src/harnesses/process.js";
+import {
+  runHarnessProcess,
+  spawnStreamingHarnessProcess,
+} from "../src/harnesses/process.js";
 
 test("a missing systemd-run launcher rejects without an unhandled child error", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-process-missing-launcher-"));
@@ -64,6 +67,27 @@ setTimeout(() => {
   const result = await running;
   assert.equal(result.stdout, "partial\ncomplete\n");
   assert.equal(await readFile(result.stdoutPath, "utf8"), result.stdout);
+});
+
+test("streaming protocol clients can parse stdout without transcript amplification", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-process-protocol-"));
+  const transcriptDir = path.join(root, "transcript");
+  const running = spawnStreamingHarnessProcess({
+    command: process.execPath,
+    args: [
+      "-e",
+      'process.stdout.write("x".repeat(8 * 1024)); process.stderr.write("kept\\n")',
+    ],
+    cwd: root,
+    transcriptDir,
+    recordStdout: false,
+    maxOutputBytes: 1_024,
+  });
+  const result = await running.done;
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(await readFile(result.stdoutPath, "utf8"), "");
+  assert.equal(await readFile(result.stderrPath, "utf8"), "kept\n");
 });
 
 test("normal completion empties the scope even when a descendant starts a new session", async () => {

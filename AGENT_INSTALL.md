@@ -81,7 +81,8 @@ Every installation requires Git, Node.js 22.13 or newer with `npm`, and the
 `pnpm` version selected by `packageManager` in `package.json`.
 
 A Linux runtime host additionally requires cgroup v2, a working user systemd
-manager, and at least one supported native harness such as Codex or Claude Code:
+manager, and at least one supported native harness such as Codex, Claude Code,
+or Pi:
 
 ```bash
 uname -s
@@ -118,7 +119,7 @@ the machine's existing Node/Corepack toolchain. Do not choose a floating
 version. If a required prerequisite cannot be made available without elevated
 authority, stop and report it instead of weakening Jaeger's model.
 
-Do not install or authenticate Codex or Claude Code without user authorization.
+Do not install or authenticate Codex, Claude Code, or Pi without user authorization.
 An agent already running through one of them will normally satisfy the harness
 requirement.
 
@@ -269,7 +270,9 @@ If the invoking agent supports personal skills, install `skill_source` using
 that harness's native skill mechanism. Conventional destinations are
 `$CODEX_HOME/skills/jaeger-workflows` (falling back to
 `$HOME/.codex/skills/jaeger-workflows`) for Codex and
-`$HOME/.claude/skills/jaeger-workflows` for Claude Code.
+`$HOME/.claude/skills/jaeger-workflows` for Claude Code, or
+`$PI_CODING_AGENT_DIR/skills/jaeger-workflows` (falling back to
+`$HOME/.pi/agent/skills/jaeger-workflows`) for Pi.
 
 Do not overwrite an existing skill blindly. If the destination exists, compare
 it with the packaged source. Leave an identical installation alone; for a

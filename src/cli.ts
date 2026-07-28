@@ -664,14 +664,18 @@ async function envCommand(argv: string[]): Promise<void> {
     const state = await activeEnvironment(parsed.paths);
     if (parsed.json) writeJson(state ?? null);
     else if (!state) process.stdout.write("No Jaeger environment is active.\n");
-    else process.stdout.write(`${state.environment}\t${state.manifestPath}\t${state.resources.length} resource(s)\n`);
+    else {
+      process.stdout.write(
+        `${state.environment}\t${state.manifestPath}\t${state.resources.length} resource(s)\t${state.plugins.length} plugin(s)\t${state.packages.length} package(s)\n`,
+      );
+    }
     return;
   }
   if (action === "uninstall") {
     const result = await uninstallEnvironment(parsed.paths, parsed.name, { force: parsed.force });
     if (parsed.json) writeJson(result);
     else process.stdout.write(
-      `Uninstalled ${result.environment}: restored ${result.restored}, removed ${result.removed}, removed ${result.removedPlugins} plugin(s).\n`,
+      `Uninstalled ${result.environment}: restored ${result.restored}, removed ${result.removed}, removed ${result.removedPlugins} plugin(s) and ${result.removedPackages} Pi package(s).\n`,
     );
     return;
   }
@@ -692,6 +696,11 @@ async function envCommand(argv: string[]): Promise<void> {
       for (const plugin of status.plugins) {
         process.stdout.write(`${plugin.status}\t${plugin.provider}/plugin\t${plugin.selector}\n`);
       }
+      for (const packageDefinition of status.packages) {
+        process.stdout.write(
+          `${packageDefinition.status}\tpi/package\t${packageDefinition.source}\n`,
+        );
+      }
     }
     return;
   }
@@ -708,6 +717,11 @@ async function envCommand(argv: string[]): Promise<void> {
       for (const plugin of status.plugins) {
         process.stdout.write(`${plugin.status}\t${plugin.provider}/plugin\t${plugin.selector}\n`);
       }
+      for (const packageDefinition of status.packages) {
+        process.stdout.write(
+          `${packageDefinition.status}\tpi/package\t${packageDefinition.source}\n`,
+        );
+      }
       if (status.current) process.stdout.write(`Environment ${plan.name} is current.\n`);
     }
     if (!status.current) process.exitCode = 1;
@@ -716,7 +730,7 @@ async function envCommand(argv: string[]): Promise<void> {
   const result = await applyEnvironment(plan, parsed.paths, { force: parsed.force });
   if (parsed.json) writeJson(result);
   else process.stdout.write(
-    `Applied ${result.environment}: changed ${result.changed}, unchanged ${result.unchanged}, removed ${result.removed}, installed ${result.installedPlugins} and removed ${result.removedPlugins} plugin(s).\n`,
+    `Applied ${result.environment}: changed ${result.changed}, unchanged ${result.unchanged}, removed ${result.removed}; installed ${result.installedPlugins} and removed ${result.removedPlugins} plugin(s); installed ${result.installedPackages} and removed ${result.removedPackages} Pi package(s).\n`,
   );
 }
 

@@ -62,6 +62,11 @@ export interface StreamingHarnessProcessInput {
   readonly transcriptDir: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
+  /**
+   * Protocol clients may opt out when stdout contains a high-volume event
+   * stream that they parse directly. Stderr remains bounded and persisted.
+   */
+  readonly recordStdout?: boolean;
   readonly maxOutputBytes?: number;
   readonly killGraceMs?: number;
 }
@@ -196,7 +201,9 @@ export function spawnStreamingHarnessProcess(
     }
     if (accepted.length < chunk.length) terminate("output-limit");
   };
-  child.stdout.on("data", (chunk: Buffer) => record(stdoutFd, chunk));
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (input.recordStdout !== false) record(stdoutFd, chunk);
+  });
   child.stderr.on("data", (chunk: Buffer) => {
     record(stderrFd, chunk);
     stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-8_000);

@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { providerContainmentDoctor } from "./harnesses/active-process.js";
+import { assertSupportedPiVersion } from "./harnesses/pi-version.js";
 import { builtinHarnessDefinitions } from "./harnesses/registry.js";
 import type { HarnessDefinition } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+export { assertSupportedPiVersion } from "./harnesses/pi-version.js";
 
 export async function doctor(
   definitions: readonly HarnessDefinition[] = builtinHarnessDefinitions(),
@@ -52,7 +54,9 @@ export async function inspectHarnesses(
           ["--version"],
           definition.driver === "codex-app-server"
             ? ["app-server", "--help"]
-            : ["--version"],
+            : definition.driver === "pi-rpc"
+              ? ["--help"]
+              : ["--version"],
           timeoutMs,
         ),
     ),
@@ -76,11 +80,13 @@ async function inspectHarness(
       encoding: "utf8",
       timeout: timeoutMs,
     });
+    const version = (stdout || stderr).trim();
+    if (transport === "pi-rpc") assertSupportedPiVersion(version);
     return {
       name,
       transport,
       available: true,
-      version: (stdout || stderr).trim(),
+      version,
     };
   } catch (error) {
     return {

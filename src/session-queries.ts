@@ -33,6 +33,11 @@ import {
   isProcessIdentityActive,
 } from "./process-identity.js";
 import { resolveSession } from "./sessions.js";
+import {
+  clearSessionQueryReservation,
+  reserveSessionForQuery,
+  sessionQueryReservationMatches,
+} from "./session-turns.js";
 import type {
   AgentRequest,
   JsonValue,
@@ -72,7 +77,7 @@ interface SessionQueryResult {
   readonly version: 1;
   readonly queryId: string;
   readonly requestHash: string;
-  readonly status: "completed" | "uncertain";
+  readonly status: "completed" | "rejected" | "uncertain";
   readonly output?: JsonValue;
   readonly nativeSessionId?: string;
   readonly metadata?: Record<string, JsonValue>;
@@ -109,6 +114,13 @@ export async function submitSessionQuery(
   const timeoutMs = checkedTimeout(options.timeoutMs);
   const journal = await admittedJournal(options.stateDir, options.runId, options.backend);
   const session = await resolveSession(journal.runDir, options.selector);
+  const adapter = harnessesForRun(journal.record).get(session.harness);
+  if (!adapter) {
+    throw new BackendRpcError(
+      "session_not_available",
+      `No session adapter is installed for ${session.harness}`,
+    );
+  }
   if (!session.nativeSessionId) {
     throw new BackendRpcError(
       "session_not_available",
@@ -142,7 +154,36 @@ export async function submitSessionQuery(
     backend: options.backend,
     createdAt: new Date().toISOString(),
   };
-  const request = await createOrReadRequest(journal.runDir, candidate);
+  const existingRequest = await readRequest(
+    journal.runDir,
+    options.queryId,
+  ).catch((error: unknown) => {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  });
+  if (existingRequest) {
+    if (!sameRequest(existingRequest, candidate)) {
+      throw new BackendRpcError(
+        "idempotency_conflict",
+        `Session query id ${options.queryId} was already used for a different request`,
+      );
+    }
+    const existingSummary = await inspectSessionQuery({
+      stateDir: options.stateDir,
+      runId: options.runId,
+      queryId: options.queryId,
+      backend: options.backend,
+    });
+    if (existingSummary.status !== "queued") return existingSummary;
+  }
+  if (adapter.driver === "pi-rpc" && session.status !== "idle") {
+    throw new BackendRpcError(
+      "session_not_available",
+      `Pi session ${session.id} must be idle before it can be forked for a query`,
+    );
+  }
+  const request =
+    existingRequest ?? await createOrReadRequest(journal.runDir, candidate);
   if (!sameRequest(request, candidate)) {
     throw new BackendRpcError(
       "idempotency_conflict",
@@ -156,8 +197,30 @@ export async function submitSessionQuery(
     backend: options.backend,
   });
   if (summary.status !== "queued") return summary;
-  if (options.launch === false) return summary;
-  await launchSessionQueryWorker(options, request, journal.runDir);
+  if (adapter.driver === "pi-rpc") {
+    try {
+      await reserveSessionForQuery(journal.runDir, request);
+    } catch (error) {
+      if (await sessionQueryReservationMatches(journal.runDir, request)) {
+        throw acceptedAmbiguousError(request, error);
+      }
+      await publishRejectedResult(journal.runDir, request, error);
+      throw error;
+    }
+  }
+  if (options.launch === false) {
+    return await inspectSessionQuery({
+      stateDir: options.stateDir,
+      runId: options.runId,
+      queryId: options.queryId,
+      backend: options.backend,
+    });
+  }
+  try {
+    await launchSessionQueryWorker(options, request, journal.runDir);
+  } catch (error) {
+    throw acceptedAmbiguousError(request, error);
+  }
   return await inspectSessionQuery({
     stateDir: options.stateDir,
     runId: options.runId,
@@ -178,7 +241,10 @@ export async function inspectSessionQuery(input: {
     if (hasCode(error, "ENOENT")) return undefined;
     throw error;
   });
-  if (result) return publicSummary(request, result.status, result);
+  if (result) {
+    await clearSessionQueryReservation(journal.runDir, request);
+    return publicSummary(request, result.status, result);
+  }
   const owner = await readOwner(journal.runDir, request).catch((error: unknown) => {
     if (hasCode(error, "ENOENT")) return undefined;
     throw error;
@@ -206,6 +272,7 @@ export async function inspectSessionQuery(input: {
     finishedAt: new Date().toISOString(),
   };
   await publishResult(journal.runDir, request, uncertain);
+  await clearSessionQueryReservation(journal.runDir, request);
   return publicSummary(request, "uncertain", uncertain);
 }
 
@@ -221,7 +288,11 @@ export async function waitForSessionQuery(
   while (true) {
     if (signal?.aborted) throw abortReason(signal);
     const summary = await inspectSessionQuery(input);
-    if (summary.status === "completed" || summary.status === "uncertain") return summary;
+    if (
+      summary.status === "completed" ||
+      summary.status === "rejected" ||
+      summary.status === "uncertain"
+    ) return summary;
     await abortableDelay(100, signal);
   }
 }
@@ -258,6 +329,22 @@ export async function recoverSessionQueries(
         backend: options.backend,
       });
       if (summary.status === "queued") {
+        const session = await resolveSession(journal.runDir, request.sessionId);
+        const adapter = harnessesForRun(journal.record).get(session.harness);
+        if (!adapter) {
+          throw new Error(`No session adapter is installed for ${session.harness}`);
+        }
+        if (
+          adapter.driver === "pi-rpc" &&
+          !(await sessionQueryReservationMatches(journal.runDir, request))
+        ) {
+          await publishRejectedResult(
+            journal.runDir,
+            request,
+            new Error("Pi session query has no durable session reservation"),
+          );
+          continue;
+        }
         await launchSessionQueryWorker(options, request, journal.runDir);
         launched.push(request.queryId);
       }
@@ -282,9 +369,22 @@ export async function executeSessionQueryWorker(input: {
   }
   try {
     await readResult(journal.runDir, request);
+    await clearSessionQueryReservation(journal.runDir, request);
     return;
   } catch (error) {
     if (!hasCode(error, "ENOENT")) throw error;
+  }
+  const session = await resolveSession(journal.runDir, request.sessionId);
+  const adapter = harnessesForRun(journal.record).get(session.harness);
+  if (!adapter) throw new Error(`No session adapter is installed for ${session.harness}`);
+  const reserved = adapter.driver === "pi-rpc";
+  if (reserved) {
+    try {
+      await reserveSessionForQuery(journal.runDir, request);
+    } catch (error) {
+      await publishRejectedResult(journal.runDir, request, error);
+      return;
+    }
   }
   const owner: SessionQueryOwner = {
     version: 1,
@@ -295,9 +395,13 @@ export async function executeSessionQueryWorker(input: {
     claimedAt: new Date().toISOString(),
   };
   if (!(await publishJsonExclusive(ownerPath(journal.runDir, request), owner))) return;
-  const session = await resolveSession(journal.runDir, request.sessionId);
-  const adapter = harnessesForRun(journal.record).get(session.harness);
-  if (!adapter) throw new Error(`No session adapter is installed for ${session.harness}`);
+  try {
+    await readResult(journal.runDir, request);
+    await clearSessionQueryReservation(journal.runDir, request);
+    return;
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) throw error;
+  }
   const passive = new QuerySession(request.queryId);
   const agentRequest: AgentRequest = {
     harness: session.harness,
@@ -343,6 +447,10 @@ export async function executeSessionQueryWorker(input: {
       if (!hasCode(publishError, "EEXIST")) throw publishError;
     });
     throw error;
+  } finally {
+    if (reserved) {
+      await clearSessionQueryReservation(journal.runDir, request);
+    }
   }
 }
 
@@ -540,6 +648,33 @@ async function publishResult(
   throw new Error(`Session query ${request.queryId} already has a different terminal result`);
 }
 
+async function publishRejectedResult(
+  runDir: string,
+  request: SessionQueryRequest,
+  reason: unknown,
+): Promise<void> {
+  await publishResult(runDir, request, {
+    version: 1,
+    queryId: request.queryId,
+    requestHash: request.requestHash,
+    status: "rejected",
+    error: `Session query was not accepted: ${errorMessage(reason)}`,
+    finishedAt: new Date().toISOString(),
+  });
+  await clearSessionQueryReservation(runDir, request);
+}
+
+function acceptedAmbiguousError(
+  request: SessionQueryRequest,
+  reason: unknown,
+): BackendRpcError {
+  const inspect = publicSummary(request, "queued").inspect;
+  return new BackendRpcError(
+    "accepted_ambiguous",
+    `Session query ${request.queryId} is durably accepted, but continued execution could not be confirmed: ${errorMessage(reason)}. Retry the original session query command with --request-id ${request.queryId}, or inspect it with '${inspect}'.`,
+  );
+}
+
 function publicSummary(
   request: SessionQueryRequest,
   status: SessionQuerySummary["status"],
@@ -642,11 +777,12 @@ function validateResult(
     result.version !== 1 ||
     result.queryId !== request.queryId ||
     result.requestHash !== request.requestHash ||
-    (result.status !== "completed" && result.status !== "uncertain") ||
+    !["completed", "rejected", "uncertain"].includes(String(result.status)) ||
     typeof result.finishedAt !== "string" ||
     (result.status === "completed" &&
       (result.output === undefined || typeof result.nativeSessionId !== "string")) ||
-    (result.status === "uncertain" && typeof result.error !== "string")
+    ((result.status === "rejected" || result.status === "uncertain") &&
+      typeof result.error !== "string")
   ) {
     throw new Error("Invalid Jaeger session-query result");
   }

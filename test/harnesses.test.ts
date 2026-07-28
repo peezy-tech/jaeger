@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeHarness } from "../src/harnesses/claude.js";
 import { CodexHarness } from "../src/harnesses/codex.js";
+import { PiHarness } from "../src/harnesses/pi.js";
 import type {
   AgentRequest,
   JsonSchema,
@@ -121,6 +123,295 @@ test("Codex forks a read-only side-query thread without resuming the parent", as
   assert.equal(requests[2]?.params?.threadId, "parent-thread");
   assert.equal(requests[2]?.params?.sandbox, "read-only");
   assert.deepEqual(requests[3]?.params?.sandboxPolicy, { type: "readOnly" });
+});
+
+test("Pi adapter uses strict RPC, persists its session, and validates structured output", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-rpc-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript());
+  const session = new FakeSession();
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", session),
+  );
+
+  assert.deepEqual(result.output, { answer: "pi\u2028rpc" });
+  assert.equal(result.nativeSessionId, "session-test");
+  assert.equal(session.providerId, "session-test");
+  assert.equal(session.turnStartedCount, 1);
+  assert.equal(result.metadata?.harness, "pi-rpc");
+  assert.equal(
+    result.metadata?.sessionDirectory,
+    path.join(root, "run", "harness", "pi-sessions"),
+  );
+  const transcripts = result.metadata?.transcripts as
+    | Record<string, unknown>
+    | undefined;
+  assert.equal(typeof transcripts?.stderr, "string");
+  assert.equal("stdout" in (transcripts ?? {}), false);
+
+  const args = JSON.parse(
+    await readFile(path.join(root, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.deepEqual(args, [
+    "--mode",
+    "rpc",
+    "--approve",
+    "--session-dir",
+    path.join(root, "run", "harness", "pi-sessions"),
+    "--session-id",
+    "session-test",
+    "--model",
+    "test-model",
+    "--thinking",
+    "low",
+  ]);
+  const requests = (await readFile(path.join(root, "pi-requests.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    requests.map((entry) => entry.type),
+    ["get_state", "prompt", "get_state"],
+  );
+  assert.match(String(requests[1]?.message), /Return only one JSON value/);
+  assert.match(String(requests[1]?.message), /Return an answer/);
+});
+
+test("Pi accepts max thinking and rejects unknown thinking levels", () => {
+  assert.doesNotThrow(() =>
+    new PiHarness().validateOptions({ harness: "pi", effort: "max" }),
+  );
+  assert.throws(
+    () => new PiHarness().validateOptions({ harness: "pi", effort: "extreme" }),
+    /pi effort must be off, minimal, low, medium, high, xhigh, or max/,
+  );
+});
+
+test("Pi version-gates max thinking while allowing compatible installations", async () => {
+  const compatibleRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-max-compatible-"),
+  );
+  const compatibleCommand = path.join(compatibleRoot, "fake-pi");
+  await executable(compatibleCommand, piRpcScript({ version: "0.80.6" }));
+  const compatibleRequest = {
+    ...request(compatibleRoot, "pi", new FakeSession()),
+    effort: "max",
+  };
+
+  await new PiHarness(compatibleCommand).execute(compatibleRequest);
+  const args = JSON.parse(
+    await readFile(path.join(compatibleRoot, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.equal(args[args.indexOf("--thinking") + 1], "max");
+
+  const incompatibleRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-max-incompatible-"),
+  );
+  const incompatibleCommand = path.join(incompatibleRoot, "fake-pi");
+  await executable(incompatibleCommand, piRpcScript({ version: "0.80.5" }));
+  await assert.rejects(
+    () =>
+      new PiHarness(incompatibleCommand).execute({
+        ...request(incompatibleRoot, "pi", new FakeSession()),
+        effort: "max",
+      }),
+    /max requires Pi 0\.80\.6 or newer/,
+  );
+});
+
+test("Pi rejects unsupported RPC versions before normal workflow execution", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-rpc-incompatible-"),
+  );
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ version: "0.80.3" }));
+
+  await assert.rejects(
+    () => new PiHarness(command).execute(request(root, "pi", new FakeSession())),
+    /pi-rpc requires Pi 0\.80\.4 or newer/,
+  );
+  await assert.rejects(
+    readFile(path.join(root, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+});
+
+test("Pi cancellation and timeout cover the version probe", async () => {
+  const cancelledRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-version-cancelled-"),
+  );
+  const cancelledCommand = path.join(cancelledRoot, "fake-pi");
+  await executable(cancelledCommand, piRpcScript({ versionDelayMs: 5_000 }));
+  const controller = new AbortController();
+  const cancelled = new PiHarness(cancelledCommand).execute({
+    ...request(cancelledRoot, "pi", new FakeSession()),
+    signal: controller.signal,
+  });
+  setTimeout(
+    () => controller.abort(new Error("cancelled during Pi version probe")),
+    25,
+  );
+
+  await assert.rejects(cancelled, /cancelled during Pi version probe/);
+  await assert.rejects(
+    readFile(path.join(cancelledRoot, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+
+  const cachedRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-version-cached-"),
+  );
+  const cachedCommand = path.join(cachedRoot, "fake-pi");
+  await executable(cachedCommand, piRpcScript());
+  const cachedHarness = new PiHarness(cachedCommand);
+  await cachedHarness.execute(request(cachedRoot, "pi", new FakeSession()));
+  const preAbortedRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-pre-aborted-"),
+  );
+  const preAbortedController = new AbortController();
+  preAbortedController.abort(new Error("cancelled before cached Pi launch"));
+  await assert.rejects(
+    cachedHarness.execute({
+      ...request(preAbortedRoot, "pi", new FakeSession()),
+      signal: preAbortedController.signal,
+    }),
+    /cancelled before cached Pi launch/,
+  );
+  await assert.rejects(
+    readFile(path.join(preAbortedRoot, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+
+  const timedOutRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-version-timeout-"),
+  );
+  const timedOutCommand = path.join(timedOutRoot, "fake-pi");
+  await executable(timedOutCommand, piRpcScript({ versionDelayMs: 5_000 }));
+  await assert.rejects(
+    new PiHarness(timedOutCommand).execute({
+      ...request(timedOutRoot, "pi", new FakeSession()),
+      timeoutMs: 50,
+    }),
+    /Pi turn timed out after 50ms/,
+  );
+  await assert.rejects(
+    readFile(path.join(timedOutRoot, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+});
+
+test("Pi resumes a native session and maps Jaeger steer to RPC steer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-steer-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ waitForSteer: true }));
+  const session = new FakeSession("pi-existing", [
+    { id: "control-1", kind: "steer", message: "Take the safer approach." },
+  ]);
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", session),
+  );
+
+  assert.deepEqual(result.output, { answer: "steered" });
+  assert.equal(session.controlResults[0]?.steered, true);
+  const args = JSON.parse(
+    await readFile(path.join(root, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.equal(args[args.indexOf("--session-id") + 1], "pi-existing");
+  const requests = (await readFile(path.join(root, "pi-requests.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    requests.map((entry) => entry.type),
+    ["get_state", "prompt", "get_state", "steer"],
+  );
+  assert.equal(
+    requests.find((entry) => entry.type === "steer")?.message,
+    "Take the safer approach.",
+  );
+});
+
+test("Pi forks a read-only side-query with a distinct deterministic session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-fork-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript());
+  const queryId = "query-abcdefgh-";
+  const input: AgentRequest = {
+    ...request(root, "pi", new FakeSession(undefined, [], queryId)),
+    forkSessionId: "pi-parent",
+    readOnly: true,
+  };
+  const result = await new PiHarness(command).execute(input);
+
+  const expectedSessionId = `jaeger-${createHash("sha256").update(queryId).digest("hex")}`;
+  assert.equal(result.nativeSessionId, expectedSessionId);
+  const args = JSON.parse(
+    await readFile(path.join(root, "pi-args.json"), "utf8"),
+  ) as string[];
+  assert.equal(args[args.indexOf("--fork") + 1], "pi-parent");
+  assert.equal(args[args.indexOf("--session-id") + 1], expectedSessionId);
+  assert.equal(args.includes("--no-approve"), true);
+  assert.equal(args.includes("--approve"), false);
+  assert.equal(args.includes("--no-extensions"), true);
+  assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls");
+});
+
+test("Pi cancels blocking extension UI dialogs instead of hanging headless RPC", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-ui-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ requestUi: true }));
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", new FakeSession()),
+  );
+
+  assert.deepEqual(result.output, { answer: "pi\u2028rpc" });
+  const requests = (await readFile(path.join(root, "pi-requests.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.deepEqual(
+    requests.find((entry) => entry.type === "extension_ui_response"),
+    {
+      type: "extension_ui_response",
+      id: "dialog-1",
+      cancelled: true,
+    },
+  );
+});
+
+test("Pi fails promptly when an extension command starts no agent turn", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-command-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ extensionCommand: true }));
+  const { schema: requestSchema, ...schemaLessRequest } = request(
+    root,
+    "pi",
+    new FakeSession(),
+  );
+  assert.equal(requestSchema, schema);
+  await assert.rejects(
+    () => new PiHarness(command).execute({
+      ...schemaLessRequest,
+      prompt: "/handled",
+      timeoutMs: 1_000,
+    }),
+    /Pi prompt completed without starting an agent turn/,
+  );
+});
+
+test("Pi RPC ignores accumulated partial-message volume in bounded transcripts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-volume-"));
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ floodUpdates: true }));
+  const result = await new PiHarness(command).execute(
+    request(root, "pi", new FakeSession()),
+  );
+
+  assert.deepEqual(result.output, { answer: "pi\u2028rpc" });
 });
 
 test("Claude adapter uses a persistent Agent SDK streaming session and resumes by ID", async () => {
@@ -345,7 +636,6 @@ test("Claude requires the dedicated structured output field when a schema is req
 });
 
 class FakeSession implements SessionTurn {
-  readonly id = "session-test";
   nativeSessionId: string | undefined;
   providerId: string | undefined;
   turnId: string | undefined;
@@ -355,6 +645,7 @@ class FakeSession implements SessionTurn {
   constructor(
     nativeSessionId?: string,
     private readonly controls: SessionControlRequest[] = [],
+    readonly id = "session-test",
   ) {
     this.nativeSessionId = nativeSessionId;
   }
@@ -421,6 +712,7 @@ const complete = (answer) => {
   ${options.unloadedTurnItems ? 'send({ method: "item/completed", params: { threadId: "codex-thread", turnId: "codex-turn", item: finalMessage } })' : ""}
   send({ method: "turn/completed", params: { threadId: "codex-thread", turn: { id: "codex-turn", status: "completed", items: ${options.unloadedTurnItems ? "[]" : "[finalMessage]"}${options.unloadedTurnItems ? ', itemsView: "notLoaded"' : ""} } } })
 }
+
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line)
   fs.appendFileSync(requests, JSON.stringify(message) + "\\n")
@@ -435,6 +727,91 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     setImmediate(() => complete("steered"))
   }
   if (message.method === "turn/interrupt") send({ id: message.id, result: {} })
+})
+`;
+}
+
+function piRpcScript(
+  options: {
+    waitForSteer?: boolean;
+    requestUi?: boolean;
+    floodUpdates?: boolean;
+    extensionCommand?: boolean;
+    version?: string;
+    versionDelayMs?: number;
+  } = {},
+): string {
+  return `
+const fs = require("node:fs")
+const path = require("node:path")
+const readline = require("node:readline")
+const args = process.argv.slice(2)
+if (args.includes("--version")) {
+  setTimeout(() => {
+    process.stdout.write(${JSON.stringify(options.version ?? "0.82.1")} + "\\n")
+    process.exit(0)
+  }, ${options.versionDelayMs ?? 0})
+  return
+}
+fs.writeFileSync(path.join(process.cwd(), "pi-args.json"), JSON.stringify(args))
+const requests = path.join(process.cwd(), "pi-requests.jsonl")
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+const sessionIndex = args.indexOf("--session-id")
+const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "pi-session"
+let streaming = false
+let messageCount = 0
+const complete = (answer) => {
+  streaming = false
+  messageCount += 2
+  const message = {
+    role: "assistant",
+    content: [{ type: "text", text: JSON.stringify({ answer }) }],
+    provider: "test-provider",
+    model: "test-model",
+    usage: { input: 3, output: 2 },
+    stopReason: "stop"
+  }
+  send({ type: "message_end", message })
+  send({ type: "agent_settled" })
+}
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  fs.appendFileSync(requests, JSON.stringify(message) + "\\n")
+  if (message.type === "get_state") {
+    send({
+      id: message.id,
+      type: "response",
+      command: "get_state",
+      success: true,
+      data: {
+        sessionId,
+        thinkingLevel: "low",
+        isStreaming: streaming,
+        isCompacting: false,
+        steeringMode: "one-at-a-time",
+        followUpMode: "one-at-a-time",
+        autoCompactionEnabled: true,
+        messageCount,
+        pendingMessageCount: 0
+      }
+    })
+    return
+  }
+  if (message.type === "prompt") {
+    streaming = ${options.extensionCommand ? "false" : "true"}
+    send({ id: message.id, type: "response", command: "prompt", success: true })
+    ${options.floodUpdates ? 'for (let index = 0; index < 18; index++) send({ type: "message_update", message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] } })' : ""}
+    ${options.extensionCommand ? "" : options.requestUi ? 'send({ type: "extension_ui_request", id: "dialog-1", method: "confirm", title: "Continue?", message: "Approve" })' : options.waitForSteer ? "" : 'setImmediate(() => complete("pi\\u2028rpc"))'}
+    return
+  }
+  if (message.type === "extension_ui_response") {
+    setImmediate(() => complete("pi\\u2028rpc"))
+    return
+  }
+  if (message.type === "steer") {
+    send({ id: message.id, type: "response", command: "steer", success: true })
+    setImmediate(() => complete("steered"))
+  }
 })
 `;
 }

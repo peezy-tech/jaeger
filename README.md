@@ -23,8 +23,8 @@ behavior.
 
 Jaeger can also reconcile the environment around those native harnesses. This is
 separate from workflow execution: `jaeger env` composes instruction files and
-installs provider-native skills, plugins, and configuration from a declarative,
-reversible environment.
+installs provider-native skills, Codex/Claude plugins, Pi packages, and
+configuration from a declarative, reversible environment.
 
 ```js
 export const meta = {
@@ -59,8 +59,9 @@ return agent(`Reconcile these reviews: ${JSON.stringify(reviews)}`, {
 
 - `.js` and `.ts` workflow files with top-level `await` and `return`
 - `agent`, `parallel`, `phase`, `log`, `inputs`, and immutable `trigger` globals
-- persistent Codex app-server threads and Claude Agent SDK sessions
-- host-configured harness surfaces over either shipped protocol driver
+- persistent Codex app-server threads, Claude Agent SDK sessions, and Pi RPC
+  sessions
+- host-configured harness surfaces over any shipped protocol driver
 - user-controlled session resume plus active-turn steer and interrupt
 - model, effort, service-tier, profile, working-directory, schema, label, and
   timeout selection per agent
@@ -83,8 +84,8 @@ return agent(`Reconcile these reviews: ${JSON.stringify(reviews)}`, {
 - a bare-command system overview with harness versions, backend health, active
   workflows and sessions, schedules, and environment state
 - one packaged, optional `jaeger-workflows` authoring and operations skill
-- declarative Codex and Claude environments with drift detection, backups, and
-  reversible instruction, skill, plugin, and config installation
+- declarative Codex, Claude, and Pi environments with drift detection, backups,
+  and reversible instruction, skill, plugin/package, and config installation
 
 The compiler requires one `export const meta` declaration and otherwise expects a small,
 prompt-heavy coordinator. Imports and other exports are intentionally unsupported.
@@ -192,15 +193,31 @@ target = "$CODEX_HOME/tool.toml"
 
 [providers.claude]
 instructions = ["snippets/common.md", "snippets/claude.md"]
+
+[providers.pi]
+instructions = ["snippets/common.md", "snippets/pi.md"]
+skills = ["skills/jaeger-workflows"]
+packages = ["npm:@acme/pi-tools@1.2.3"]
+
+[[providers.pi.configs]]
+source = "configs/pi-settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
 ```
 
 Codex instructions target `$CODEX_HOME/AGENTS.md` (normally
 `~/.codex/AGENTS.md`); Claude instructions target
-`$CLAUDE_CONFIG_DIR/CLAUDE.md` (normally `~/.claude/CLAUDE.md`). Skills are
-copied into each provider's native `skills/` directory. Plugins use
+`$CLAUDE_CONFIG_DIR/CLAUDE.md` (normally `~/.claude/CLAUDE.md`); Pi instructions
+target `$PI_CODING_AGENT_DIR/AGENTS.md` (normally `~/.pi/agent/AGENTS.md`).
+Skills are copied into each provider's native `skills/` directory. Codex and
+Claude plugins use
 explicit `plugin@marketplace` selectors and are installed or removed through
 the provider's native plugin manager (`codex plugin` or `claude plugin`), so
-Jaeger does not create a second plugin loader. An optional top-level
+Jaeger does not create a second plugin loader. Pi `packages` retain their native
+source identity and are reconciled through `pi install`, `pi list`, and
+`pi remove`; packages that predate the environment are never removed by it. An
+`npm:`, `git:`, HTTPS, or SSH source is stored verbatim; a local `./` source is
+resolved inside the environment directory before it is installed. An
+optional top-level
 `harness_config = "harnesses.json"` installs
 Jaeger's custom harness registry at the standard Jaeger config path.
 
@@ -298,7 +315,7 @@ and `systemctl` launchers used by both the service and later lifecycle commands.
 Resolved service and harness paths must be owned by root or the current user and
 must not be writable by other users or a shared group; ancestor directories are
 checked under the same rule. Each accepted run also pins
-absolute harness launcher paths instead of resolving `codex`, `claude`, or a
+absolute harness launcher paths instead of resolving `codex`, `claude`, `pi`, or a
 custom command later from a mutable PATH. Rerun
 `jaeger backend install` after moving or replacing the installation so the unit
 and running service use the intended build. Reinstallation preserves an existing
@@ -565,6 +582,9 @@ native provider session ID. Codex applies steering to its active app-server
 turn. Claude Code's native SDK has interrupt but no equivalent append-to-active-
 turn operation, so Jaeger steering interrupts the current Claude response and
 immediately continues with the steering message in the same persisted session.
+Pi maps steering and interrupt directly to its RPC commands and waits for
+`agent_settled`, after automatic retries, compaction retries, and queued
+continuations have finished.
 Under the persistent backend, each `resume` is first recorded as a durable turn
 job and then executed by its own transient systemd worker. The CLI prints the
 turn ID before submission. Use `--detach` to return after worker acceptance,
@@ -589,7 +609,8 @@ session and asks the question in a read-only child conversation. The workflow
 session's turn count, provider ID, and result remain unchanged. Query
 submissions have their own durable request IDs, transient workers, inspect/wait
 commands, and uncertainty boundary. A later question creates a fresh fork so it
-sees the latest parent state.
+sees the latest parent state. Pi queries require the parent session to be idle
+because Pi can only fork a session after its durable session file exists.
 
 Start with a summary and request detailed events or transcripts only for the
 current decision. `wait` exits when the run reaches a terminal state. `stop`
@@ -747,7 +768,7 @@ Supported authored options are:
 
 | Option | Meaning |
 | --- | --- |
-| `harness` | Required: built-in `codex` or `claude`, or a configured custom name |
+| `harness` | Required: built-in `codex`, `claude`, or `pi`, or a configured custom name |
 | `model` | Native model identifier passed to the harness |
 | `effort` | Native effort value passed to the harness |
 | `serviceTier` | Codex service-tier override |
@@ -764,7 +785,8 @@ silently ignored.
 
 ## Custom harness surfaces
 
-Jaeger ships two protocol drivers: `codex-app-server` and `claude-agent-sdk`.
+Jaeger ships three protocol drivers: `codex-app-server`, `claude-agent-sdk`, and
+`pi-rpc`.
 Operators may register additional workflow-facing harness names that select one
 of those drivers and a launcher executable. The local backend reads user configuration from
 `$XDG_CONFIG_HOME/jaeger/harnesses.json` or `~/.config/jaeger/harnesses.json`.
@@ -803,7 +825,11 @@ New runs pin the resolved harness definitions in their immutable run record.
 Detached workers and later `session resume` operations therefore retain the
 same driver and launcher without re-reading mutable user configuration. The
 launcher binary and its external environment remain host-owned dependencies,
-just as they are for the built-in `codex` and `claude` commands.
+just as they are for the built-in `codex`, `claude`, and `pi` commands.
+Unavailable built-ins are omitted from a new run's pinned registry, so adding
+Pi support does not make Pi a mandatory dependency for Codex- or Claude-only
+hosts. An unavailable explicitly configured custom launcher still blocks
+admission.
 
 ## Native session boundary
 
@@ -816,7 +842,12 @@ persisted and resumable. Claude Code surfaces are integrated through the officia
 [streaming Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode)
 with [session persistence](https://code.claude.com/docs/en/agent-sdk/sessions)
 enabled; there is no `claude --print` fallback. Custom surfaces reuse one of
-these two transports rather than weakening the provider session contract. All
+these transports rather than weakening the provider session contract. Pi
+surfaces use strict-LF JSONL over `pi --mode rpc`, require Pi 0.80.4 or newer,
+persist sessions below the Jaeger run, and wait for `agent_settled`; there is no
+text/print compatibility fallback. Pi has no native output-schema switch, so
+Jaeger adds the schema to the prompt and still parses and validates the final
+JSON itself. All
 surfaces load their native commands, tools, skills, MCP servers, hooks, and
 settings with full permissions.
 
@@ -880,7 +911,7 @@ root in `.schedules/`, with private state, revision, and occurrence records.
 Lifecycle hook events and delivery attempts live separately in `.hooks/`; they
 are observer state and are never interpreted as workflow checkpoints.
 Embedded compatibility mode defaults to `.jaeger/runs/<run-id>/`. Provider-
-native conversation history is owned by Codex or Claude Code. Jaeger state and
+native conversation history is owned by Codex, Claude Code, or Pi. Jaeger state and
 transcripts may contain prompts, tool activity, and outputs; treat the entire
 state root as sensitive local data.
 

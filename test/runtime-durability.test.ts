@@ -852,6 +852,48 @@ return "ok"
   assert.equal(result.result, "ok");
 });
 
+test("historical version 3 records preserve a custom harness named pi", async () => {
+  const root = await workspace("legacy-custom-pi", `
+export const meta = { name: "legacy-custom-pi" }
+return "ok"
+`);
+  const stateDir = path.join(root, "state");
+  const prepared = await prepareWorkflowRun({
+    workflowPath: path.join(root, "workflow.js"),
+    cwd: root,
+    stateDir,
+  });
+  const runRecordPath = path.join(prepared.runDir, "run.json");
+  const record = JSON.parse(await readFile(runRecordPath, "utf8")) as Record<string, unknown>;
+  record.version = 3;
+  record.harnesses = [
+    {
+      name: "codex",
+      driver: "codex-app-server",
+      command: "/usr/bin/codex",
+    },
+    {
+      name: "claude",
+      driver: "claude-agent-sdk",
+      command: "/usr/bin/claude",
+    },
+    {
+      name: "pi",
+      driver: "codex-app-server",
+      command: "/usr/bin/legacy-pi",
+    },
+  ];
+  await writeFile(runRecordPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+
+  const journal = await RunJournal.open(stateDir, prepared.runId);
+  assert.equal(
+    journal.record.version === 3
+      ? journal.record.harnesses.find((definition) => definition.name === "pi")?.driver
+      : undefined,
+    "codex-app-server",
+  );
+});
+
 test("run journal rejects traversal-like run ids", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "jaeger-run-id-"));
   await assert.rejects(RunJournal.open(stateDir, "."), /Invalid Jaeger run id/);

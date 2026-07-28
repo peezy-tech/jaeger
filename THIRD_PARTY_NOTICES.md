@@ -14,7 +14,7 @@ terms and privacy policy:
 - https://www.anthropic.com/legal/commercial-terms
 - https://www.anthropic.com/legal/privacy
 
-Codex, Claude Code, and any custom harness are independently installed and
+Codex, Claude Code, Pi, and any custom harness are independently installed and
 authenticated by the operator. Their availability and use are governed by
 their respective licenses and service terms.
 

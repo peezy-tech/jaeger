@@ -39,6 +39,11 @@ const harnesses: readonly HarnessDefinition[] = [
     driver: "claude-agent-sdk",
     command: "/bin/true",
   },
+  {
+    name: "pi",
+    driver: "pi-rpc",
+    command: "/bin/true",
+  },
 ];
 const cliPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/cli.js");
 
@@ -110,7 +115,7 @@ test("remote schedule admission pins local source paths and resolves only the ta
   const remoteWorkspace = path.join(root, "remote-workspace");
   const binDir = path.join(root, "bin");
   await Promise.all([mkdir(remoteWorkspace), mkdir(binDir)]);
-  for (const name of ["codex", "claude"]) {
+  for (const name of ["codex", "claude", "pi"]) {
     const command = path.join(binDir, name);
     await writeFile(command, "#!/bin/sh\nexit 0\n");
     await chmod(command, 0o755);
@@ -298,6 +303,45 @@ test("schedule revisions are immutable and manual occurrences are idempotent", a
   assert.equal(launches.length, 2);
 });
 
+test("historical schedules preserve a custom harness named pi", async (t) => {
+  const fixture = await scheduleFixture(t);
+  const launches: Parameters<ConstructorParameters<typeof ScheduleStore>[0]["submit"]>[0][] = [];
+  const store = new ScheduleStore({
+    stateDir: fixture.stateDir,
+    now: () => fixture.now,
+    submit: async (request) => {
+      launches.push(request);
+      return { runId: "20260723120000-0000000001" };
+    },
+    inspectRun: async () => ({ status: "completed" }),
+  });
+  const legacyHarnesses = [
+    ...harnesses.filter((definition) => definition.name !== "pi"),
+    {
+      name: "pi",
+      driver: "claude-agent-sdk" as const,
+      command: "/usr/bin/legacy-pi",
+    },
+  ];
+
+  await store.apply(
+    fixture.application,
+    legacyHarnesses,
+    await describeLocalWorkspace(fixture.root),
+  );
+  await store.enable(fixture.application.name);
+  await store.disable(fixture.application.name);
+  const occurrence = asRecord(
+    await store.trigger(fixture.application.name, "legacy-pi-request"),
+  );
+  assert.equal(occurrence.status, "admitted");
+  assert.equal(launches.length, 1);
+  assert.equal(
+    launches[0]?.harnessDefinitions.find((definition) => definition.name === "pi")?.driver,
+    "claude-agent-sdk",
+  );
+});
+
 test("cron occurrences survive scheduler restarts without duplicate admission", async (t) => {
   const fixture = await scheduleFixture(t);
   let launches = 0;
@@ -416,7 +460,7 @@ test(
     const fixture = await scheduleFixture(t);
     const binDir = path.join(fixture.root, "bin");
     await mkdir(binDir);
-    for (const name of ["codex", "claude"]) {
+    for (const name of ["codex", "claude", "pi"]) {
       const command = path.join(binDir, name);
       await writeFile(command, "#!/bin/sh\nexit 0\n");
       await chmod(command, 0o755);

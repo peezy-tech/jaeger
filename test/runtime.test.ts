@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { UncertainAgentRunError } from "../src/errors.js";
+import { builtinHarnessDefinitions } from "../src/harnesses/registry.js";
 import { prepareWorkflowRun, runWorkflow } from "../src/runtime.js";
 import type { AgentRequest, HarnessAdapter, HarnessResult } from "../src/types.js";
 
@@ -39,6 +40,88 @@ return "ok"
   });
   assert.equal(prepared.scriptPath, workflowPath);
   assert.equal(prepared.staged?.record.workflowPath, workflowPath);
+});
+
+test("workflow admission and resume accept a pinned registry with unavailable built-ins omitted", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-partial-registry-"));
+  const workflowPath = path.join(root, "workflow.js");
+  await writeFile(
+    workflowPath,
+    `
+export const meta = { name: "partial registry" }
+return "ok"
+`,
+  );
+  const codex = builtinHarnessDefinitions().find((definition) => definition.name === "codex");
+  assert.ok(codex);
+  const definitions = [{ ...codex, command: process.execPath }];
+  const prepared = await prepareWorkflowRun({
+    workflowPath,
+    cwd: root,
+    stateDir: path.join(root, "state"),
+    harnessDefinitions: definitions,
+    stageOnly: true,
+  });
+  const record = prepared.staged?.record;
+  assert.equal(record?.version, 4);
+  if (!record || record.version !== 4) assert.fail("expected a version 4 run record");
+  assert.deepEqual(
+    record.harnesses.map((definition) => definition.name),
+    ["codex"],
+  );
+
+  const first = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir: path.join(root, "resume-state"),
+    harnessDefinitions: definitions,
+  });
+  const resumed = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir: path.join(root, "resume-state"),
+    resumeRunId: first.runId,
+    harnessDefinitions: definitions,
+  });
+  assert.equal(resumed.runId, first.runId);
+  assert.equal(resumed.result, "ok");
+});
+
+test("workflow admission and resume preserve a legacy custom harness named pi", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-legacy-pi-registry-"));
+  const workflowPath = path.join(root, "workflow.js");
+  const stateDir = path.join(root, "state");
+  await writeFile(
+    workflowPath,
+    `
+export const meta = { name: "legacy pi registry" }
+return "ok"
+`,
+  );
+  const definitions = [
+    ...builtinHarnessDefinitions().filter((definition) => definition.name !== "pi"),
+    {
+      name: "pi",
+      driver: "codex-app-server" as const,
+      command: process.execPath,
+    },
+  ];
+
+  const first = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir,
+    harnessDefinitions: definitions,
+  });
+  const resumed = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir,
+    resumeRunId: first.runId,
+    harnessDefinitions: definitions,
+  });
+  assert.equal(resumed.runId, first.runId);
+  assert.equal(resumed.result, "ok");
 });
 
 test("mixes harnesses, preserves parallel order, and replays a completed run", async () => {

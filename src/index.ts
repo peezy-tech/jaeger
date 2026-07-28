@@ -12,6 +12,7 @@ export {
 export {
   activeEnvironment,
   applyEnvironment,
+  createNativePackageManager,
   createNativePluginManager,
   defaultEnvironmentPaths,
   inspectEnvironmentStatus,
@@ -31,7 +32,12 @@ export {
   WorkflowChangedError,
   WorkflowCompileError,
 } from "./errors.js";
-export { ClaudeHarness, CodexHarness, defaultHarnesses } from "./harnesses/index.js";
+export {
+  ClaudeHarness,
+  CodexHarness,
+  PiHarness,
+  defaultHarnesses,
+} from "./harnesses/index.js";
 export {
   builtinHarnessDefinitions,
   harnessDefinitionsForRun,

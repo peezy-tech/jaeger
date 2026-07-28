@@ -144,7 +144,13 @@ export async function prepareWorkflowRun(
   const maxConcurrency = checkedConcurrency(options.maxConcurrency);
   const harnesses = validateHarnessDefinitions(
     options.harnessDefinitions ?? builtinHarnessDefinitions(),
-    options.harnessDefinitions ? { allowPinnedBuiltins: true } : {},
+    options.harnessDefinitions
+      ? {
+          allowPinnedBuiltins: true,
+          allowMissingBuiltins: true,
+          allowLegacyCustomBuiltins: true,
+        }
+      : {},
   );
   const backend = options.backend ?? "embedded";
   const observedWorkspace = await describeLocalWorkspace(cwd);
@@ -259,11 +265,17 @@ export async function openWorkflowForResume(
     throw new WorkflowChangedError("Workflow concurrency policy changed since this Jaeger run started");
   }
   if (options.harnessDefinitions !== undefined) {
-    const requested = validateHarnessDefinitions(options.harnessDefinitions);
+    const requested = validateHarnessDefinitions(options.harnessDefinitions, {
+      allowPinnedBuiltins: true,
+      allowMissingBuiltins: true,
+      allowLegacyCustomBuiltins: true,
+    });
     const pinned =
       journal.record.version === 3 || journal.record.version === 4
         ? validateHarnessDefinitions(journal.record.harnesses, {
             allowPinnedBuiltins: true,
+            allowMissingBuiltins: true,
+            allowLegacyCustomBuiltins: true,
           })
         : builtinHarnessDefinitions();
     if (

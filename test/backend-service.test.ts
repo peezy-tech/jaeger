@@ -990,7 +990,7 @@ async function installHarnessCommands(
   source = "#!/bin/sh\nexit 0\n",
 ): Promise<void> {
   await Promise.all(
-    ["codex", "claude"].map(async (name) => {
+    ["codex", "claude", "pi"].map(async (name) => {
       const commandPath = path.join(binDir, name);
       await writeFile(commandPath, source, "utf8");
       await chmod(commandPath, 0o755);

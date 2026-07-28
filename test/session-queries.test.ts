@@ -2,19 +2,27 @@ import assert from "node:assert/strict";
 import {
   chmod,
   mkdtemp,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { BackendRpcError } from "../src/backend-protocol.js";
 import { builtinHarnessDefinitions } from "../src/harnesses/registry.js";
 import { HookManager } from "../src/hooks.js";
 import {
   executeSessionQueryWorker,
   inspectSessionQuery,
+  recoverSessionQueries,
   submitSessionQuery,
 } from "../src/session-queries.js";
+import {
+  submitSessionTurn,
+  waitForSessionTurn,
+} from "../src/session-turns.js";
 import { runWorkflow } from "../src/runtime.js";
 import { listWorkflowSessions } from "../src/sessions.js";
 
@@ -102,6 +110,191 @@ return answer
   }
 });
 
+test("Pi queries reserve an idle parent until the fork is terminal", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-query-reservation-"));
+  const stateDir = path.join(root, "state");
+  const workflowPath = path.join(root, "workflow.js");
+  const fakePi = path.join(root, "fake-pi");
+  const entrypoint = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+  try {
+    await writeFile(
+      workflowPath,
+      `
+export const meta = { name: "Pi query reservation" }
+return await agent("Do the work", { harness: "pi", label: "worker" })
+`,
+    );
+    await writeFile(fakePi, `#!/usr/bin/env node\n${fakePiScript()}\n`);
+    await chmod(fakePi, 0o755);
+    const definitions = builtinHarnessDefinitions().map((definition) =>
+      definition.name === "pi"
+        ? { ...definition, command: fakePi }
+        : { ...definition, command: process.execPath },
+    );
+    const run = await runWorkflow({
+      workflowPath,
+      cwd: root,
+      stateDir,
+      harnessDefinitions: definitions,
+    });
+    const parent = (await listWorkflowSessions(run.runDir, stateDir))[0];
+    assert.equal(parent?.status, "idle");
+    assert.ok(parent.nativeSessionId);
+
+    const query = await submitSessionQuery({
+      stateDir,
+      entrypoint,
+      env: process.env,
+      backend: "embedded",
+      runId: run.runId,
+      selector: parent.id,
+      message: "Inspect the parent",
+      queryId: "query-reserved:0001",
+      launch: false,
+    });
+    assert.equal(query.status, "queued");
+    await assert.rejects(
+      submitSessionQuery({
+        stateDir,
+        entrypoint,
+        env: process.env,
+        backend: "embedded",
+        runId: run.runId,
+        selector: parent.id,
+        message: "Do not run this later",
+        queryId: "query-rejected:0001",
+        launch: false,
+      }),
+      (error: unknown) =>
+        error instanceof BackendRpcError && error.code === "session_busy",
+    );
+    const rejected = await inspectSessionQuery({
+      stateDir,
+      runId: run.runId,
+      queryId: "query-rejected:0001",
+      backend: "embedded",
+    });
+    assert.equal(rejected.status, "rejected");
+    await assert.rejects(
+      submitSessionTurn({
+        stateDir,
+        entrypoint,
+        env: process.env,
+        backend: "embedded",
+        runId: run.runId,
+        selector: parent.id,
+        message: "Continue concurrently",
+        turnId: "turn-blocked-by-query-0001",
+      }),
+      /unresolved query query-reserved:0001/,
+    );
+
+    await executeSessionQueryWorker({
+      stateDir,
+      runId: run.runId,
+      queryId: query.queryId,
+      backend: "embedded",
+    });
+    const recovery = await recoverSessionQueries(
+      {
+        stateDir,
+        entrypoint,
+        env: process.env,
+        backend: "embedded",
+      },
+      run.runId,
+    );
+    assert.deepEqual(recovery.launched, []);
+    assert.deepEqual(recovery.errors, []);
+
+    const submittedTurn = await submitSessionTurn({
+      stateDir,
+      entrypoint,
+      env: process.env,
+      backend: "embedded",
+      runId: run.runId,
+      selector: parent.id,
+      message: "Continue after the query",
+      turnId: "turn-after-query-0000001",
+    });
+    const turn =
+      submittedTurn.status === "completed"
+        ? submittedTurn
+        : await waitForSessionTurn({
+            stateDir,
+            runId: run.runId,
+            turnId: submittedTurn.turnId,
+            backend: "embedded",
+          });
+    assert.equal(turn.status, "completed");
+
+    await assert.rejects(
+      submitSessionQuery({
+        stateDir,
+        entrypoint,
+        env: {
+          ...process.env,
+          JAEGER_SYSTEMD_RUN: path.join(root, "missing-systemd-run"),
+        },
+        backend: "embedded",
+        runId: run.runId,
+        selector: parent.id,
+        message: "Survive a launcher failure",
+        queryId: "query-launch-failure:0001",
+      }),
+      (error: unknown) =>
+        error instanceof BackendRpcError && error.code === "accepted_ambiguous",
+    );
+    const launchFailure = await inspectSessionQuery({
+      stateDir,
+      runId: run.runId,
+      queryId: "query-launch-failure:0001",
+      backend: "embedded",
+    });
+    assert.equal(launchFailure.status, "queued");
+    await executeSessionQueryWorker({
+      stateDir,
+      runId: run.runId,
+      queryId: launchFailure.queryId,
+      backend: "embedded",
+    });
+
+    const sessionPath = path.join(run.runDir, "sessions", parent.id, "session.json");
+    const starting = JSON.parse(await readFile(sessionPath, "utf8")) as Record<string, unknown>;
+    starting.status = "starting";
+    await writeFile(sessionPath, `${JSON.stringify(starting)}\n`);
+    const completedRetry = await submitSessionQuery({
+      stateDir,
+      entrypoint,
+      env: process.env,
+      backend: "embedded",
+      runId: run.runId,
+      selector: parent.id,
+      message: "Inspect the parent",
+      queryId: "query-reserved:0001",
+      launch: false,
+    });
+    assert.equal(completedRetry.status, "completed");
+    assert.equal(completedRetry.output, "pi answer");
+    await assert.rejects(
+      submitSessionQuery({
+        stateDir,
+        entrypoint,
+        env: process.env,
+        backend: "embedded",
+        runId: run.runId,
+        selector: parent.id,
+        message: "Do not fork a starting parent",
+        queryId: "query-starting:0001",
+        launch: false,
+      }),
+      /must be idle/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function fakeCodexScript(): string {
   return `
 const readline = require("node:readline")
@@ -141,6 +334,50 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         }
       }
     }))
+  }
+})
+`;
+}
+
+function fakePiScript(): string {
+  return `
+const readline = require("node:readline")
+const args = process.argv.slice(2)
+if (args.includes("--version")) {
+  process.stdout.write("0.82.1\\n")
+  process.exit(0)
+}
+const sessionIndex = args.indexOf("--session-id")
+const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "pi-session"
+let isStreaming = false
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line)
+  if (message.type === "get_state") {
+    send({
+      id: message.id,
+      type: "response",
+      command: "get_state",
+      success: true,
+      data: { sessionId, messageCount: 0, isStreaming }
+    })
+    return
+  }
+  if (message.type === "prompt") {
+    isStreaming = true
+    send({ id: message.id, type: "response", command: "prompt", success: true })
+    setImmediate(() => {
+      send({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "pi answer" }],
+          stopReason: "stop"
+        }
+      })
+      isStreaming = false
+      send({ type: "agent_settled" })
+    })
   }
 })
 `;
