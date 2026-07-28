@@ -41,7 +41,7 @@ type JsonObject = Record<string, unknown>;
 
 export class PiHarness implements HarnessAdapter {
   readonly driver = "pi-rpc" as const;
-  private version: Promise<string> | undefined;
+  private version: string | undefined;
 
   constructor(
     private readonly command = "pi",
@@ -67,13 +67,22 @@ export class PiHarness implements HarnessAdapter {
 
   async execute(request: AgentRequest): Promise<HarnessResult> {
     this.validateOptions(request);
-    this.version ??= readPiVersion(this.command, request.cwd, request.timeoutMs);
-    const version = await this.version;
-    assertSupportedPiVersion(version);
-    if (request.effort === "max") {
-      assertPiMaxThinkingSupported(version);
-    }
     const abort = turnAbortController(request);
+    try {
+      this.version ??= await readPiVersion(
+        this.command,
+        request.cwd,
+        request.timeoutMs,
+        abort.signal,
+      );
+      assertSupportedPiVersion(this.version);
+      if (request.effort === "max") {
+        assertPiMaxThinkingSupported(this.version);
+      }
+    } catch (error) {
+      abort.dispose();
+      throw error;
+    }
     const sessionDirectory = path.join(request.runDir, "harness", "pi-sessions");
     await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
     await chmod(sessionDirectory, 0o700);
@@ -215,6 +224,7 @@ async function readPiVersion(
   command: string,
   cwd: string,
   timeoutMs: number,
+  signal: AbortSignal,
 ): Promise<string> {
   let stdout: string;
   let stderr: string;
@@ -223,10 +233,16 @@ async function readPiVersion(
       cwd,
       encoding: "utf8",
       timeout: Math.min(timeoutMs, 10_000),
+      signal,
     });
     stdout = result.stdout;
     stderr = result.stderr;
   } catch (error) {
+    if (signal.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error("Pi turn aborted", { cause: error });
+    }
     throw new Error(
       "Could not determine Pi version",
       { cause: error },
@@ -236,7 +252,7 @@ async function readPiVersion(
 }
 
 function piSessionId(value: string): string {
-  if (/^[A-Za-z0-9._-]+$/.test(value)) return value;
+  if (/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(value)) return value;
   return `jaeger-${createHash("sha256").update(value).digest("hex")}`;
 }
 
@@ -523,7 +539,11 @@ function turnAbortController(request: AgentRequest): {
   timeout.unref();
   const onAbort = (): void =>
     controller.abort(request.signal?.reason ?? new Error("Pi turn aborted"));
-  request.signal?.addEventListener("abort", onAbort, { once: true });
+  if (request.signal?.aborted) {
+    onAbort();
+  } else {
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+  }
   return {
     signal: controller.signal,
     dispose() {

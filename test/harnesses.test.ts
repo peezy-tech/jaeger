@@ -237,6 +237,48 @@ test("Pi rejects unsupported RPC versions before normal workflow execution", asy
   );
 });
 
+test("Pi cancellation and timeout cover the version probe", async () => {
+  const cancelledRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-version-cancelled-"),
+  );
+  const cancelledCommand = path.join(cancelledRoot, "fake-pi");
+  await executable(cancelledCommand, piRpcScript({ versionDelayMs: 5_000 }));
+  const controller = new AbortController();
+  const cancelled = new PiHarness(cancelledCommand).execute({
+    ...request(cancelledRoot, "pi", new FakeSession()),
+    signal: controller.signal,
+  });
+  setTimeout(
+    () => controller.abort(new Error("cancelled during Pi version probe")),
+    25,
+  );
+
+  await assert.rejects(cancelled, /cancelled during Pi version probe/);
+  await assert.rejects(
+    readFile(path.join(cancelledRoot, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+
+  const timedOutRoot = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-version-timeout-"),
+  );
+  const timedOutCommand = path.join(timedOutRoot, "fake-pi");
+  await executable(timedOutCommand, piRpcScript({ versionDelayMs: 5_000 }));
+  await assert.rejects(
+    new PiHarness(timedOutCommand).execute({
+      ...request(timedOutRoot, "pi", new FakeSession()),
+      timeoutMs: 50,
+    }),
+    /Pi turn timed out after 50ms/,
+  );
+  await assert.rejects(
+    readFile(path.join(timedOutRoot, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+});
+
 test("Pi resumes a native session and maps Jaeger steer to RPC steer", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-steer-"));
   const command = path.join(root, "fake-pi");
@@ -272,7 +314,7 @@ test("Pi forks a read-only side-query with a distinct deterministic session", as
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-fork-"));
   const command = path.join(root, "fake-pi");
   await executable(command, piRpcScript());
-  const queryId = "query-abcd:efgh";
+  const queryId = "query-abcdefgh-";
   const input: AgentRequest = {
     ...request(root, "pi", new FakeSession(undefined, [], queryId)),
     forkSessionId: "pi-parent",
@@ -671,6 +713,7 @@ function piRpcScript(
     floodUpdates?: boolean;
     extensionCommand?: boolean;
     version?: string;
+    versionDelayMs?: number;
   } = {},
 ): string {
   return `
@@ -679,8 +722,11 @@ const path = require("node:path")
 const readline = require("node:readline")
 const args = process.argv.slice(2)
 if (args.includes("--version")) {
-  process.stdout.write(${JSON.stringify(options.version ?? "0.82.1")} + "\\n")
-  process.exit(0)
+  setTimeout(() => {
+    process.stdout.write(${JSON.stringify(options.version ?? "0.82.1")} + "\\n")
+    process.exit(0)
+  }, ${options.versionDelayMs ?? 0})
+  return
 }
 fs.writeFileSync(path.join(process.cwd(), "pi-args.json"), JSON.stringify(args))
 const requests = path.join(process.cwd(), "pi-requests.jsonl")
