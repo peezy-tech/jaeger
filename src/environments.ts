@@ -353,7 +353,7 @@ export async function inspectEnvironmentStatus(
   const managed = new Map((state?.resources ?? []).map((resource) => [resource.target, resource]));
   const plannedResources = await Promise.all(
     plan.resources.map(async (resource): Promise<ResourceStatus> => {
-      const actualDigest = await digestPath(resource.target);
+      const actualDigest = await digestResourcePath(resource);
       const status =
         actualDigest === undefined
           ? "missing"
@@ -376,7 +376,7 @@ export async function inspectEnvironmentStatus(
   const obsoleteResources: ResourceStatus[] = [];
   for (const resource of state?.resources ?? []) {
     if (plannedTargets.has(resource.target)) continue;
-    const actualDigest = await digestPath(resource.target);
+    const actualDigest = await digestResourcePath(resource);
     obsoleteResources.push({
       provider: resource.provider,
       category: resource.category,
@@ -458,7 +458,7 @@ export async function applyEnvironment(
   if (!options.force) {
     for (const resource of plan.resources) {
       if (previousByTarget.has(resource.target)) continue;
-      const actual = await digestPath(resource.target);
+      const actual = await digestResourcePath(resource);
       if (actual !== undefined && actual !== resource.digest) {
         throw new Error(
           `Refusing to replace unmanaged target ${resource.target}; rerun with --force to preserve it as a backup`,
@@ -504,7 +504,7 @@ export async function applyEnvironment(
   const backupGeneration = path.join(paths.stateRoot, "backups", randomUUID());
   for (const resource of plan.resources) {
     const old = previousByTarget.get(resource.target);
-    const actualDigest = await digestPath(resource.target);
+    const actualDigest = await digestResourcePath(resource);
     let backup = old?.backup;
     if (actualDigest === resource.digest) {
       unchanged += 1;
@@ -642,11 +642,6 @@ export async function uninstallEnvironment(
   let removed = 0;
   let removedPlugins = 0;
   let removedPackages = 0;
-  for (const resource of state.resources) {
-    await removeManagedResource(resource);
-    if (resource.backup) restored += 1;
-    else removed += 1;
-  }
   const pluginManager = options.pluginManager ?? nativePluginManager;
   for (const plugin of state.plugins) {
     if (
@@ -666,6 +661,11 @@ export async function uninstallEnvironment(
       await packageManager.uninstall(packageDefinition.source);
       removedPackages += 1;
     }
+  }
+  for (const resource of state.resources) {
+    await removeManagedResource(resource);
+    if (resource.backup) restored += 1;
+    else removed += 1;
   }
   await rm(path.join(paths.stateRoot, "active.json"), { force: true });
   return {
@@ -687,8 +687,8 @@ async function preflightManagedChanges(
   force: boolean,
 ): Promise<void> {
   for (const resource of state?.resources ?? []) {
-    const actual = await digestPath(resource.target);
     const next = desired.get(resource.target);
+    const actual = await digestResourcePath(next ?? resource);
     if (actual !== resource.digest && actual !== next?.digest && !force) {
       throw new Error(`Managed target has local changes: ${resource.target}; rerun with --force to replace them`);
     }
@@ -739,7 +739,15 @@ async function sourceResource(
     source,
     target,
     kind: sourceStat.isDirectory() ? "directory" : "file",
-    digest: await requiredDigestPath(source),
+    digest: await requiredResourceDigest(
+      {
+        provider,
+        category,
+        target,
+        kind: sourceStat.isDirectory() ? "directory" : "file",
+      },
+      source,
+    ),
   };
 }
 
@@ -891,8 +899,42 @@ async function digestPath(target: string): Promise<string | undefined> {
   }
 }
 
-async function requiredDigestPath(target: string): Promise<string> {
-  const digest = await digestPath(target);
+async function digestResourcePath(
+  resource: Pick<EnvironmentResource, "provider" | "category" | "target" | "kind">,
+  target: string = resource.target,
+): Promise<string | undefined> {
+  if (
+    resource.provider !== "pi" ||
+    resource.category !== "config" ||
+    resource.kind !== "file" ||
+    path.basename(resource.target) !== "settings.json"
+  ) {
+    return await digestPath(target);
+  }
+  try {
+    const targetStat = await lstat(target);
+    if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
+      return await digestPath(target);
+    }
+    const value: unknown = JSON.parse(await readFile(target, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return await digestPath(target);
+    }
+    const settings = { ...(value as Record<string, unknown>) };
+    delete settings.packages;
+    return hashText(JSON.stringify(settings));
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return undefined;
+    if (error instanceof SyntaxError) return await digestPath(target);
+    throw error;
+  }
+}
+
+async function requiredResourceDigest(
+  resource: Pick<EnvironmentResource, "provider" | "category" | "target" | "kind">,
+  target: string,
+): Promise<string> {
+  const digest = await digestResourcePath(resource, target);
   if (digest === undefined) throw new Error(`Environment resource disappeared: ${target}`);
   return digest;
 }
@@ -1234,58 +1276,8 @@ function piPackageIdentity(
   source: string,
   settingsDirectory: string,
 ): string {
-  if (source.startsWith("npm:")) {
-    const spec = source.slice("npm:".length).trim();
-    const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@.+)?$/);
-    return `npm:${match?.[1] ?? spec}`;
-  }
-  if (/^(?:git:|https:\/\/|ssh:\/\/)/.test(source)) {
-    const repository = piGitRepository(source);
-    if (repository) return `git:${repository}`;
-  }
+  if (/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source)) return source;
   return `local:${path.resolve(settingsDirectory, source)}`;
-}
-
-function piGitRepository(source: string): string | undefined {
-  const value = source.startsWith("git:")
-    ? source.slice("git:".length)
-    : source;
-  const scpMatch = value.match(/^git@([^:]+):(.+)$/);
-  if (scpMatch) {
-    return normalizedPiGitRepository(
-      scpMatch[1] as string,
-      scpMatch[2] as string,
-    );
-  }
-  if (/^(?:https?|ssh|git):\/\//.test(value)) {
-    try {
-      const parsed = new URL(value);
-      return normalizedPiGitRepository(
-        parsed.hostname,
-        parsed.pathname.replace(/^\/+/, ""),
-      );
-    } catch {
-      return undefined;
-    }
-  }
-  const slash = value.indexOf("/");
-  if (slash < 0) return undefined;
-  return normalizedPiGitRepository(
-    value.slice(0, slash),
-    value.slice(slash + 1),
-  );
-}
-
-function normalizedPiGitRepository(
-  host: string,
-  pathWithRef: string,
-): string | undefined {
-  const repositoryPath = pathWithRef.split("@", 1)[0]
-    ?.replace(/\.git$/, "")
-    .replace(/^\/+/, "");
-  return host && repositoryPath
-    ? `${host.toLowerCase()}/${repositoryPath}`
-    : undefined;
 }
 
 function validatePiPackageSource(source: string): void {

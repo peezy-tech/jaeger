@@ -184,12 +184,15 @@ packages = ["npm:existing@2.0.0"]
       files: {},
     });
     const calls: string[] = [];
+    let installedSource = "npm:existing@1.0.0";
     const packageManager = createNativePackageManager(
       async (command, args) => {
         calls.push(`${command} ${args.join(" ")}`);
+        if (args[0] === "install") installedSource = args[1] as string;
+        if (args[0] === "remove") installedSource = "";
         return {
           stdout: args[0] === "list"
-            ? "User packages:\n  npm:existing@1.0.0\n"
+            ? `User packages:\n  ${installedSource}\n`
             : "",
           stderr: "",
         };
@@ -204,7 +207,16 @@ packages = ["npm:existing@2.0.0"]
     assert.equal(
       (await applyEnvironment(plan, paths, { packageManager }))
         .installedPackages,
-      0,
+      1,
+    );
+    assert.equal(
+      (await inspectEnvironmentStatus(
+        plan,
+        paths,
+        undefined,
+        packageManager,
+      )).current,
+      true,
     );
     assert.equal(
       (
@@ -212,9 +224,124 @@ packages = ["npm:existing@2.0.0"]
           packageManager,
         })
       ).removedPackages,
-      0,
+      1,
     );
-    assert.deepEqual(calls, ["pi list --no-approve"]);
+    assert.deepEqual(calls, [
+      "pi list --no-approve",
+      "pi install npm:existing@2.0.0 --no-approve",
+      "pi list --no-approve",
+      "pi list --no-approve",
+      "pi remove npm:existing@2.0.0 --no-approve",
+    ]);
+  });
+});
+
+test("Pi package changes coexist with a managed settings file", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const directory = await writeEnvironment(root, "pi_settings", {
+      manifest: `
+version = 1
+name = "pi_settings"
+[providers.pi]
+packages = ["npm:managed@1.0.0"]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json": `{"theme":"dark"}\n`,
+      },
+    });
+    const settingsPath = path.join(piHome, "settings.json");
+    const installed = new Set<string>();
+    const packageManager: NativePackageManager = {
+      async isInstalled(source) {
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as { readonly packages?: readonly string[] };
+        return settings.packages?.includes(source) === true;
+      },
+      async install(source) {
+        installed.add(source);
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as Record<string, unknown>;
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ ...settings, packages: [source] }, null, 2),
+        );
+      },
+      async uninstall(source) {
+        installed.delete(source);
+        const settings = JSON.parse(
+          await readFile(settingsPath, "utf8"),
+        ) as Record<string, unknown>;
+        await writeFile(
+          settingsPath,
+          JSON.stringify({ ...settings, packages: [] }, null, 2),
+        );
+      },
+    };
+    const plan = await loadEnvironmentPlan(
+      "pi_settings",
+      paths,
+      path.join(directory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    assert.equal(
+      (await applyEnvironment(plan, paths, { packageManager }))
+        .installedPackages,
+      1,
+    );
+    assert.equal(
+      (await inspectEnvironmentStatus(
+        plan,
+        paths,
+        undefined,
+        packageManager,
+      )).current,
+      true,
+    );
+    const repeated = await applyEnvironment(plan, paths, { packageManager });
+    assert.equal(repeated.changed, 0);
+    assert.equal(repeated.installedPackages, 0);
+    assert.deepEqual(installed, new Set(["npm:managed@1.0.0"]));
+    const changedSettings = JSON.parse(
+      await readFile(settingsPath, "utf8"),
+    ) as Record<string, unknown>;
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ ...changedSettings, theme: "light" }, null, 2),
+    );
+    assert.equal(
+      (await inspectEnvironmentStatus(
+        plan,
+        paths,
+        undefined,
+        packageManager,
+      )).current,
+      false,
+    );
+    await assert.rejects(
+      () => applyEnvironment(plan, paths, { packageManager }),
+      /local changes/,
+    );
+    await writeFile(
+      settingsPath,
+      JSON.stringify({ ...changedSettings, theme: "dark" }, null, 2),
+    );
+    assert.equal(
+      (
+        await uninstallEnvironment(paths, "pi_settings", {
+          packageManager,
+        })
+      ).removedPackages,
+      1,
+    );
+    assert.deepEqual(installed, new Set());
+    await assert.rejects(() => readFile(settingsPath), /ENOENT/);
   });
 });
 
@@ -552,19 +679,24 @@ test("native Pi package manager uses package commands and parses user package so
     return { stdout: "", stderr: "" };
   });
   assert.equal(await manager.isInstalled("npm:@acme/tools@1.2.3"), true);
-  assert.equal(await manager.isInstalled("npm:@acme/tools@9.9.9"), true);
+  assert.equal(await manager.isInstalled("npm:@acme/tools@9.9.9"), false);
   assert.equal(
     await manager.isInstalled("git:github.com/acme/pi-ext@v2"),
     true,
   );
   assert.equal(
+    await manager.isInstalled("git:github.com/acme/pi-ext@v3"),
+    false,
+  );
+  assert.equal(
     await manager.isInstalled("https://github.com/acme/pi-ext.git@v3"),
-    true,
+    false,
   );
   assert.equal(await manager.isInstalled("npm:project-only@1.0.0"), false);
   await manager.install("npm:@acme/tools@1.2.3");
   await manager.uninstall("npm:@acme/tools@1.2.3");
   assert.deepEqual(calls, [
+    "pi list --no-approve",
     "pi list --no-approve",
     "pi list --no-approve",
     "pi list --no-approve",

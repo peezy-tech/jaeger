@@ -332,6 +332,7 @@ const readline = require("node:readline")
 const args = process.argv.slice(2)
 const sessionIndex = args.indexOf("--session-id")
 const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "pi-session"
+let isStreaming = false
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line)
@@ -341,11 +342,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       type: "response",
       command: "get_state",
       success: true,
-      data: { sessionId, messageCount: 0 }
+      data: { sessionId, messageCount: 0, isStreaming }
     })
     return
   }
   if (message.type === "prompt") {
+    isStreaming = true
     send({ id: message.id, type: "response", command: "prompt", success: true })
     setImmediate(() => {
       send({
@@ -356,6 +358,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
           stopReason: "stop"
         }
       })
+      isStreaming = false
       send({ type: "agent_settled" })
     })
   }
