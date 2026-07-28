@@ -1508,6 +1508,7 @@ function piGitPackageDescriptor(
     }
     host = url.hostname;
     ({ packagePath, ref } = splitPiGitRef(url.pathname.replace(/^\/+/, "")));
+    if (url.hash.length > 1) ref = url.hash.slice(1);
   } else {
     const slash = raw.indexOf("/");
     if (slash < 0) return undefined;

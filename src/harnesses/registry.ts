@@ -34,6 +34,7 @@ const BUILTIN_DEFINITIONS: readonly HarnessDefinition[] = Object.freeze([
   }),
 ]);
 const BUILTIN_NAMES = new Set(BUILTIN_DEFINITIONS.map((definition) => definition.name));
+const LEGACY_CUSTOM_BUILTIN_NAMES = new Set(["pi"]);
 
 export function builtinHarnessDefinitions(): readonly HarnessDefinition[] {
   return BUILTIN_DEFINITIONS;
@@ -66,6 +67,7 @@ export function validateHarnessDefinitions(
   options: {
     readonly allowPinnedBuiltins?: boolean;
     readonly allowMissingBuiltins?: boolean;
+    readonly allowLegacyCustomBuiltins?: boolean;
   } = {},
 ): readonly HarnessDefinition[] {
   if (!Array.isArray(value)) throw new Error("Harness definitions must be an array");
@@ -82,6 +84,14 @@ export function validateHarnessDefinitions(
   for (const builtin of BUILTIN_DEFINITIONS) {
     const pinned = definitions.find((definition) => definition.name === builtin.name);
     if (!pinned && options.allowMissingBuiltins === true) continue;
+    if (
+      pinned &&
+      options.allowLegacyCustomBuiltins === true &&
+      LEGACY_CUSTOM_BUILTIN_NAMES.has(builtin.name) &&
+      pinned.driver !== builtin.driver
+    ) {
+      continue;
+    }
     const pinnedCommand =
       pinned?.command === builtin.command ||
       (options.allowPinnedBuiltins === true &&
@@ -126,8 +136,14 @@ export function harnessesFromDefinitions(
     allowPinnedBuiltins: true,
     allowMissingBuiltins: true,
   });
+  return adaptersFromDefinitions(validated);
+}
+
+function adaptersFromDefinitions(
+  definitions: readonly HarnessDefinition[],
+): ReadonlyMap<string, HarnessAdapter> {
   return new Map(
-    validated.map((definition) => [definition.name, adapterForDefinition(definition)]),
+    definitions.map((definition) => [definition.name, adapterForDefinition(definition)]),
   );
 }
 
@@ -138,12 +154,13 @@ export function harnessDefinitionsForRun(
     ? validateHarnessDefinitions(record.harnesses, {
         allowPinnedBuiltins: true,
         allowMissingBuiltins: true,
+        allowLegacyCustomBuiltins: true,
       })
     : BUILTIN_DEFINITIONS;
 }
 
 export function harnessesForRun(record: WorkflowRunRecord): ReadonlyMap<string, HarnessAdapter> {
-  return harnessesFromDefinitions(harnessDefinitionsForRun(record));
+  return adaptersFromDefinitions(harnessDefinitionsForRun(record));
 }
 
 export function validateHarnessName(value: unknown): string {

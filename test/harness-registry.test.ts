@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   builtinHarnessDefinitions,
+  harnessesForRun,
   harnessesFromDefinitions,
   loadHarnessDefinitions,
   pinHarnessDefinitions,
@@ -126,16 +127,35 @@ test("historical pinned registries remain valid when newer built-ins are added",
     }).map((definition) => definition.name),
     ["codex", "claude"],
   );
-  assert.throws(
-    () =>
-      validateHarnessDefinitions(
-        [
-          ...historical,
-          { name: "pi", driver: "codex-app-server", command: "/usr/bin/pi" },
-        ],
-        { allowPinnedBuiltins: true, allowMissingBuiltins: true },
-      ),
-    /Built-in harness pi cannot be replaced/,
+  const legacyPi = validateHarnessDefinitions(
+    [
+      ...historical,
+      { name: "pi", driver: "codex-app-server", command: "/usr/bin/pi" },
+    ],
+    {
+      allowPinnedBuiltins: true,
+      allowMissingBuiltins: true,
+      allowLegacyCustomBuiltins: true,
+    },
+  );
+  assert.equal(
+    harnessesForRun({
+      version: 3,
+      runId: "20260728000000-0000000000",
+      workflowPath: "/tmp/workflow.js",
+      workflowHash: "0".repeat(64),
+      cwd: "/tmp",
+      inputs: {},
+      maxConcurrency: 1,
+      boundary: {
+        kind: "full-authority",
+        isolated: false,
+        description: "test",
+      },
+      createdAt: "2026-07-28T00:00:00.000Z",
+      harnesses: legacyPi,
+    }).get("pi")?.driver,
+    "codex-app-server",
   );
 });
 

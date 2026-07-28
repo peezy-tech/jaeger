@@ -400,6 +400,7 @@ function parseRunRecord(contents: string, runId: string): WorkflowRunRecord {
     validateHarnessDefinitions(parsed.harnesses, {
       allowPinnedBuiltins: true,
       allowMissingBuiltins: true,
+      allowLegacyCustomBuiltins: true,
     });
   }
   if (parsed.version === 4) validateV4Record(parsed);

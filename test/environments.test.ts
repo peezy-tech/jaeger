@@ -1050,6 +1050,28 @@ test("native Pi package manager canonicalizes hosted Git shorthand aliases", asy
   );
 });
 
+test("native Pi package manager distinguishes HTTPS Git fragment refs", async () => {
+  const manager = createNativePackageManager(async () => ({
+    stdout:
+      "User packages:\n" +
+      "  https://github.com/acme/pi-ext#v1\n",
+    stderr: "",
+  }));
+
+  assert.equal(
+    await manager.isInstalled("https://github.com/acme/pi-ext#v1"),
+    true,
+  );
+  assert.equal(
+    await manager.isInstalled("https://github.com/acme/pi-ext#v2"),
+    false,
+  );
+  assert.equal(
+    await manager.installedSource?.("https://github.com/acme/pi-ext#v2"),
+    "https://github.com/acme/pi-ext#v1",
+  );
+});
+
 test("native Pi package manager matches local packages relative to Pi settings", async () => {
   const settingsDirectory = path.join(
     path.parse(process.cwd()).root,

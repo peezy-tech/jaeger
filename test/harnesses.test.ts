@@ -219,6 +219,24 @@ test("Pi version-gates max thinking while allowing compatible installations", as
   );
 });
 
+test("Pi rejects unsupported RPC versions before normal workflow execution", async () => {
+  const root = await mkdtemp(
+    path.join(os.tmpdir(), "jaeger-pi-rpc-incompatible-"),
+  );
+  const command = path.join(root, "fake-pi");
+  await executable(command, piRpcScript({ version: "0.80.3" }));
+
+  await assert.rejects(
+    () => new PiHarness(command).execute(request(root, "pi", new FakeSession())),
+    /pi-rpc requires Pi 0\.80\.4 or newer/,
+  );
+  await assert.rejects(
+    readFile(path.join(root, "pi-args.json"), "utf8"),
+    (error: unknown) =>
+      error instanceof Error && "code" in error && error.code === "ENOENT",
+  );
+});
+
 test("Pi resumes a native session and maps Jaeger steer to RPC steer", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-steer-"));
   const command = path.join(root, "fake-pi");
@@ -271,6 +289,7 @@ test("Pi forks a read-only side-query with a distinct deterministic session", as
   assert.equal(args[args.indexOf("--session-id") + 1], expectedSessionId);
   assert.equal(args.includes("--no-approve"), true);
   assert.equal(args.includes("--approve"), false);
+  assert.equal(args.includes("--no-extensions"), true);
   assert.equal(args[args.indexOf("--tools") + 1], "read,grep,find,ls");
 });
 
