@@ -759,7 +759,7 @@ async function materializeResource(resource: EnvironmentResource): Promise<void>
     return;
   }
   if (!resource.source) throw new Error(`Resource has no source: ${resource.target}`);
-  if (preservedPiPackages !== undefined) {
+  if (isPiSettingsResource(resource)) {
     const sourceStat = await lstat(resource.source);
     if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
       throw new Error(
@@ -809,7 +809,7 @@ function mergePiSettingsPackages(
   content: string,
   packages: unknown | undefined,
 ): string {
-  if (packages === undefined) return content;
+  if (!isPiSettingsResource(resource)) return content;
   let value: unknown;
   try {
     value = JSON.parse(content);
@@ -825,7 +825,11 @@ function mergePiSettingsPackages(
     );
   }
   const settings = value as Record<string, unknown>;
-  settings.packages = packages;
+  if (packages === undefined) {
+    delete settings.packages;
+  } else {
+    settings.packages = packages;
+  }
   return `${JSON.stringify(settings, null, 2)}\n`;
 }
 

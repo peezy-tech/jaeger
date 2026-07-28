@@ -121,12 +121,6 @@ export async function submitSessionQuery(
       `No session adapter is installed for ${session.harness}`,
     );
   }
-  if (adapter.driver === "pi-rpc" && session.status !== "idle") {
-    throw new BackendRpcError(
-      "session_not_available",
-      `Pi session ${session.id} must be idle before it can be forked for a query`,
-    );
-  }
   if (!session.nativeSessionId) {
     throw new BackendRpcError(
       "session_not_available",
@@ -160,7 +154,36 @@ export async function submitSessionQuery(
     backend: options.backend,
     createdAt: new Date().toISOString(),
   };
-  const request = await createOrReadRequest(journal.runDir, candidate);
+  const existingRequest = await readRequest(
+    journal.runDir,
+    options.queryId,
+  ).catch((error: unknown) => {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  });
+  if (existingRequest) {
+    if (!sameRequest(existingRequest, candidate)) {
+      throw new BackendRpcError(
+        "idempotency_conflict",
+        `Session query id ${options.queryId} was already used for a different request`,
+      );
+    }
+    const existingSummary = await inspectSessionQuery({
+      stateDir: options.stateDir,
+      runId: options.runId,
+      queryId: options.queryId,
+      backend: options.backend,
+    });
+    if (existingSummary.status !== "queued") return existingSummary;
+  }
+  if (adapter.driver === "pi-rpc" && session.status !== "idle") {
+    throw new BackendRpcError(
+      "session_not_available",
+      `Pi session ${session.id} must be idle before it can be forked for a query`,
+    );
+  }
+  const request =
+    existingRequest ?? await createOrReadRequest(journal.runDir, candidate);
   if (!sameRequest(request, candidate)) {
     throw new BackendRpcError(
       "idempotency_conflict",

@@ -263,6 +263,19 @@ return await agent("Do the work", { harness: "pi", label: "worker" })
     const starting = JSON.parse(await readFile(sessionPath, "utf8")) as Record<string, unknown>;
     starting.status = "starting";
     await writeFile(sessionPath, `${JSON.stringify(starting)}\n`);
+    const completedRetry = await submitSessionQuery({
+      stateDir,
+      entrypoint,
+      env: process.env,
+      backend: "embedded",
+      runId: run.runId,
+      selector: parent.id,
+      message: "Inspect the parent",
+      queryId: "query-reserved:0001",
+      launch: false,
+    });
+    assert.equal(completedRetry.status, "completed");
+    assert.equal(completedRetry.output, "pi answer");
     await assert.rejects(
       submitSessionQuery({
         stateDir,
@@ -330,6 +343,10 @@ function fakePiScript(): string {
   return `
 const readline = require("node:readline")
 const args = process.argv.slice(2)
+if (args.includes("--version")) {
+  process.stdout.write("0.82.1\\n")
+  process.exit(0)
+}
 const sessionIndex = args.indexOf("--session-id")
 const sessionId = sessionIndex >= 0 ? args[sessionIndex + 1] : "pi-session"
 let isStreaming = false

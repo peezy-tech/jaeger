@@ -475,6 +475,75 @@ target = "$PI_CODING_AGENT_DIR/settings.json"
   });
 });
 
+test("Pi settings sources cannot activate undeclared packages", async () => {
+  await withEnvironment(async ({ root, paths, piHome }) => {
+    const firstDirectory = await writeEnvironment(root, "pi_first", {
+      manifest: `
+version = 1
+name = "pi_first"
+[providers.pi]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json":
+          `{"theme":"dark","packages":["npm:undeclared@1.0.0"]}\n`,
+      },
+    });
+    const secondDirectory = await writeEnvironment(root, "pi_second", {
+      manifest: `
+version = 1
+name = "pi_second"
+[providers.pi]
+
+[[providers.pi.configs]]
+source = "configs/settings.json"
+target = "$PI_CODING_AGENT_DIR/settings.json"
+`,
+      files: {
+        "configs/settings.json":
+          `{"theme":"light","packages":["npm:also-undeclared@2.0.0"]}\n`,
+      },
+    });
+    const settingsPath = path.join(piHome, "settings.json");
+    await mkdir(piHome, { recursive: true });
+    await writeFile(settingsPath, `{"theme":"system"}\n`);
+    const firstPlan = await loadEnvironmentPlan(
+      "pi_first",
+      paths,
+      path.join(firstDirectory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+    const secondPlan = await loadEnvironmentPlan(
+      "pi_second",
+      paths,
+      path.join(secondDirectory, "environment.toml"),
+      { PI_CODING_AGENT_DIR: piHome, PATH: "" },
+    );
+
+    assert.deepEqual(firstPlan.packages, []);
+    await applyEnvironment(firstPlan, paths, { force: true });
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      theme: "dark",
+    });
+    assert.equal(
+      (await inspectEnvironmentStatus(firstPlan, paths)).current,
+      true,
+    );
+
+    await applyEnvironment(secondPlan, paths);
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), {
+      theme: "light",
+    });
+    assert.equal(
+      (await inspectEnvironmentStatus(secondPlan, paths)).current,
+      true,
+    );
+  });
+});
+
 test("Pi package recovery retries when the managed version is absent", async () => {
   await withEnvironment(async ({ root, paths }) => {
     const directory = await writeEnvironment(root, "pi_packages", {
