@@ -177,6 +177,13 @@ test("Pi adapter uses strict RPC, persists its session, and validates structured
   assert.match(String(requests[1]?.message), /Return an answer/);
 });
 
+test("Pi rejects thinking levels unavailable on every supported version", () => {
+  assert.throws(
+    () => new PiHarness().validateOptions({ harness: "pi", effort: "max" }),
+    /pi effort must be off, minimal, low, medium, high, or xhigh/,
+  );
+});
+
 test("Pi resumes a native session and maps Jaeger steer to RPC steer", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-pi-steer-"));
   const command = path.join(root, "fake-pi");

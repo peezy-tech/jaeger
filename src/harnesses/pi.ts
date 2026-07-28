@@ -26,7 +26,6 @@ const PI_THINKING_LEVELS = [
   "medium",
   "high",
   "xhigh",
-  "max",
 ] as const;
 const PI_DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 
@@ -52,7 +51,7 @@ export class PiHarness implements HarnessAdapter {
       !PI_THINKING_LEVELS.includes(options.effort as (typeof PI_THINKING_LEVELS)[number])
     ) {
       throw new TypeError(
-        `${this.name} effort must be off, minimal, low, medium, high, xhigh, or max`,
+        `${this.name} effort must be off, minimal, low, medium, high, or xhigh`,
       );
     }
   }

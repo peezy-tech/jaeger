@@ -299,6 +299,50 @@ packages = ["https://github.com/acme/pi-ext.git@v2"]
   });
 });
 
+test("Pi environments preserve packages installed through equivalent Git shorthand", async () => {
+  await withEnvironment(async ({ root, paths }) => {
+    const directory = await writeEnvironment(root, "pi_packages", {
+      manifest: `
+version = 1
+name = "pi_packages"
+[providers.pi]
+packages = ["git:github:acme/pi-ext"]
+`,
+      files: {},
+    });
+    const calls: string[] = [];
+    const packageManager = createNativePackageManager(
+      async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (args[0] !== "list") {
+          assert.fail("pre-existing package should not be changed");
+        }
+        return {
+          stdout: "User packages:\n  git:github.com/acme/pi-ext\n",
+          stderr: "",
+        };
+      },
+    );
+    const plan = await loadEnvironmentPlan(
+      "pi_packages",
+      paths,
+      path.join(directory, "environment.toml"),
+    );
+
+    assert.equal(
+      (await applyEnvironment(plan, paths, { packageManager }))
+        .installedPackages,
+      0,
+    );
+    assert.equal(
+      (await uninstallEnvironment(paths, "pi_packages", { packageManager }))
+        .removedPackages,
+      0,
+    );
+    assert.deepEqual(calls, ["pi list --no-approve"]);
+  });
+});
+
 test("Pi environments capture a displaced package before replacing managed settings", async () => {
   await withEnvironment(async ({ root, paths, piHome }) => {
     const directory = await writeEnvironment(root, "pi_settings", {
@@ -930,6 +974,34 @@ test("native Pi package manager uses package commands and parses user package so
     "pi install npm:@acme/tools@1.2.3 --no-approve",
     "pi remove npm:@acme/tools@1.2.3 --no-approve",
   ]);
+});
+
+test("native Pi package manager canonicalizes hosted Git shorthand aliases", async () => {
+  const manager = createNativePackageManager(async () => ({
+    stdout:
+      "User packages:\n" +
+      "  git:github.com/acme/pi-ext@v2\n" +
+      "  git:gitlab.com/acme/pi-ext\n" +
+      "  git:bitbucket.org/acme/pi-ext\n" +
+      "  git:gist.github.com/acme/abc123\n" +
+      "  git:git.sr.ht/~acme/pi-ext\n",
+    stderr: "",
+  }));
+
+  assert.equal(
+    await manager.isInstalled("git:github:acme/pi-ext@v2"),
+    true,
+  );
+  assert.equal(await manager.isInstalled("git:gitlab:acme/pi-ext"), true);
+  assert.equal(
+    await manager.isInstalled("git:bitbucket:acme/pi-ext"),
+    true,
+  );
+  assert.equal(await manager.isInstalled("git:gist:acme/abc123"), true);
+  assert.equal(
+    await manager.isInstalled("git:sourcehut:~acme/pi-ext"),
+    true,
+  );
 });
 
 test("native Pi package manager matches local packages relative to Pi settings", async () => {

@@ -1394,7 +1394,22 @@ function piPackageDescriptor(
 function piGitPackageDescriptor(
   source: string,
 ): { readonly identity: string; readonly selection: string } | undefined {
-  const raw = source.startsWith("git:") ? source.slice("git:".length) : source;
+  const rawSource = source.startsWith("git:")
+    ? source.slice("git:".length)
+    : source;
+  const hostedShortcut = rawSource.match(
+    /^(github|gitlab|bitbucket|gist|sourcehut):(.+)$/,
+  );
+  const shortcutHosts: Readonly<Record<string, string>> = {
+    github: "github.com",
+    gitlab: "gitlab.com",
+    bitbucket: "bitbucket.org",
+    gist: "gist.github.com",
+    sourcehut: "git.sr.ht",
+  };
+  const raw = hostedShortcut
+    ? `${shortcutHosts[hostedShortcut[1] as string]}/${hostedShortcut[2]}`
+    : rawSource;
   let host: string;
   let packagePath: string;
   let ref: string | undefined;
@@ -1439,12 +1454,14 @@ function splitPiGitRef(value: string): {
 }
 
 function validatePiPackageSource(source: string): void {
+  const gitSource = /^(?:git:|https:\/\/|ssh:\/\/)/.test(source);
   if (
     source.trim() === "" ||
     source !== source.trim() ||
     /[\0\r\n]/.test(source) ||
     (!path.isAbsolute(source) &&
-      !/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source))
+      !/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source)) ||
+    (gitSource && piGitPackageDescriptor(source) === undefined)
   ) {
     throw new Error(
       `providers.pi.packages entries must be npm:, git:, HTTPS, SSH, or local path sources: ${source}`,
