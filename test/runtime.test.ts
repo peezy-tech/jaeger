@@ -42,7 +42,7 @@ return "ok"
   assert.equal(prepared.staged?.record.workflowPath, workflowPath);
 });
 
-test("workflow admission accepts a pinned registry with unavailable built-ins omitted", async () => {
+test("workflow admission and resume accept a pinned registry with unavailable built-ins omitted", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-partial-registry-"));
   const workflowPath = path.join(root, "workflow.js");
   await writeFile(
@@ -54,11 +54,12 @@ return "ok"
   );
   const codex = builtinHarnessDefinitions().find((definition) => definition.name === "codex");
   assert.ok(codex);
+  const definitions = [{ ...codex, command: process.execPath }];
   const prepared = await prepareWorkflowRun({
     workflowPath,
     cwd: root,
     stateDir: path.join(root, "state"),
-    harnessDefinitions: [{ ...codex, command: process.execPath }],
+    harnessDefinitions: definitions,
     stageOnly: true,
   });
   const record = prepared.staged?.record;
@@ -68,6 +69,22 @@ return "ok"
     record.harnesses.map((definition) => definition.name),
     ["codex"],
   );
+
+  const first = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir: path.join(root, "resume-state"),
+    harnessDefinitions: definitions,
+  });
+  const resumed = await runWorkflow({
+    workflowPath,
+    cwd: root,
+    stateDir: path.join(root, "resume-state"),
+    resumeRunId: first.runId,
+    harnessDefinitions: definitions,
+  });
+  assert.equal(resumed.runId, first.runId);
+  assert.equal(resumed.result, "ok");
 });
 
 test("mixes harnesses, preserves parallel order, and replays a completed run", async () => {

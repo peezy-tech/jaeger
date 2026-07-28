@@ -175,6 +175,26 @@ export async function reserveSessionForQuery(
   }
 }
 
+export async function sessionQueryReservationMatches(
+  runDir: string,
+  request: {
+    readonly sessionId: string;
+    readonly queryId: string;
+    readonly requestHash: string;
+  },
+): Promise<boolean> {
+  try {
+    const current = await readActiveQuery(runDir, request.sessionId);
+    return (
+      current.queryId === request.queryId &&
+      current.requestHash === request.requestHash
+    );
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
 export async function clearSessionQueryReservation(
   runDir: string,
   request: {

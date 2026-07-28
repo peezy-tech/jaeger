@@ -269,6 +269,7 @@ export type SessionQueryStatus =
   | "running"
   | "orphaned"
   | "completed"
+  | "rejected"
   | "uncertain";
 
 export interface SessionQuerySummary {

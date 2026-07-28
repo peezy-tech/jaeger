@@ -36,6 +36,7 @@ import { resolveSession } from "./sessions.js";
 import {
   clearSessionQueryReservation,
   reserveSessionForQuery,
+  sessionQueryReservationMatches,
 } from "./session-turns.js";
 import type {
   AgentRequest,
@@ -76,7 +77,7 @@ interface SessionQueryResult {
   readonly version: 1;
   readonly queryId: string;
   readonly requestHash: string;
-  readonly status: "completed" | "uncertain";
+  readonly status: "completed" | "rejected" | "uncertain";
   readonly output?: JsonValue;
   readonly nativeSessionId?: string;
   readonly metadata?: Record<string, JsonValue>;
@@ -174,10 +175,29 @@ export async function submitSessionQuery(
   });
   if (summary.status !== "queued") return summary;
   if (adapter.driver === "pi-rpc") {
-    await reserveSessionForQuery(journal.runDir, request);
+    try {
+      await reserveSessionForQuery(journal.runDir, request);
+    } catch (error) {
+      if (await sessionQueryReservationMatches(journal.runDir, request)) {
+        throw acceptedAmbiguousError(request, error);
+      }
+      await publishRejectedResult(journal.runDir, request, error);
+      throw error;
+    }
   }
-  if (options.launch === false) return summary;
-  await launchSessionQueryWorker(options, request, journal.runDir);
+  if (options.launch === false) {
+    return await inspectSessionQuery({
+      stateDir: options.stateDir,
+      runId: options.runId,
+      queryId: options.queryId,
+      backend: options.backend,
+    });
+  }
+  try {
+    await launchSessionQueryWorker(options, request, journal.runDir);
+  } catch (error) {
+    throw acceptedAmbiguousError(request, error);
+  }
   return await inspectSessionQuery({
     stateDir: options.stateDir,
     runId: options.runId,
@@ -245,7 +265,11 @@ export async function waitForSessionQuery(
   while (true) {
     if (signal?.aborted) throw abortReason(signal);
     const summary = await inspectSessionQuery(input);
-    if (summary.status === "completed" || summary.status === "uncertain") return summary;
+    if (
+      summary.status === "completed" ||
+      summary.status === "rejected" ||
+      summary.status === "uncertain"
+    ) return summary;
     await abortableDelay(100, signal);
   }
 }
@@ -282,6 +306,22 @@ export async function recoverSessionQueries(
         backend: options.backend,
       });
       if (summary.status === "queued") {
+        const session = await resolveSession(journal.runDir, request.sessionId);
+        const adapter = harnessesForRun(journal.record).get(session.harness);
+        if (!adapter) {
+          throw new Error(`No session adapter is installed for ${session.harness}`);
+        }
+        if (
+          adapter.driver === "pi-rpc" &&
+          !(await sessionQueryReservationMatches(journal.runDir, request))
+        ) {
+          await publishRejectedResult(
+            journal.runDir,
+            request,
+            new Error("Pi session query has no durable session reservation"),
+          );
+          continue;
+        }
         await launchSessionQueryWorker(options, request, journal.runDir);
         launched.push(request.queryId);
       }
@@ -316,7 +356,12 @@ export async function executeSessionQueryWorker(input: {
   if (!adapter) throw new Error(`No session adapter is installed for ${session.harness}`);
   const reserved = adapter.driver === "pi-rpc";
   if (reserved) {
-    await reserveSessionForQuery(journal.runDir, request);
+    try {
+      await reserveSessionForQuery(journal.runDir, request);
+    } catch (error) {
+      await publishRejectedResult(journal.runDir, request, error);
+      return;
+    }
   }
   const owner: SessionQueryOwner = {
     version: 1,
@@ -327,6 +372,13 @@ export async function executeSessionQueryWorker(input: {
     claimedAt: new Date().toISOString(),
   };
   if (!(await publishJsonExclusive(ownerPath(journal.runDir, request), owner))) return;
+  try {
+    await readResult(journal.runDir, request);
+    await clearSessionQueryReservation(journal.runDir, request);
+    return;
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) throw error;
+  }
   const passive = new QuerySession(request.queryId);
   const agentRequest: AgentRequest = {
     harness: session.harness,
@@ -573,6 +625,33 @@ async function publishResult(
   throw new Error(`Session query ${request.queryId} already has a different terminal result`);
 }
 
+async function publishRejectedResult(
+  runDir: string,
+  request: SessionQueryRequest,
+  reason: unknown,
+): Promise<void> {
+  await publishResult(runDir, request, {
+    version: 1,
+    queryId: request.queryId,
+    requestHash: request.requestHash,
+    status: "rejected",
+    error: `Session query was not accepted: ${errorMessage(reason)}`,
+    finishedAt: new Date().toISOString(),
+  });
+  await clearSessionQueryReservation(runDir, request);
+}
+
+function acceptedAmbiguousError(
+  request: SessionQueryRequest,
+  reason: unknown,
+): BackendRpcError {
+  const inspect = publicSummary(request, "queued").inspect;
+  return new BackendRpcError(
+    "accepted_ambiguous",
+    `Session query ${request.queryId} is durably accepted, but continued execution could not be confirmed: ${errorMessage(reason)}. Retry the original session query command with --request-id ${request.queryId}, or inspect it with '${inspect}'.`,
+  );
+}
+
 function publicSummary(
   request: SessionQueryRequest,
   status: SessionQuerySummary["status"],
@@ -675,11 +754,12 @@ function validateResult(
     result.version !== 1 ||
     result.queryId !== request.queryId ||
     result.requestHash !== request.requestHash ||
-    (result.status !== "completed" && result.status !== "uncertain") ||
+    !["completed", "rejected", "uncertain"].includes(String(result.status)) ||
     typeof result.finishedAt !== "string" ||
     (result.status === "completed" &&
       (result.output === undefined || typeof result.nativeSessionId !== "string")) ||
-    (result.status === "uncertain" && typeof result.error !== "string")
+    ((result.status === "rejected" || result.status === "uncertain") &&
+      typeof result.error !== "string")
   ) {
     throw new Error("Invalid Jaeger session-query result");
   }

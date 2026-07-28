@@ -10,11 +10,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { BackendRpcError } from "../src/backend-protocol.js";
 import { builtinHarnessDefinitions } from "../src/harnesses/registry.js";
 import { HookManager } from "../src/hooks.js";
 import {
   executeSessionQueryWorker,
   inspectSessionQuery,
+  recoverSessionQueries,
   submitSessionQuery,
 } from "../src/session-queries.js";
 import {
@@ -152,6 +154,28 @@ return await agent("Do the work", { harness: "pi", label: "worker" })
     });
     assert.equal(query.status, "queued");
     await assert.rejects(
+      submitSessionQuery({
+        stateDir,
+        entrypoint,
+        env: process.env,
+        backend: "embedded",
+        runId: run.runId,
+        selector: parent.id,
+        message: "Do not run this later",
+        queryId: "query-rejected:0001",
+        launch: false,
+      }),
+      (error: unknown) =>
+        error instanceof BackendRpcError && error.code === "session_busy",
+    );
+    const rejected = await inspectSessionQuery({
+      stateDir,
+      runId: run.runId,
+      queryId: "query-rejected:0001",
+      backend: "embedded",
+    });
+    assert.equal(rejected.status, "rejected");
+    await assert.rejects(
       submitSessionTurn({
         stateDir,
         entrypoint,
@@ -171,6 +195,18 @@ return await agent("Do the work", { harness: "pi", label: "worker" })
       queryId: query.queryId,
       backend: "embedded",
     });
+    const recovery = await recoverSessionQueries(
+      {
+        stateDir,
+        entrypoint,
+        env: process.env,
+        backend: "embedded",
+      },
+      run.runId,
+    );
+    assert.deepEqual(recovery.launched, []);
+    assert.deepEqual(recovery.errors, []);
+
     const submittedTurn = await submitSessionTurn({
       stateDir,
       entrypoint,
@@ -191,6 +227,37 @@ return await agent("Do the work", { harness: "pi", label: "worker" })
             backend: "embedded",
           });
     assert.equal(turn.status, "completed");
+
+    await assert.rejects(
+      submitSessionQuery({
+        stateDir,
+        entrypoint,
+        env: {
+          ...process.env,
+          JAEGER_SYSTEMD_RUN: path.join(root, "missing-systemd-run"),
+        },
+        backend: "embedded",
+        runId: run.runId,
+        selector: parent.id,
+        message: "Survive a launcher failure",
+        queryId: "query-launch-failure:0001",
+      }),
+      (error: unknown) =>
+        error instanceof BackendRpcError && error.code === "accepted_ambiguous",
+    );
+    const launchFailure = await inspectSessionQuery({
+      stateDir,
+      runId: run.runId,
+      queryId: "query-launch-failure:0001",
+      backend: "embedded",
+    });
+    assert.equal(launchFailure.status, "queued");
+    await executeSessionQueryWorker({
+      stateDir,
+      runId: run.runId,
+      queryId: launchFailure.queryId,
+      backend: "embedded",
+    });
 
     const sessionPath = path.join(run.runDir, "sessions", parent.id, "session.json");
     const starting = JSON.parse(await readFile(sessionPath, "utf8")) as Record<string, unknown>;
