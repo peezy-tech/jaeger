@@ -97,6 +97,7 @@ interface ManagedPlugin extends EnvironmentPlugin {
 
 interface ManagedPackage extends EnvironmentPackage {
   readonly installedByEnvironment: boolean;
+  readonly previousSource?: string;
 }
 
 export interface EnvironmentPluginStatus extends EnvironmentPlugin {
@@ -122,6 +123,7 @@ export type PluginCommandRunner = (
 
 export interface NativePackageManager {
   isInstalled(source: string): Promise<boolean>;
+  installedSource?(source: string): Promise<string | undefined>;
   install(source: string): Promise<void>;
   uninstall(source: string): Promise<void>;
 }
@@ -324,10 +326,10 @@ export async function loadEnvironmentPlan(
   }
   const packageKeys = new Set<string>();
   for (const packageDefinition of packages) {
-    const key = packageKey(packageDefinition);
+    const key = packageIdentityKey(packageDefinition);
     if (packageKeys.has(key)) {
       throw new Error(
-        `Environment Pi package is declared more than once: ${packageDefinition.source}`,
+        `Environment Pi package identity is declared more than once: ${packageDefinition.source}`,
       );
     }
     packageKeys.add(key);
@@ -563,40 +565,58 @@ export async function applyEnvironment(
     previous?.packages ?? [],
   );
   const packageManager = options.packageManager ?? nativePackageManager;
-  const desiredPackageKeys = new Set(plan.packages.map(packageKey));
+  const desiredPackageIdentities = new Set(
+    plan.packages.map(packageIdentityKey),
+  );
   const previousPackages = new Map(
     (previous?.packages ?? []).map((packageDefinition) => [
-      packageKey(packageDefinition),
+      packageIdentityKey(packageDefinition),
       packageDefinition,
     ]),
   );
   for (const old of previous?.packages ?? []) {
-    if (
-      desiredPackageKeys.has(packageKey(old)) ||
-      !old.installedByEnvironment
-    ) {
-      continue;
-    }
-    if (await packageManager.isInstalled(old.source)) {
+    if (desiredPackageIdentities.has(packageIdentityKey(old))) continue;
+    if (!(await packageManager.isInstalled(old.source))) continue;
+    if (old.previousSource) {
+      await packageManager.install(old.previousSource);
+    } else if (old.installedByEnvironment) {
       await packageManager.uninstall(old.source);
       removedPackages += 1;
     }
   }
   const nextPackages: ManagedPackage[] = [];
   for (const [index, packageDefinition] of plan.packages.entries()) {
-    const previousPackage = previousPackages.get(packageKey(packageDefinition));
-    const installed = await packageManager.isInstalled(packageDefinition.source);
+    const previousPackage = previousPackages.get(
+      packageIdentityKey(packageDefinition),
+    );
+    const installedSource = await findInstalledPackageSource(
+      packageManager,
+      packageDefinition.source,
+    );
+    const installed =
+      installedSource !== undefined &&
+      piPackageSelection(installedSource, "") ===
+        piPackageSelection(packageDefinition.source, "");
+    const previousSource =
+      previousPackage?.previousSource ??
+      (!installed &&
+      installedSource !== undefined &&
+      previousPackage?.installedByEnvironment !== true
+        ? installedSource
+        : undefined);
     nextPackages.push({
       ...packageDefinition,
       installedByEnvironment:
-        previousPackage?.installedByEnvironment === true || !installed,
+        previousPackage?.installedByEnvironment === true ||
+        (!installed && previousSource === undefined),
+      ...(previousSource ? { previousSource } : {}),
     });
     if (!installed) {
       const remainingPreviousPackages = plan.packages
         .slice(index + 1)
         .flatMap((remainingPackage) => {
           const previousPackage = previousPackages.get(
-            packageKey(remainingPackage),
+            packageIdentityKey(remainingPackage),
           );
           return previousPackage ? [previousPackage] : [];
         });
@@ -654,10 +674,12 @@ export async function uninstallEnvironment(
   }
   const packageManager = options.packageManager ?? nativePackageManager;
   for (const packageDefinition of state.packages) {
-    if (
-      packageDefinition.installedByEnvironment &&
-      (await packageManager.isInstalled(packageDefinition.source))
-    ) {
+    if (!(await packageManager.isInstalled(packageDefinition.source))) {
+      continue;
+    }
+    if (packageDefinition.previousSource) {
+      await packageManager.install(packageDefinition.previousSource);
+    } else if (packageDefinition.installedByEnvironment) {
       await packageManager.uninstall(packageDefinition.source);
       removedPackages += 1;
     }
@@ -1090,25 +1112,41 @@ async function readState(stateRoot: string): Promise<EnvironmentState | undefine
       );
       rejectUnknown(
         packageDefinition,
-        ["provider", "source", "installedByEnvironment"],
+        ["provider", "source", "installedByEnvironment", "previousSource"],
         `environment state package ${index}`,
       );
       if (
         packageDefinition.provider !== "pi" ||
         typeof packageDefinition.source !== "string" ||
-        typeof packageDefinition.installedByEnvironment !== "boolean"
+        typeof packageDefinition.installedByEnvironment !== "boolean" ||
+        (packageDefinition.previousSource !== undefined &&
+          typeof packageDefinition.previousSource !== "string")
       ) {
         throw new Error(
           `Invalid Jaeger environment state package ${index}: ${target}`,
         );
       }
       validatePiPackageSource(packageDefinition.source);
+      if (packageDefinition.previousSource !== undefined) {
+        validatePiPackageSource(packageDefinition.previousSource);
+        if (
+          piPackageIdentity(packageDefinition.previousSource, "") !==
+          piPackageIdentity(packageDefinition.source, "")
+        ) {
+          throw new Error(
+            `Invalid Jaeger environment state previous package source ${index}: ${target}`,
+          );
+        }
+      }
       const parsed: ManagedPackage = {
         provider: "pi",
         source: packageDefinition.source,
         installedByEnvironment: packageDefinition.installedByEnvironment,
+        ...(packageDefinition.previousSource
+          ? { previousSource: packageDefinition.previousSource }
+          : {}),
       };
-      const key = packageKey(parsed);
+      const key = packageIdentityKey(parsed);
       if (packageKeys.has(key)) {
         throw new Error(`Duplicate Jaeger environment state package: ${key}`);
       }
@@ -1174,14 +1212,32 @@ export function createNativePackageManager(
   runner: PackageCommandRunner = executePackageCommand,
   settingsDirectory: string = piHome(process.env),
 ): NativePackageManager {
+  const installedSources = async (): Promise<readonly string[]> => {
+    const { stdout } = await runner("pi", ["list", "--no-approve"]);
+    return parsePiPackageSources(stdout);
+  };
   return {
     async isInstalled(source) {
-      const { stdout } = await runner("pi", ["list", "--no-approve"]);
+      const expected = piPackageSelection(source, settingsDirectory);
+      return (await installedSources()).some(
+        (installed) =>
+          piPackageSelection(installed, settingsDirectory) === expected,
+      );
+    },
+    async installedSource(source) {
       const expected = piPackageIdentity(source, settingsDirectory);
-      return parsePiPackageSources(stdout).some(
+      const installed = (await installedSources()).find(
         (installed) =>
           piPackageIdentity(installed, settingsDirectory) === expected,
       );
+      if (
+        installed !== undefined &&
+        piPackageSelection(installed, settingsDirectory) ===
+          piPackageSelection(source, settingsDirectory)
+      ) {
+        return source;
+      }
+      return installed;
     },
     async install(source) {
       await runner("pi", ["install", source, "--no-approve"]);
@@ -1248,6 +1304,20 @@ function packageKey(packageDefinition: EnvironmentPackage): string {
   return `${packageDefinition.provider}:${packageDefinition.source}`;
 }
 
+function packageIdentityKey(packageDefinition: EnvironmentPackage): string {
+  return `${packageDefinition.provider}:${piPackageIdentity(packageDefinition.source, "")}`;
+}
+
+async function findInstalledPackageSource(
+  packageManager: NativePackageManager,
+  source: string,
+): Promise<string | undefined> {
+  if (packageManager.installedSource) {
+    return await packageManager.installedSource(source);
+  }
+  return (await packageManager.isInstalled(source)) ? source : undefined;
+}
+
 function parsePiPackageSources(output: string): readonly string[] {
   const lines = output.split(/\r?\n/);
   if (
@@ -1276,8 +1346,85 @@ function piPackageIdentity(
   source: string,
   settingsDirectory: string,
 ): string {
-  if (/^(?:npm:|git:|https:\/\/|ssh:\/\/)/.test(source)) return source;
-  return `local:${path.resolve(settingsDirectory, source)}`;
+  return piPackageDescriptor(source, settingsDirectory).identity;
+}
+
+function piPackageSelection(
+  source: string,
+  settingsDirectory: string,
+): string {
+  return piPackageDescriptor(source, settingsDirectory).selection;
+}
+
+function piPackageDescriptor(
+  source: string,
+  settingsDirectory: string,
+): { readonly identity: string; readonly selection: string } {
+  if (source.startsWith("npm:")) {
+    const spec = source.slice("npm:".length);
+    const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
+    const name = match?.[1] ?? spec;
+    const version = match?.[2];
+    const identity = `npm:${name}`;
+    return {
+      identity,
+      selection: version ? `${identity}@${version}` : identity,
+    };
+  }
+  if (/^(?:git:|https:\/\/|ssh:\/\/)/.test(source)) {
+    const git = piGitPackageDescriptor(source);
+    if (git) return git;
+    return { identity: source, selection: source };
+  }
+  const identity = `local:${path.resolve(settingsDirectory, source)}`;
+  return { identity, selection: identity };
+}
+
+function piGitPackageDescriptor(
+  source: string,
+): { readonly identity: string; readonly selection: string } | undefined {
+  const raw = source.startsWith("git:") ? source.slice("git:".length) : source;
+  let host: string;
+  let packagePath: string;
+  let ref: string | undefined;
+  const scpLike = raw.match(/^[^@/]+@([^:]+):(.+)$/);
+  if (scpLike) {
+    host = scpLike[1] as string;
+    ({ packagePath, ref } = splitPiGitRef(scpLike[2] as string));
+  } else if (raw.includes("://")) {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return undefined;
+    }
+    host = url.hostname;
+    ({ packagePath, ref } = splitPiGitRef(url.pathname.replace(/^\/+/, "")));
+  } else {
+    const slash = raw.indexOf("/");
+    if (slash < 0) return undefined;
+    host = raw.slice(0, slash);
+    ({ packagePath, ref } = splitPiGitRef(raw.slice(slash + 1)));
+  }
+  packagePath = packagePath.replace(/\.git$/, "").replace(/^\/+|\/+$/g, "");
+  if (!host || !packagePath) return undefined;
+  const identity = `git:${host.toLowerCase()}/${packagePath}`;
+  return {
+    identity,
+    selection: ref ? `${identity}@${ref}` : identity,
+  };
+}
+
+function splitPiGitRef(value: string): {
+  readonly packagePath: string;
+  readonly ref?: string;
+} {
+  const separator = value.indexOf("@");
+  if (separator < 0) return { packagePath: value };
+  const packagePath = value.slice(0, separator);
+  const ref = value.slice(separator + 1);
+  if (!packagePath || !ref) return { packagePath: value };
+  return { packagePath, ref };
 }
 
 function validatePiPackageSource(source: string): void {

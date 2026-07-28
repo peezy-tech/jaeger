@@ -172,7 +172,7 @@ packages = ["npm:managed@1.0.0", "npm:existing@2.0.0"]
   });
 });
 
-test("Pi environments do not claim a pre-existing package with another version", async () => {
+test("Pi environments restore a pre-existing package after changing its version", async () => {
   await withEnvironment(async ({ root, paths }) => {
     const directory = await writeEnvironment(root, "pi_packages", {
       manifest: `
@@ -209,6 +209,22 @@ packages = ["npm:existing@2.0.0"]
         .installedPackages,
       1,
     );
+    const state = JSON.parse(
+      await readFile(path.join(paths.stateRoot, "active.json"), "utf8"),
+    ) as {
+      readonly packages: readonly {
+        readonly installedByEnvironment: boolean;
+        readonly previousSource?: string;
+      }[];
+    };
+    assert.deepEqual(state.packages, [
+      {
+        provider: "pi",
+        source: "npm:existing@2.0.0",
+        installedByEnvironment: false,
+        previousSource: "npm:existing@1.0.0",
+      },
+    ]);
     assert.equal(
       (await inspectEnvironmentStatus(
         plan,
@@ -224,14 +240,63 @@ packages = ["npm:existing@2.0.0"]
           packageManager,
         })
       ).removedPackages,
-      1,
+      0,
     );
+    assert.equal(installedSource, "npm:existing@1.0.0");
     assert.deepEqual(calls, [
       "pi list --no-approve",
       "pi install npm:existing@2.0.0 --no-approve",
       "pi list --no-approve",
       "pi list --no-approve",
-      "pi remove npm:existing@2.0.0 --no-approve",
+      "pi install npm:existing@1.0.0 --no-approve",
+    ]);
+  });
+});
+
+test("Pi environments restore a normalized Git package after changing its ref", async () => {
+  await withEnvironment(async ({ root, paths }) => {
+    const directory = await writeEnvironment(root, "pi_packages", {
+      manifest: `
+version = 1
+name = "pi_packages"
+[providers.pi]
+packages = ["https://github.com/acme/pi-ext.git@v2"]
+`,
+      files: {},
+    });
+    const calls: string[] = [];
+    let installedSource = "git:git@github.com:acme/pi-ext@v1";
+    const packageManager = createNativePackageManager(
+      async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (args[0] === "install") installedSource = args[1] as string;
+        return {
+          stdout:
+            args[0] === "list"
+              ? `User packages:\n  ${installedSource}\n`
+              : "",
+          stderr: "",
+        };
+      },
+    );
+    const plan = await loadEnvironmentPlan(
+      "pi_packages",
+      paths,
+      path.join(directory, "environment.toml"),
+    );
+
+    assert.equal(
+      (await applyEnvironment(plan, paths, { packageManager }))
+        .installedPackages,
+      1,
+    );
+    await uninstallEnvironment(paths, "pi_packages", { packageManager });
+    assert.equal(installedSource, "git:git@github.com:acme/pi-ext@v1");
+    assert.deepEqual(calls, [
+      "pi list --no-approve",
+      "pi install https://github.com/acme/pi-ext.git@v2 --no-approve",
+      "pi list --no-approve",
+      "pi install git:git@github.com:acme/pi-ext@v1 --no-approve",
     ]);
   });
 });
@@ -731,6 +796,10 @@ test("native Pi package manager matches local packages relative to Pi settings",
   );
 
   assert.equal(await manager.isInstalled(localPackage), true);
+  assert.equal(
+    await manager.installedSource?.(localPackage),
+    localPackage,
+  );
 });
 
 async function withEnvironment(
