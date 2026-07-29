@@ -1127,6 +1127,7 @@ async function resolveGithubCommit(
   env: NodeJS.ProcessEnv,
 ): Promise<string> {
   if (/^[a-f0-9]{40}$/i.test(ref)) return ref.toLowerCase();
+  const token = env.GITHUB_TOKEN || env.GH_TOKEN;
   const response = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/commits/${encodeURIComponent(ref)}`,
     {
@@ -1134,9 +1135,7 @@ async function resolveGithubCommit(
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": "jaeger-module-registry",
-        ...(env.GITHUB_TOKEN || env.GH_TOKEN
-          ? { Authorization: `Bearer ${env.GITHUB_TOKEN ?? env.GH_TOKEN}` }
-          : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     },
   );
@@ -1399,10 +1398,7 @@ function assertOnlyKeys(
 async function runtimeConfigReferencesModule(root: string, name: string): Promise<boolean> {
   try {
     const source = await readFile(path.join(root, RUNTIME_CONFIG_FILE), "utf8");
-    return (
-      source.includes(`./${MODULE_DIRECTORY}/${name}/`) ||
-      source.includes(`/${MODULE_DIRECTORY}/${name}/`)
-    );
+    return source.includes(`${MODULE_DIRECTORY}/${name}/`);
   } catch (error) {
     if (hasCode(error, "ENOENT")) return false;
     throw error;

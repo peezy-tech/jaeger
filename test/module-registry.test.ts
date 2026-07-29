@@ -333,8 +333,42 @@ test("removal refuses a module still referenced by the runtime composition", asy
       }),
       /referenced by jaeger\.runtime\.mjs/,
     );
+    await writeFile(
+      path.join(fixture.runtimeRoot, "jaeger.runtime.mjs"),
+      'const alpha = await import(new URL("modules/alpha/alpha.mjs", import.meta.url))\n' +
+        "export default { version: 1, modules: [alpha] }\n",
+    );
+    await assert.rejects(
+      removeModules({
+        root: fixture.runtimeRoot,
+        names: ["alpha"],
+        install: false,
+      }),
+      /referenced by jaeger\.runtime\.mjs/,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("GitHub shorthand falls back from an empty GITHUB_TOKEN to GH_TOKEN", async () => {
+  const originalFetch = globalThis.fetch;
+  let authorization: string | null = null;
+  globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get("authorization");
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      resolveModuleItem("owner/repository/alpha#main", {
+        GITHUB_TOKEN: "",
+        GH_TOKEN: "fallback-token",
+      }),
+      /HTTP 404/,
+    );
+    assert.equal(authorization, "Bearer fallback-token");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

@@ -222,12 +222,16 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await bridge.start();
   const expiryTimer = setInterval(async () => {
     try {
-      const result = await invitations.expireCurrent();
+      const result = await invitations.pendingDisposition();
       if (!result) return;
-      broadcast("telegram.call.expired", result.invitation);
-      await updateDisposition(result, "expired");
+      if (result.invitation.status === "expired") {
+        broadcast("telegram.call.expired", result.invitation);
+      }
+      await updateDisposition(result, result.invitation.status);
     } catch (error) {
-      process.stderr.write(`Telegram call expiry check failed: ${error.message}\n`);
+      process.stderr.write(
+        `Telegram call disposition recovery failed: ${error.message}\n`,
+      );
     }
   }, 30_000);
   expiryTimer.unref();

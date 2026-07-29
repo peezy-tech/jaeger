@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  parseHttpsPublicUrl,
   parseEnv,
   sendTelegramCall,
   TelegramCallInvitations,
@@ -207,6 +208,40 @@ test("a new call cannot discard an expired call before its disposition is finali
   assert.equal((await invitations.create()).invitation.status, "ringing");
 });
 
+test("answered and declined dispositions remain pending until Telegram is updated", async () => {
+  for (const status of ["answered", "declined"]) {
+    const directory = await mkdtemp(join(tmpdir(), `voice-call-${status}-retry-`));
+    const token = status[0].repeat(43);
+    const invitations = new TelegramCallInvitations({
+      stateFile: join(directory, "telegram-call.json"),
+      now: () => Date.parse("2026-07-29T03:00:00Z"),
+      createToken: () => token,
+    });
+
+    await invitations.create();
+    await invitations.recordTelegramDelivery(token, {
+      chatId: "-100123",
+      messageId: 991,
+    });
+    await invitations[status === "answered" ? "answer" : "decline"](token);
+
+    assert.equal(
+      (await invitations.pendingDisposition()).invitation.status,
+      status,
+    );
+    assert.equal(
+      (await invitations.pendingDisposition()).telegram.messageId,
+      991,
+    );
+    await assert.rejects(() => invitations.create(), {
+      message: `The ${status} Telegram call must be finalized before creating another`,
+      statusCode: 409,
+    });
+    assert.equal(await invitations.markDispositionUpdated(status), true);
+    assert.equal(await invitations.pendingDisposition(), null);
+  }
+});
+
 test("Telegram delivery uses a loud notification and an HTTPS answer button", async () => {
   let request;
   const result = await sendTelegramCall({
@@ -235,6 +270,17 @@ test("Telegram delivery uses a loud notification and an HTTPS answer button", as
   assert.match(
     body.reply_markup.inline_keyboard[0][0].url,
     /^https:\/\/hq\.peezy\.tech\/jaeger-voice\/#call=/,
+  );
+});
+
+test("Telegram invitation public URLs must use HTTPS", () => {
+  assert.equal(
+    parseHttpsPublicUrl("https://voice.example/call").href,
+    "https://voice.example/call",
+  );
+  assert.throws(
+    () => parseHttpsPublicUrl("http://voice.example/call"),
+    /require an HTTPS public URL/,
   );
 });
 

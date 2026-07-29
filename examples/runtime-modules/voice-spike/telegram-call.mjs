@@ -41,11 +41,14 @@ export class TelegramCallInvitations {
         throw httpError("A Telegram call is already ringing", 409);
       }
       if (
-        currentStatus === "expired" &&
+        ["answered", "declined", "expired"].includes(currentStatus) &&
         current?.telegram &&
         !current.dispositionUpdatedAt
       ) {
-        throw httpError("The expired Telegram call must be finalized before creating another", 409);
+        throw httpError(
+          `The ${currentStatus} Telegram call must be finalized before creating another`,
+          409,
+        );
       }
       if (!Number.isFinite(ttlMs) || ttlMs < 60_000 || ttlMs > MAX_CALL_TTL_MS) {
         throw httpError("Call lifetime must be between 1 and 30 minutes", 400);
@@ -134,17 +137,24 @@ export class TelegramCallInvitations {
   }
 
   async expireCurrent() {
+    const pending = await this.pendingDisposition();
+    return pending?.invitation.status === "expired" ? pending : null;
+  }
+
+  async pendingDisposition() {
     return await this.#exclusive(async () => {
       const record = await this.#read();
-      if (!record || this.#status(record) !== "expired") return null;
-      if (record.status !== "expired") {
+      if (!record) return null;
+      const status = this.#status(record);
+      if (!["answered", "declined", "expired"].includes(status)) return null;
+      if (status === "expired" && record.status !== "expired") {
         record.status = "expired";
         record.expiredAt = new Date(this.now()).toISOString();
         await writeOwnerOnlyJson(this.stateFile, record);
       }
       if (record.dispositionUpdatedAt) return null;
       return {
-        invitation: publicInvitation(record, "expired"),
+        invitation: publicInvitation(record, status),
         telegram: record.telegram,
       };
     });
@@ -301,6 +311,14 @@ export async function readTelegramConfig(envFile, { optional = false } = {}) {
     chatId,
     messageThreadId: values.TELEGRAM_MESSAGE_THREAD_ID || null,
   };
+}
+
+export function parseHttpsPublicUrl(value) {
+  const url = new URL(value);
+  if (url.protocol !== "https:") {
+    throw new Error(`Telegram call invitations require an HTTPS public URL: ${value}`);
+  }
+  return url;
 }
 
 export function parseEnv(source, allowedKeys = null) {
