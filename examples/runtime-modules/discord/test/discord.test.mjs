@@ -309,6 +309,35 @@ test("voice transport errors end only the current call", async () => {
   await fixture.stop();
 });
 
+test("attention arriving during teardown starts a replacement call", async () => {
+  const fixture = await createServiceFixture({ joinOnAttention: true });
+  await fixture.start();
+  await fixture.service.requestAttention("Initial attention.");
+
+  const stopStarted = deferred();
+  const releaseStop = deferred();
+  fixture.bridges[0].stop = async function () {
+    this.stopCalls += 1;
+    stopStarted.resolve();
+    await releaseStop.promise;
+  };
+  fixture.voiceChannel.members.delete(USER_ID);
+  fixture.bridges[0].emit("error", new Error("realtime failed"));
+  await stopStarted.promise;
+  assert.equal(fixture.service.phase, "stopping");
+
+  const replacement = fixture.service.requestAttention("Replacement attention.");
+  await settled();
+  assert.equal(fixture.owner.messages.length, 1);
+
+  releaseStop.resolve();
+  const result = await replacement;
+  assert.equal(result.coalesced, false);
+  assert.equal(fixture.owner.messages.length, 2);
+  assert.equal(fixture.connections.length, 2);
+  await fixture.stop();
+});
+
 test("attention never starts while the allowlisted user is already present", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -446,6 +475,50 @@ test("guild-scoped allowlisted interactions expose runs, attach, and fresh query
     },
   ]);
   assert.equal(ask.edits[0].content, "Fresh read-only answer.");
+
+  await fixture.stop();
+});
+
+test("run listing and attachment failures answer deferred interactions", async () => {
+  const fixture = await createServiceFixture();
+  await fixture.start();
+
+  fixture.runtime.runs.list = async () => {
+    throw new Error("run backend unavailable");
+  };
+  const runs = fakeInteraction({ commandName: "runs" });
+  fixture.client.emit(Events.InteractionCreate, runs);
+  await runs.done;
+  assert.equal(runs.replies.length, 1);
+  assert.match(runs.edits[0].content, /Run listing failed: run backend unavailable/);
+
+  fixture.runtime.sessions.inspect = async () => {
+    throw new Error("session unavailable");
+  };
+  const inspect = fakeInteraction({
+    commandName: "attach",
+    values: { run: "run-1", session: "reviewer" },
+  });
+  fixture.client.emit(Events.InteractionCreate, inspect);
+  await inspect.done;
+  assert.equal(inspect.replies.length, 1);
+  assert.match(inspect.edits[0].content, /Attach failed: session unavailable/);
+
+  fixture.runtime.sessions.inspect = async () => ({
+    id: "session-1",
+    label: "reviewer",
+  });
+  fixture.runtime.storage.set = async () => {
+    throw new Error("storage unavailable");
+  };
+  const storage = fakeInteraction({
+    commandName: "attach",
+    values: { run: "run-1", session: "reviewer" },
+  });
+  fixture.client.emit(Events.InteractionCreate, storage);
+  await storage.done;
+  assert.equal(storage.replies.length, 1);
+  assert.match(storage.edits[0].content, /Attach failed: storage unavailable/);
 
   await fixture.stop();
 });

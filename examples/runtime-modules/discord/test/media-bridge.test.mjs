@@ -102,6 +102,38 @@ test("peer and codec failures fail the media bridge closed", async () => {
   await fixture.bridge.stop();
 });
 
+test("Codex realtime errors and closures fail the media bridge closed", async () => {
+  for (const scenario of [
+    {
+      method: "thread/realtime/error",
+      params: { threadId: "thread-voice", message: "realtime failed" },
+      expected: /realtime failed/,
+    },
+    {
+      method: "thread/realtime/closed",
+      params: { threadId: "thread-voice", reason: "transport closed" },
+      expected: /transport closed/,
+    },
+  ]) {
+    const fixture = createFixture();
+    const failures = [];
+    fixture.bridge.on("error", (error) => failures.push(error));
+    await fixture.bridge.start();
+
+    fixture.codex.emit(scenario.method, {
+      ...scenario.params,
+      threadId: "another-thread",
+    });
+    assert.equal(failures.length, 0);
+    fixture.codex.emit(scenario.method, scenario.params);
+    assert.match(failures.at(-1).message, scenario.expected);
+
+    await fixture.bridge.stop();
+    fixture.codex.emit(scenario.method, scenario.params);
+    assert.equal(failures.length, 1);
+  }
+});
+
 test(
   "shutdown closes the peer before draining a stalled PCM write",
   { timeout: 1_000 },

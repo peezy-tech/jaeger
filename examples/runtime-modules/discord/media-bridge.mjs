@@ -64,6 +64,18 @@ export class DiscordRealtimeBridge extends EventEmitter {
     this.onSpeakingEnd = (id) => {
       if (id === this.userId) this.userSpeaking = false;
     };
+    this.onRealtimeError = (params) => {
+      if (params?.threadId !== this.codex?.threadId) return;
+      this.#fatal(
+        new Error(params.message || "Codex realtime reported an error"),
+      );
+    };
+    this.onRealtimeClosed = (params) => {
+      if (params?.threadId !== this.codex?.threadId) return;
+      this.#fatal(
+        new Error(params.reason || "Codex realtime transport closed"),
+      );
+    };
   }
 
   async start() {
@@ -71,6 +83,8 @@ export class DiscordRealtimeBridge extends EventEmitter {
     this.active = true;
     this.codex = this.codexFactory();
     this.peer = this.peerFactory({ codex: this.codex });
+    this.codex.on("thread/realtime/error", this.onRealtimeError);
+    this.codex.on("thread/realtime/closed", this.onRealtimeClosed);
     this.peer.on("pcm", (frame) => this.#acceptRealtimePcm(frame));
     this.peer.on("error", (error) => this.#fatal(error));
     this.decoder = this.codecFactory();
@@ -105,6 +119,10 @@ export class DiscordRealtimeBridge extends EventEmitter {
     const wasActive = this.active;
     this.active = false;
     this.userSpeaking = false;
+    const codex = this.codex;
+    this.codex = null;
+    codex?.off("thread/realtime/error", this.onRealtimeError);
+    codex?.off("thread/realtime/closed", this.onRealtimeClosed);
     wipeBufferQueue(this.outputQueue);
     this.outputQueueBytes = 0;
     wipeAndReplace(this, "inputPcm");
@@ -124,18 +142,17 @@ export class DiscordRealtimeBridge extends EventEmitter {
     this.decoder = null;
     this.encoder = null;
 
-    if (this.codex) {
-      if (wasActive && this.codex.connected && this.codex.threadId) {
-        const closed = this.codex.waitForNotification(
+    if (codex) {
+      if (wasActive && codex.connected && codex.threadId) {
+        const closed = codex.waitForNotification(
           "thread/realtime/closed",
-          (params) => params.threadId === this.codex.threadId,
+          (params) => params.threadId === codex.threadId,
           2_000,
         );
-        await this.codex.stopRealtime().catch(() => {});
+        await codex.stopRealtime().catch(() => {});
         await closed.catch(() => {});
       }
-      await this.codex.stop();
-      this.codex = null;
+      await codex.stop();
     }
   }
 

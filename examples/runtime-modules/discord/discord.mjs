@@ -280,6 +280,10 @@ export class DiscordService {
 
   async #requestAttention(reason) {
     this.#assertReady();
+    if (this.phase === "stopping") {
+      await this.endingCall;
+      this.#assertReady();
+    }
     if (this.phase !== "idle") {
       return { status: this.phase, coalesced: true };
     }
@@ -580,12 +584,18 @@ export class DiscordService {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     if (interaction.commandName === "runs") {
-      const runs = await this.runtime.runs.list();
-      const lines = Array.isArray(runs)
-        ? runs.slice(0, 10).map((run) => `${run.runId}  ${run.status}`)
-        : [];
+      let content;
+      try {
+        const runs = await this.runtime.runs.list();
+        const lines = Array.isArray(runs)
+          ? runs.slice(0, 10).map((run) => `${run.runId}  ${run.status}`)
+          : [];
+        content = lines.length > 0 ? lines.join("\n") : "No Jaeger runs found.";
+      } catch (error) {
+        content = `Run listing failed: ${errorMessage(error)}`;
+      }
       await interaction.editReply({
-        content: lines.length > 0 ? lines.join("\n") : "No Jaeger runs found.",
+        content,
         allowedMentions: { parse: [] },
       });
       return;
@@ -594,13 +604,22 @@ export class DiscordService {
     if (interaction.commandName === "attach") {
       const runId = interaction.options.getString("run", true);
       const selector = interaction.options.getString("session", true);
-      const session = await this.runtime.sessions.inspect(runId, selector);
-      await this.runtime.storage.set("discord-binding", {
-        guildId: this.config.guildId,
-        userId: this.config.allowUserId,
-        runId,
-        sessionId: session.id,
-      });
+      let session;
+      try {
+        session = await this.runtime.sessions.inspect(runId, selector);
+        await this.runtime.storage.set("discord-binding", {
+          guildId: this.config.guildId,
+          userId: this.config.allowUserId,
+          runId,
+          sessionId: session.id,
+        });
+      } catch (error) {
+        await interaction.editReply({
+          content: `Attach failed: ${errorMessage(error)}`,
+          allowedMentions: { parse: [] },
+        });
+        return;
+      }
       await interaction.editReply({
         content: `Attached to ${runId}/${session.id}${
           session.label ? ` (${session.label})` : ""
