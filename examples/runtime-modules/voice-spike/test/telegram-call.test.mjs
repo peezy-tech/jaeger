@@ -54,6 +54,29 @@ test("a call can be answered exactly once", async () => {
   );
 });
 
+test("a fast answer survives Telegram delivery recording and later failure handling", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-fast-answer-"));
+  const token = "f".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  await invitations.answer(token);
+  const recorded = await invitations.recordTelegramDelivery(token, {
+    chatId: "-100123",
+    messageId: 991,
+  });
+
+  assert.equal(recorded.invitation.status, "answered");
+  assert.equal(recorded.telegram.messageId, 991);
+  assert.equal((await invitations.fail(token)).status, "answered");
+  assert.equal((await invitations.current()).status, "answered");
+  assert.equal(await invitations.authorize(token), true);
+});
+
 test("parallel answer and decline requests produce exactly one transition", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-race-"));
   const token = "r".repeat(43);

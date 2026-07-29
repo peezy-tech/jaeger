@@ -42,15 +42,24 @@ try {
     reason: invitation.reason,
     expiresAt: invitation.expiresAt,
   });
-  await invitations.recordTelegramDelivery(token, {
+  const recorded = await invitations.recordTelegramDelivery(token, {
     chatId: telegram.chatId,
     messageThreadId: telegram.messageThreadId,
     messageId: delivery.messageId,
   });
+  if (["answered", "declined", "expired"].includes(recorded.invitation.status)) {
+    await updateTelegramCall({
+      ...telegram,
+      ...recorded.telegram,
+      status: recorded.invitation.status,
+      reason: recorded.invitation.reason,
+    });
+    await invitations.markDispositionUpdated(recorded.invitation.status);
+  }
   process.stdout.write(
     `${JSON.stringify({
       delivered: true,
-      status: "ringing",
+      status: recorded.invitation.status,
       messageId: delivery.messageId,
       expiresAt: invitation.expiresAt,
     })}\n`,

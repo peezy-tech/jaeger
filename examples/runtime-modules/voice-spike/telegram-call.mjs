@@ -90,7 +90,11 @@ export class TelegramCallInvitations {
   async recordTelegramDelivery(token, telegram) {
     return await this.#exclusive(async () => {
       const record = await this.#read();
-      if (!tokenMatches(record, token) || this.#status(record) !== "ringing") {
+      const status = this.#status(record);
+      if (
+        !tokenMatches(record, token) ||
+        !["ringing", "answered", "declined", "expired"].includes(status)
+      ) {
         throw httpError("Telegram call is no longer available", 410);
       }
       record.telegram = {
@@ -100,8 +104,15 @@ export class TelegramCallInvitations {
           : null,
         messageId: Number(telegram.messageId),
       };
+      if (status === "expired" && record.status !== "expired") {
+        record.status = "expired";
+        record.expiredAt = new Date(this.now()).toISOString();
+      }
       await writeOwnerOnlyJson(this.stateFile, record);
-      return publicInvitation(record, "ringing");
+      return {
+        invitation: publicInvitation(record, status),
+        telegram: record.telegram,
+      };
     });
   }
 
@@ -109,6 +120,8 @@ export class TelegramCallInvitations {
     return await this.#exclusive(async () => {
       const record = await this.#read();
       if (!tokenMatches(record, token)) return unavailableInvitation();
+      const status = this.#status(record);
+      if (status !== "ringing") return publicInvitation(record, status);
       record.status = "failed";
       record.failedAt = new Date(this.now()).toISOString();
       await writeOwnerOnlyJson(this.stateFile, record);
@@ -262,7 +275,7 @@ export async function updateTelegramCall({
   });
 }
 
-export async function readTelegramConfig(envFile) {
+export async function readTelegramConfig(envFile, { optional = false } = {}) {
   const values = parseEnv(
     await readFile(envFile, "utf8"),
     new Set([
@@ -273,6 +286,7 @@ export async function readTelegramConfig(envFile) {
   );
   const botToken = values.TELEGRAM_BOT_TOKEN;
   const chatId = values.TELEGRAM_CHAT_ID;
+  if (optional && !botToken && !chatId) return null;
   if (!botToken || !chatId) {
     throw new Error(
       "Telegram configuration requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID",

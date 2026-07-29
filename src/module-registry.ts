@@ -5,7 +5,6 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   readdir,
   rename,
@@ -18,6 +17,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Range, minVersion, validRange } from "semver";
+import {
+  acquireProcessLease,
+  ProcessLeaseBusyError,
+  releaseProcessLease,
+} from "./process-lease.js";
 
 const execFileAsync = promisify(execFile);
 const MODULE_LOCK_FILE = "modules.lock.json";
@@ -853,7 +857,9 @@ async function installProjectDependencies(
     manager === "pnpm"
       ? ["install", "--ignore-scripts"]
       : manager === "yarn"
-        ? ["install", "--ignore-scripts"]
+        ? await usesModernYarn(root, packageJson)
+          ? ["install", "--mode=skip-build"]
+          : ["install", "--ignore-scripts"]
         : ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
   try {
     await execFileAsync(manager, args, {
@@ -887,6 +893,17 @@ async function detectPackageManager(
     return "yarn";
   }
   return "npm";
+}
+
+async function usesModernYarn(
+  root: string,
+  packageJson: Record<string, unknown>,
+): Promise<boolean> {
+  if (await pathExists(path.join(root, ".yarnrc.yml"))) return true;
+  const declared = packageJson.packageManager;
+  if (typeof declared !== "string") return false;
+  const match = /^yarn@(\d+)(?:[.+-]|$)/.exec(declared);
+  return match ? Number(match[1]) >= 2 : false;
 }
 
 async function resolveCatalogItem(locator: string, item: string): Promise<SourceDocument> {
@@ -1157,11 +1174,7 @@ async function readSourceBytes(locator: string): Promise<Buffer> {
     if (!response.ok) throw new Error(`Unable to fetch module source ${locator}: HTTP ${response.status}`);
     const length = Number(response.headers.get("content-length") ?? "0");
     if (length > MAX_MODULE_FILE_BYTES) throw new Error(`Remote module source is too large: ${locator}`);
-    const contents = Buffer.from(await response.arrayBuffer());
-    if (contents.byteLength > MAX_MODULE_FILE_BYTES) {
-      throw new Error(`Remote module source is too large: ${locator}`);
-    }
-    return contents;
+    return await readLimitedResponseBody(response, locator);
   }
   await assertNoSymlinkComponents(locator);
   const targetStat = await lstat(locator);
@@ -1173,6 +1186,28 @@ async function readSourceBytes(locator: string): Promise<Buffer> {
     throw new Error(`Module source is too large: ${locator}`);
   }
   return contents;
+}
+
+async function readLimitedResponseBody(response: Response, locator: string): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_MODULE_FILE_BYTES) {
+        await reader.cancel();
+        throw new Error(`Remote module source is too large: ${locator}`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, totalBytes);
 }
 
 async function assertNoSymlinkComponents(locator: string): Promise<void> {
@@ -1409,24 +1444,21 @@ async function withModuleMutationLock<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   const lockPath = path.join(root, MODULE_MUTATION_LOCK_FILE);
-  const deadline = Date.now() + 30_000;
-  let handle;
-  while (!handle) {
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-    } catch (error) {
-      if (!hasCode(error, "EEXIST")) throw error;
-      if (Date.now() >= deadline) {
-        throw new Error(`Another Jaeger module mutation holds ${lockPath}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
+  let lease;
+  try {
+    lease = await acquireProcessLease(lockPath, { waitMs: 30_000 });
+  } catch (error) {
+    if (error instanceof ProcessLeaseBusyError) {
+      throw new Error(`Another Jaeger module mutation holds ${lockPath}`, {
+        cause: error,
+      });
     }
+    throw error;
   }
   try {
     return await operation();
   } finally {
-    await handle.close();
-    await rm(lockPath, { force: true });
+    await releaseProcessLease(lockPath, lease);
   }
 }
 
@@ -1509,7 +1541,7 @@ async function assertSafeModuleProject(
     try {
       const targetStat = await lstat(target);
       const valid =
-        relative === MODULE_DIRECTORY
+        relative === MODULE_DIRECTORY || relative === MODULE_MUTATION_LOCK_FILE
           ? targetStat.isDirectory() && !targetStat.isSymbolicLink()
           : targetStat.isFile() && !targetStat.isSymbolicLink();
       if (!valid) {

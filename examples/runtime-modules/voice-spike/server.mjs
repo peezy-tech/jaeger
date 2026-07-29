@@ -50,10 +50,14 @@ const capabilityFile =
     "capability-token",
   );
 const capabilityToken = await readOrCreateCapabilityToken(capabilityFile);
-const telegramEnvFile = process.env.VOICE_TELEGRAM_ENV_FILE;
-const telegram = telegramEnvFile
-  ? await readTelegramConfig(telegramEnvFile)
-  : null;
+const configuredTelegramEnvFile = process.env.VOICE_TELEGRAM_ENV_FILE;
+const telegramEnvFile = configuredTelegramEnvFile ?? join(homedir(), ".env");
+const telegram = await readTelegramConfig(telegramEnvFile, {
+  optional: !configuredTelegramEnvFile,
+}).catch((error) => {
+  if (!configuredTelegramEnvFile && error.code === "ENOENT") return null;
+  throw error;
+});
 const invitations = new TelegramCallInvitations({
   stateFile: invitationStateFile,
 });

@@ -10,6 +10,13 @@ test("state, transcript, and control APIs require the browser capability", async
   const capability = "s".repeat(43);
   const capabilityFile = join(directory, "capability-token");
   await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
+  process.env.HOME = directory;
+  await writeFile(
+    join(directory, ".env"),
+    "TELEGRAM_BOT_TOKEN=test-token\nTELEGRAM_CHAT_ID=-100123\n",
+    { mode: 0o600 },
+  );
+  delete process.env.VOICE_TELEGRAM_ENV_FILE;
   process.env.VOICE_SPIKE_CAPABILITY_FILE = capabilityFile;
   process.env.VOICE_SPIKE_STATE_FILE = join(directory, "operator.json");
   process.env.VOICE_SPIKE_INVITATION_STATE_FILE = join(
@@ -60,7 +67,9 @@ test("state, transcript, and control APIs require the browser capability", async
       },
     });
     assert.equal(authorized.status, 200);
-    assert.equal((await authorized.json()).connected, false);
+    const state = await authorized.json();
+    assert.equal(state.connected, false);
+    assert.equal(state.telegramCall.configured, true);
 
     const invitationAuthorized = await fetch(`${base}/api/state`, {
       headers: {

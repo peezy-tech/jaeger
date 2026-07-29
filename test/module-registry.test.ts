@@ -116,6 +116,36 @@ test("a multi-module add invokes the shared package manager exactly once", async
   }
 });
 
+test("Yarn Modern installs dependencies with build scripts disabled", async () => {
+  const fixture = await registryFixture();
+  try {
+    const bin = path.join(fixture.root, "bin");
+    const calls = path.join(fixture.root, "package-manager-calls.txt");
+    await mkdir(bin);
+    await writeFile(path.join(fixture.runtimeRoot, ".yarnrc.yml"), "nodeLinker: node-modules\n");
+    const yarn = path.join(bin, "yarn");
+    await writeFile(
+      yarn,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`,
+    );
+    await chmod(yarn, 0o755);
+
+    const result = await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      env: {
+        ...process.env,
+        PATH: bin,
+      },
+    });
+
+    assert.equal(result.packageManager, "yarn");
+    assert.equal((await readFile(calls, "utf8")).trim(), "install --mode=skip-build");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("serializes concurrent module additions without losing lock state", async () => {
   const fixture = await registryFixture();
   try {
@@ -141,6 +171,33 @@ test("serializes concurrent module additions without losing lock state", async (
         beta: "^2.0.0",
       },
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("recovers a module mutation lock whose owner process exited", async () => {
+  const fixture = await registryFixture();
+  try {
+    const lockPath = path.join(fixture.runtimeRoot, ".modules-mutation.lock");
+    await mkdir(lockPath);
+    await writeJson(path.join(lockPath, "owner.json"), {
+      pid: process.pid,
+      processStartId: "0",
+      token: "a".repeat(32),
+    });
+
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+
+    assert.deepEqual(
+      (await listInstalledModules(fixture.runtimeRoot)).modules.map(({ name }) => name),
+      ["alpha"],
+    );
+    await assert.rejects(readFile(lockPath), hasCode("ENOENT"));
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -351,6 +408,51 @@ test("rejects an HTTPS module source redirect to HTTP", async () => {
       resolveModuleItem("https://registry.example/jaeger.module.json"),
       /Remote module sources require HTTPS: http:\/\/registry\.example\/source\.mjs/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stops reading an oversized streamed HTTPS module source", async () => {
+  const originalFetch = globalThis.fetch;
+  let sourceChunks = 0;
+  let sourceCancelled = false;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "https://registry.example/jaeger.module.json") {
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          name: "oversized",
+          files: ["source.mjs"],
+          dependencies: {},
+        }),
+        { status: 200 },
+      );
+    }
+    if (url === "https://registry.example/source.mjs") {
+      return new Response(
+        new ReadableStream({
+          pull(controller) {
+            sourceChunks += 1;
+            controller.enqueue(new Uint8Array(1024 * 1024));
+          },
+          cancel() {
+            sourceCancelled = true;
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      resolveModuleItem("https://registry.example/jaeger.module.json"),
+      /Remote module source is too large/,
+    );
+    assert.equal(sourceCancelled, true);
+    assert.ok(sourceChunks <= 7);
   } finally {
     globalThis.fetch = originalFetch;
   }
