@@ -446,6 +446,51 @@ test("a recorded placeholder recovers its answer button after a crash", async ()
   assert.equal(body.reply_markup.inline_keyboard[0][0].text, "Answer");
 });
 
+test("a permanent activation rejection fails the call so the next call can proceed", async () => {
+  for (const errorCode of [400, 403]) {
+    const directory = await mkdtemp(
+      join(tmpdir(), `voice-call-activation-failure-${errorCode}-`),
+    );
+    const token = String(errorCode).repeat(15).slice(0, 43);
+    const invitations = new TelegramCallInvitations({
+      stateFile: join(directory, "telegram-call.json"),
+      now: () => Date.parse("2026-07-29T03:00:00Z"),
+      createToken: () => token,
+    });
+
+    await invitations.create();
+    await invitations.recordTelegramDelivery(token, {
+      chatId: "-100123",
+      messageId: 991,
+      answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=activation-failure",
+    });
+    const pending = await invitations.pendingDisposition();
+    const outcome = await finalizeTelegramDisposition(
+      invitations,
+      { botToken: "secret" },
+      pending,
+      {
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({
+              ok: false,
+              error_code: errorCode,
+              description: "Bad Request: message to edit not found",
+            }),
+            { status: errorCode, headers: { "content-type": "application/json" } },
+          ),
+      },
+    );
+
+    assert.equal(outcome.finalized, true);
+    assert.equal(outcome.delivered, false);
+    assert.match(outcome.error.message, /rejected permanently/);
+    assert.equal((await invitations.current()).status, "failed");
+    assert.equal(await invitations.pendingDisposition(), null);
+    assert.equal((await invitations.create()).invitation.status, "ringing");
+  }
+});
+
 test("an idempotent Telegram disposition edit counts as recovered", async () => {
   await updateTelegramCall({
     botToken: "secret",

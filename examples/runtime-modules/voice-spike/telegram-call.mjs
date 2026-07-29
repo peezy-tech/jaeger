@@ -164,6 +164,18 @@ export class TelegramCallInvitations {
     });
   }
 
+  async markTelegramActivationFailed(pending) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!dispositionMatches(record, pending) || !record.telegram) return false;
+      record.status = "failed";
+      record.failedAt = new Date(this.now()).toISOString();
+      delete record.telegram.activationPending;
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return true;
+    });
+  }
+
   async recordTelegramDeliveryUncertain(token, telegram) {
     return await this.#exclusive(async () => {
       const record = await this.#read();
@@ -436,6 +448,10 @@ export async function finalizeTelegramDisposition(
       await invitations.markTelegramDeliveryActivated(pending);
       return { finalized: false, delivered: true, error: null };
     } catch (error) {
+      if (error instanceof TelegramMessageUnavailableError) {
+        const finalized = await invitations.markTelegramActivationFailed(pending);
+        return { finalized, delivered: false, error };
+      }
       return { finalized: false, delivered: false, error };
     }
   }
