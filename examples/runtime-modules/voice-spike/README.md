@@ -9,7 +9,8 @@ be mounted into the same shared runtime project:
 
 ```bash
 jaeger modules add voice-spike
-node ~/.config/jaeger/runtime/modules/voice-spike/server.mjs
+VOICE_SPIKE_PUBLIC_ORIGIN=https://voice.example \
+  node ~/.config/jaeger/runtime/modules/voice-spike/server.mjs
 ```
 
 The item contributes no package dependency of its own. If it is installed
@@ -44,12 +45,29 @@ codex features list
 codex login status
 ```
 
+## Configuration
+
+Every install must declare its own public surface. Nothing defaults to another
+operator's host.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `VOICE_SPIKE_PUBLIC_ORIGIN` | yes, for `start` | HTTPS origin that serves this install. Every `/api/` request is checked against it, and the service refuses to start without it. |
+| `VOICE_SPIKE_PUBLIC_URL` | yes, for `call` | HTTPS URL of this install's voice surface, including any path prefix. Invitation bearer tokens are placed in its fragment, so it must be a host you control. `call` fails closed without it. |
+| `VOICE_SPIKE_CWD` | no | Working directory for the Codex app-server thread. Defaults to the process working directory. |
+| `VOICE_SPIKE_CAPABILITY_FILE` | no | Capability token path. Defaults to `~/.local/state/jaeger/voice-spike/capability-token`. |
+| `VOICE_TELEGRAM_ENV_FILE` | no | Telegram credential file. Defaults to `~/.env`. |
+
+On the HQ VPS those values are `https://hq.peezy.tech` and
+`https://hq.peezy.tech/jaeger-voice/`; substitute your own throughout this
+document.
+
 ## Run
 
 ```bash
 cd examples/runtime-modules/voice-spike
 npm test
-VOICE_SPIKE_PUBLIC_ORIGIN=https://hq.peezy.tech \
+VOICE_SPIKE_PUBLIC_ORIGIN=https://voice.example \
   VOICE_SPIKE_PORT=4319 \
   npm start
 ```
@@ -59,7 +77,7 @@ On first startup the service creates a 256-bit capability at
 value into the URL fragment when opening the browser directly:
 
 ```text
-https://hq.peezy.tech/jaeger-voice/#capability=<copied capability token>
+<VOICE_SPIKE_PUBLIC_URL>#capability=<copied capability token>
 ```
 
 The browser removes the fragment immediately and keeps the token only in
@@ -85,11 +103,17 @@ Place a call:
 
 ```bash
 cd examples/runtime-modules/voice-spike
-npm run call -- "A Jaeger workflow needs your attention."
+VOICE_SPIKE_PUBLIC_URL=https://voice.example/jaeger-voice/ \
+  npm run call -- "A Jaeger workflow needs your attention."
 ```
 
+`VOICE_SPIKE_PUBLIC_URL` must point at the surface this install serves. The
+invitation's 256-bit bearer token is placed in that URL's fragment, so pointing
+it at a host you do not control hands the token to that host. The command
+refuses to send when the variable is unset.
+
 The command sends one Telegram notification with an **Answer** button. The
-button opens the private HQ route and joins the existing Codex operator thread
+button opens that private route and joins the existing Codex operator thread
 through the proven WebRTC path.
 
 Invitation properties:

@@ -208,19 +208,19 @@ async function main(rawArgv: string[]): Promise<void> {
     command === "modules" &&
     argv[1] !== "status"
   ) {
+    // validate and view only read a local file or a registry manifest, so they
+    // run locally for every runtime selection. The module project actions
+    // mutate or inspect the host's project directory.
     const localOnlyAction = ["add", "diff", "list", "remove", "sync"].includes(
       argv[1] ?? "",
     );
-    if (localOnlyAction && selection.name === "local") {
+    if (localOnlyAction) {
+      if (selection.name !== "local") {
+        throw new Error(
+          "Module project management is host-local; run it through an interactive SSH shell on the target host",
+        );
+      }
       assertLocalRuntimeSupported("Module project management");
-    }
-    if (
-      selection.name !== "local" &&
-      (selection.explicit || localOnlyAction)
-    ) {
-      throw new Error(
-        "Module project management is host-local; run it through an interactive SSH shell on the target host",
-      );
     }
     await modulesLocalCommand(argv.slice(1));
     return;

@@ -24,7 +24,7 @@ const jaegerEnv = {
 };
 const bridge = new CodexAppServer({
   codexBin: process.env.VOICE_SPIKE_CODEX_BIN ?? "codex",
-  cwd: process.env.VOICE_SPIKE_CWD ?? "/home/peezy/repos/jaeger",
+  cwd: process.env.VOICE_SPIKE_CWD ?? process.cwd(),
   childEnv: jaegerEnv,
   dynamicTools: JAEGER_READONLY_TOOLS,
   requestHandlers: createJaegerReadonlyRequestHandlers({

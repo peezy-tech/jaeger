@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -9,6 +10,9 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { initialize, resolve } from "../src/runtime-module-loader.js";
 import {
   loadRuntimeModuleConfig,
   RuntimeModuleHost,
@@ -16,6 +20,9 @@ import {
   type RuntimeModuleOperations,
 } from "../src/runtime-modules.js";
 import type { JsonValue } from "../src/types.js";
+
+const execFileAsync = promisify(execFile);
+const cliPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/cli.js");
 
 const operations: RuntimeModuleOperations = {
   listRuns: async () => [],
@@ -115,6 +122,83 @@ export default { version: 1, modules: [fixture] }
     );
     const third = await loadRuntimeModuleConfig(configPath);
     assert.notEqual(second.digest, third.digest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the loader hook honors every registered runtime project root", async () => {
+  const first = path.join(os.tmpdir(), "jaeger-loader-first");
+  const second = path.join(os.tmpdir(), "jaeger-loader-second");
+  initialize({ root: first });
+  initialize({ root: second });
+
+  const nextResolve = (specifier: string) => ({ url: specifier, shortCircuit: true });
+  const resolveChild = async (parentRoot: string, digest: string, child: string) =>
+    (
+      await resolve(
+        pathToFileURL(child).href,
+        {
+          conditions: ["node", "import"],
+          importAttributes: {},
+          parentURL: `${pathToFileURL(path.join(parentRoot, "jaeger.runtime.mjs")).href}?jaeger-runtime-digest=${digest}`,
+        },
+        nextResolve,
+      )
+    ).url;
+
+  const firstDigest = "a".repeat(64);
+  const secondDigest = "b".repeat(64);
+  assert.match(
+    await resolveChild(first, firstDigest, path.join(first, "modules", "fixture.mjs")),
+    new RegExp(`jaeger-runtime-digest=${firstDigest}$`),
+  );
+  assert.match(
+    await resolveChild(second, secondDigest, path.join(second, "modules", "fixture.mjs")),
+    new RegExp(`jaeger-runtime-digest=${secondDigest}$`),
+  );
+  assert.doesNotMatch(
+    await resolveChild(first, firstDigest, path.join(os.tmpdir(), "outside-fixture.mjs")),
+    /jaeger-runtime-digest/,
+  );
+});
+
+test("modules validate reads the local project for every runtime selection", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-validate-"));
+  try {
+    const configPath = path.join(root, "jaeger.runtime.mjs");
+    await writeFile(configPath, `export default { version: 1, modules: [] }\n`);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: root,
+      XDG_CONFIG_HOME: path.join(root, "config"),
+      XDG_STATE_HOME: path.join(root, "state"),
+    };
+    delete env.JAEGER_RUNTIME;
+
+    const selections: readonly (readonly string[])[] = [
+      ["modules", "validate", configPath, "--json"],
+      ["--runtime", "prod", "modules", "validate", configPath, "--json"],
+    ];
+    const digests: string[] = [];
+    for (const argv of selections) {
+      const { stdout } = await execFileAsync(process.execPath, [cliPath, ...argv], {
+        cwd: root,
+        env,
+      });
+      const result = JSON.parse(stdout) as { valid: boolean; digest: string };
+      assert.equal(result.valid, true);
+      digests.push(result.digest);
+    }
+    const viaEnvironment = await execFileAsync(
+      process.execPath,
+      [cliPath, "modules", "validate", configPath, "--json"],
+      { cwd: root, env: { ...env, JAEGER_RUNTIME: "prod" } },
+    );
+    digests.push((JSON.parse(viaEnvironment.stdout) as { digest: string }).digest);
+
+    assert.match(String(digests[0]), /^[a-f0-9]{64}$/);
+    assert.equal(new Set(digests).size, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

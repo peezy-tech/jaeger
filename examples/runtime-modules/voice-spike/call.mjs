@@ -16,10 +16,13 @@ const stateFile =
   join(stateRoot, "jaeger", "voice-spike", "telegram-call.json");
 const envFile =
   process.env.VOICE_TELEGRAM_ENV_FILE ?? join(homedir(), ".env");
-const publicUrl = parseHttpsPublicUrl(
-  process.env.VOICE_SPIKE_PUBLIC_URL ??
-    "https://hq.peezy.tech/jaeger-voice/",
-);
+const configuredPublicUrl = process.env.VOICE_SPIKE_PUBLIC_URL;
+if (!configuredPublicUrl) {
+  throw new Error(
+    "VOICE_SPIKE_PUBLIC_URL must be set to this install's own HTTPS voice-surface URL; the invitation bearer token is placed in its fragment",
+  );
+}
+const publicUrl = parseHttpsPublicUrl(configuredPublicUrl);
 const reason = process.argv.slice(2).join(" ").trim() || "Jaeger wants to talk.";
 
 const invitations = new TelegramCallInvitations({ stateFile });

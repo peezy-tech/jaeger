@@ -23,8 +23,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const publicDirectory = join(here, "public");
 const port = Number(process.env.VOICE_SPIKE_PORT ?? 4319);
 const host = process.env.VOICE_SPIKE_HOST ?? "127.0.0.1";
-const publicOrigin =
-  process.env.VOICE_SPIKE_PUBLIC_ORIGIN ?? "https://hq.peezy.tech";
+const publicOrigin = process.env.VOICE_SPIKE_PUBLIC_ORIGIN;
+if (!publicOrigin) {
+  throw new Error(
+    "VOICE_SPIKE_PUBLIC_ORIGIN must be set to the HTTPS origin that serves this install's voice surface; every /api/ request is checked against it",
+  );
+}
 const stateFile =
   process.env.VOICE_SPIKE_STATE_FILE ??
   join(
@@ -72,7 +76,7 @@ const jaegerEnv = {
 
 const bridge = new CodexAppServer({
   codexBin: process.env.VOICE_SPIKE_CODEX_BIN ?? "codex",
-  cwd: process.env.VOICE_SPIKE_CWD ?? "/home/peezy/repos/jaeger",
+  cwd: process.env.VOICE_SPIKE_CWD ?? process.cwd(),
   childEnv: jaegerEnv,
   dynamicTools: JAEGER_READONLY_TOOLS,
   requestHandlers: createJaegerReadonlyRequestHandlers({
@@ -310,15 +314,19 @@ async function assertApiCapability(request) {
 }
 
 async function readJson(request) {
-  let body = "";
+  const chunks = [];
+  let bytes = 0;
   for await (const chunk of request) {
-    body += chunk;
-    if (body.length > 1_000_000) {
+    bytes += chunk.length;
+    if (bytes > 1_000_000) {
       const error = new Error("Request body is too large");
       error.statusCode = 413;
       throw error;
     }
+    chunks.push(chunk);
   }
+  // Decode once: a multi-byte UTF-8 sequence can straddle a chunk boundary.
+  const body = Buffer.concat(chunks).toString("utf8");
   try {
     return JSON.parse(body || "{}");
   } catch {

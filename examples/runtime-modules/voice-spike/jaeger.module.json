@@ -36,6 +36,16 @@
       "required": true
     },
     {
+      "name": "VOICE_SPIKE_PUBLIC_URL",
+      "required": true,
+      "description": "HTTPS URL of this install's own voice surface; Telegram invitation tokens are placed in its fragment"
+    },
+    {
+      "name": "VOICE_SPIKE_CWD",
+      "required": false,
+      "description": "Working directory for the Codex app-server thread; defaults to the process working directory"
+    },
+    {
       "name": "VOICE_SPIKE_CAPABILITY_FILE",
       "required": false,
       "secret": true
