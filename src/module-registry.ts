@@ -1640,14 +1640,29 @@ function assertOnlyKeys(
 async function runtimeConfigReferencesModule(root: string, name: string): Promise<boolean> {
   try {
     const source = await readFile(path.join(root, RUNTIME_CONFIG_FILE), "utf8");
-    return (
+    if (
       source.includes(`${MODULE_DIRECTORY}/${name}/`) ||
       source.includes(`${MODULE_DIRECTORY}/\${`)
+    ) {
+      return true;
+    }
+    // A runtime config can construct the module path from separate path
+    // segments, so the complete `modules/<name>/` string need not occur in
+    // the source. Keep removal conservative when both path components are
+    // present as source tokens.
+    return (
+      sourceTokenPattern(source, MODULE_DIRECTORY) &&
+      sourceTokenPattern(source, name)
     );
   } catch (error) {
     if (hasCode(error, "ENOENT")) return false;
     throw error;
   }
+}
+
+function sourceTokenPattern(source: string, value: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^A-Za-z0-9_-])${escaped}(?:$|[^A-Za-z0-9_-])`).test(source);
 }
 
 async function listRelativeFiles(root: string): Promise<string[]> {
