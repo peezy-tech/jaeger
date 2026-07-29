@@ -1381,9 +1381,20 @@ async function readJsonDocument(
   locator: string,
   githubToken?: string,
 ): Promise<SourceDocument> {
-  const contents = await readSourceBytes(locator, githubToken);
+  let contents: Buffer;
+  let resolvedLocator = locator;
+  if (/^https:\/\//i.test(locator)) {
+    const fetched = await fetchHttps(locator, githubToken);
+    contents = await readRemoteSourceBytes(fetched.response, locator);
+    resolvedLocator = fetched.locator;
+  } else {
+    contents = await readSourceBytes(locator, githubToken);
+  }
   try {
-    return { locator, value: JSON.parse(contents.toString("utf8")) as unknown };
+    return {
+      locator: resolvedLocator,
+      value: JSON.parse(contents.toString("utf8")) as unknown,
+    };
   } catch (error) {
     throw new Error(`Invalid JSON module source: ${locator}`, { cause: error });
   }
@@ -1391,11 +1402,8 @@ async function readJsonDocument(
 
 async function readSourceBytes(locator: string, githubToken?: string): Promise<Buffer> {
   if (/^https:\/\//i.test(locator)) {
-    const response = await fetchHttps(locator, githubToken);
-    if (!response.ok) throw new Error(`Unable to fetch module source ${locator}: HTTP ${response.status}`);
-    const length = Number(response.headers.get("content-length") ?? "0");
-    if (length > MAX_MODULE_FILE_BYTES) throw new Error(`Remote module source is too large: ${locator}`);
-    return await readLimitedResponseBody(response, locator);
+    const fetched = await fetchHttps(locator, githubToken);
+    return await readRemoteSourceBytes(fetched.response, locator);
   }
   await assertNoSymlinkComponents(locator);
   const targetStat = await lstat(locator);
@@ -1407,6 +1415,13 @@ async function readSourceBytes(locator: string, githubToken?: string): Promise<B
     throw new Error(`Module source is too large: ${locator}`);
   }
   return contents;
+}
+
+async function readRemoteSourceBytes(response: Response, locator: string): Promise<Buffer> {
+  if (!response.ok) throw new Error(`Unable to fetch module source ${locator}: HTTP ${response.status}`);
+  const length = Number(response.headers.get("content-length") ?? "0");
+  if (length > MAX_MODULE_FILE_BYTES) throw new Error(`Remote module source is too large: ${locator}`);
+  return await readLimitedResponseBody(response, locator);
 }
 
 async function readLimitedResponseBody(response: Response, locator: string): Promise<Buffer> {
@@ -1443,7 +1458,10 @@ async function assertNoSymlinkComponents(locator: string): Promise<void> {
   }
 }
 
-async function fetchHttps(locator: string, githubToken?: string): Promise<Response> {
+async function fetchHttps(
+  locator: string,
+  githubToken?: string,
+): Promise<{ response: Response; locator: string }> {
   let current = new URL(locator);
   for (let redirects = 0; redirects <= 10; redirects += 1) {
     if (current.protocol !== "https:") {
@@ -1459,7 +1477,9 @@ async function fetchHttps(locator: string, githubToken?: string): Promise<Respon
       redirect: "manual",
       signal: AbortSignal.timeout(30_000),
     });
-    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    if (![301, 302, 303, 307, 308].includes(response.status)) {
+      return { response, locator: current.toString() };
+    }
     const location = response.headers.get("location");
     if (!location) {
       throw new Error(`Module source redirect is missing a location: ${current.toString()}`);

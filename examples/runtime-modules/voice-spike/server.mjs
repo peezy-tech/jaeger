@@ -15,6 +15,7 @@ import {
 } from "./jaeger-readonly-tools.mjs";
 import {
   finalizeTelegramDisposition,
+  parseHttpsPublicUrl,
   readTelegramConfig,
   TelegramCallInvitations,
 } from "./telegram-call.mjs";
@@ -23,12 +24,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const publicDirectory = join(here, "public");
 const port = Number(process.env.VOICE_SPIKE_PORT ?? 4319);
 const host = process.env.VOICE_SPIKE_HOST ?? "127.0.0.1";
-const publicOrigin = process.env.VOICE_SPIKE_PUBLIC_ORIGIN;
-if (!publicOrigin) {
+const configuredPublicOrigin = process.env.VOICE_SPIKE_PUBLIC_ORIGIN;
+if (!configuredPublicOrigin) {
   throw new Error(
     "VOICE_SPIKE_PUBLIC_ORIGIN must be set to the HTTPS origin that serves this install's voice surface; every /api/ request is checked against it",
   );
 }
+const publicOrigin = parseHttpsPublicUrl(configuredPublicOrigin).origin;
 const stateFile =
   process.env.VOICE_SPIKE_STATE_FILE ??
   join(

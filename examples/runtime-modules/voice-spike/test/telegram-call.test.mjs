@@ -129,6 +129,41 @@ test("an ambiguous Telegram send preserves the invitation and blocks replacement
   assert.equal((await invitations.create()).invitation.status, "ringing");
 });
 
+test("a delivery marker makes an interrupted successful send recoverable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-interrupted-send-"));
+  let now = Date.parse("2026-07-29T03:00:00Z");
+  const token = "w".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => now,
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  await invitations.recordTelegramDeliveryUncertain(token, {
+    chatId: "-100123",
+    messageThreadId: "42",
+  });
+  const ringing = await invitations.pendingDisposition();
+  assert.equal(ringing.invitation.status, "ringing");
+  assert.deepEqual(
+    await finalizeTelegramDisposition(invitations, null, ringing),
+    { finalized: false, delivered: false, error: null },
+  );
+  await assert.rejects(() => invitations.create(), { statusCode: 409 });
+
+  await invitations.answer(token);
+  const pending = await invitations.pendingDisposition();
+  assert.equal(pending.invitation.status, "answered");
+  assert.equal(pending.telegram, null);
+  assert.equal(
+    (await finalizeTelegramDisposition(invitations, null, pending)).finalized,
+    true,
+  );
+  now += ANSWERED_ACCESS_TTL_MS + 1;
+  assert.equal((await invitations.create()).invitation.status, "ringing");
+});
+
 test("an uncertain unanswered delivery can be replaced after it expires", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-uncertain-expiry-"));
   let now = Date.parse("2026-07-29T03:00:00Z");

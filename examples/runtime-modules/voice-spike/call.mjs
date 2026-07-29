@@ -39,6 +39,11 @@ const { token, invitation } = await invitations.create({ reason });
 const answerUrl = new URL(publicUrl);
 answerUrl.hash = new URLSearchParams({ call: token }).toString();
 
+await invitations.recordTelegramDeliveryUncertain(token, {
+  chatId: telegram.chatId,
+  messageThreadId: telegram.messageThreadId,
+});
+
 let delivery;
 try {
   delivery = await sendTelegramCall({
@@ -49,10 +54,9 @@ try {
   });
 } catch (error) {
   if (error instanceof TelegramDeliveryUncertainError) {
-    await invitations.recordTelegramDeliveryUncertain(token, {
-      chatId: telegram.chatId,
-      messageThreadId: telegram.messageThreadId,
-    });
+    // The uncertainty marker was persisted before the request, so a crash at
+    // any point after Telegram accepts the message cannot look like a clean
+    // ringing invitation on the next recovery pass.
   } else {
     await invitations.fail(token);
   }

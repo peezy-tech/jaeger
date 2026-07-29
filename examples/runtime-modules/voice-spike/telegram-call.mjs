@@ -138,6 +138,7 @@ export class TelegramCallInvitations {
           : null,
         messageId: Number(telegram.messageId),
       };
+      delete record.telegramDeliveryUncertain;
       if (status === "expired" && record.status !== "expired") {
         record.status = "expired";
         record.expiredAt = new Date(this.now()).toISOString();
@@ -185,6 +186,7 @@ export class TelegramCallInvitations {
       if (status !== "ringing") return publicInvitation(record, status);
       record.status = "failed";
       record.failedAt = new Date(this.now()).toISOString();
+      delete record.telegramDeliveryUncertain;
       await writeOwnerOnlyJson(this.stateFile, record);
       return publicInvitation(record, "failed");
     });
@@ -200,7 +202,12 @@ export class TelegramCallInvitations {
       const record = await this.#read();
       if (!record) return null;
       const status = this.#status(record);
-      if (!["answered", "declined", "expired"].includes(status)) return null;
+      if (
+        !["answered", "declined", "expired"].includes(status) &&
+        !(status === "ringing" && record.telegramDeliveryUncertain)
+      ) {
+        return null;
+      }
       if (status === "expired" && record.status !== "expired") {
         record.status = "expired";
         record.expiredAt = new Date(this.now()).toISOString();
@@ -385,6 +392,9 @@ export async function finalizeTelegramDisposition(
 ) {
   const status = pending.invitation.status;
   if (!telegram || !pending.telegram) {
+    if (status === "ringing") {
+      return { finalized: false, delivered: false, error: null };
+    }
     await invitations.markDispositionUpdated(pending, { delivered: false });
     return { finalized: true, delivered: false, error: null };
   }

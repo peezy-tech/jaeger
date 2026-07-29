@@ -978,6 +978,53 @@ test("rejects an HTTPS module source redirect to HTTP", async () => {
   }
 });
 
+test("resolves module files relative to the final redirected manifest URL", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    fetched.push(url);
+    if (url === "https://registry.example/a/jaeger.module.json") {
+      return new Response(null, {
+        status: 302,
+        headers: { location: "/b/jaeger.module.json" },
+      });
+    }
+    if (url === "https://registry.example/b/jaeger.module.json") {
+      return Response.json({
+        schemaVersion: 1,
+        name: "redirected",
+        files: ["source.mjs"],
+        dependencies: {},
+      });
+    }
+    if (url === "https://registry.example/b/source.mjs") {
+      return new Response("export const redirected = true\n");
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    const resolved = await resolveModuleItem(
+      "https://registry.example/a/jaeger.module.json",
+    );
+    assert.equal(
+      resolved.resolvedSource,
+      "https://registry.example/b/jaeger.module.json",
+    );
+    assert.equal(
+      resolved.files.get("source.mjs")?.toString("utf8"),
+      "export const redirected = true\n",
+    );
+    assert.deepEqual(fetched, [
+      "https://registry.example/a/jaeger.module.json",
+      "https://registry.example/b/jaeger.module.json",
+      "https://registry.example/b/source.mjs",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("stops reading an oversized streamed HTTPS module source", async () => {
   const originalFetch = globalThis.fetch;
   let sourceChunks = 0;
