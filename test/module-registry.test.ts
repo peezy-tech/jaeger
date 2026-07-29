@@ -237,6 +237,7 @@ test("failed Yarn installs restore Plug'n'Play and unplugged package state", asy
       [".pnp.loader.mjs", "old-loader\n"],
       [".yarn/build-state.yml", "old-build-state\n"],
       [".yarn/install-state.gz", "old-install-state\n"],
+      [".yarn/cache/fixture.zip", "old-cache\n"],
       [".yarn/unplugged/fixture/index.js", "old-unplugged\n"],
     ]);
     await writeFile(
@@ -255,11 +256,14 @@ test("failed Yarn installs restore Plug'n'Play and unplugged package state", asy
     await writeFile(
       yarn,
       "#!/bin/sh\n" +
+        "/bin/mkdir -p .yarn/cache\n" +
         "/bin/mkdir -p .yarn/unplugged/fixture\n" +
         "printf 'new-pnp\\n' > .pnp.cjs\n" +
         "printf 'new-loader\\n' > .pnp.loader.mjs\n" +
         "printf 'new-build-state\\n' > .yarn/build-state.yml\n" +
         "printf 'new-install-state\\n' > .yarn/install-state.gz\n" +
+        "printf 'new-cache\\n' > .yarn/cache/fixture.zip\n" +
+        "printf 'new-only-cache\\n' > .yarn/cache/new.zip\n" +
         "printf 'new-unplugged\\n' > .yarn/unplugged/fixture/index.js\n" +
         "exit 17\n",
     );
@@ -279,6 +283,10 @@ test("failed Yarn installs restore Plug'n'Play and unplugged package state", asy
         contents,
       );
     }
+    await assert.rejects(
+      readFile(path.join(fixture.runtimeRoot, ".yarn/cache/new.zip")),
+      hasCode("ENOENT"),
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

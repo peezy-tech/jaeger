@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { register } from "node:module";
 import {
   mkdir,
   open,
@@ -26,6 +27,7 @@ const MODULE_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 const STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 const EVENT_FILE = /^evt-[a-f0-9]{64}\.json$/;
 const RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 120_000, 600_000] as const;
+const registeredRuntimeModuleDigests = new Set<string>();
 
 export interface RuntimeModuleConfig {
   readonly version: 1;
@@ -526,7 +528,10 @@ export async function loadRuntimeModuleConfig(
   const resolved = await realpath(path.resolve(configPath));
   const source = await readFile(resolved, "utf8");
   const digest = await runtimeModuleProjectDigest(resolved, source);
-  const imported = (await import(`${pathToFileURL(resolved).href}?digest=${digest}`)) as {
+  registerRuntimeModuleDigest(path.dirname(resolved), digest);
+  const configUrl = pathToFileURL(resolved);
+  configUrl.searchParams.set("jaeger-runtime-digest", digest);
+  const imported = (await import(configUrl.href)) as {
     readonly default?: unknown;
   };
   const root = record(imported.default, "runtime module configuration");
@@ -561,6 +566,15 @@ export async function loadRuntimeModuleConfig(
     };
   });
   return { version: 1, path: resolved, digest, modules };
+}
+
+function registerRuntimeModuleDigest(root: string, digest: string): void {
+  const key = `${root}\0${digest}`;
+  if (registeredRuntimeModuleDigests.has(key)) return;
+  register(new URL("./runtime-module-loader.js", import.meta.url), {
+    data: { root, digest },
+  });
+  registeredRuntimeModuleDigests.add(key);
 }
 
 function parseModuleDelivery(value: unknown): ModuleDelivery {

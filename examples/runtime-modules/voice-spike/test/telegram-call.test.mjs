@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  ANSWERED_ACCESS_TTL_MS,
   parseHttpsPublicUrl,
   parseEnv,
   sendTelegramCall,
@@ -90,9 +91,10 @@ test("a fast answer survives Telegram delivery recording and later failure handl
 test("an ambiguous Telegram send preserves the invitation and blocks replacement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-uncertain-send-"));
   const token = "u".repeat(43);
+  let now = Date.parse("2026-07-29T03:00:00Z");
   const invitations = new TelegramCallInvitations({
     stateFile: join(directory, "telegram-call.json"),
-    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    now: () => now,
     createToken: () => token,
   });
 
@@ -122,6 +124,28 @@ test("an ambiguous Telegram send preserves the invitation and blocks replacement
       "The Telegram call has an uncertain delivery and must be resolved before creating another",
     statusCode: 409,
   });
+  now += ANSWERED_ACCESS_TTL_MS + 1;
+  assert.equal((await invitations.create()).invitation.status, "ringing");
+});
+
+test("an uncertain unanswered delivery can be replaced after it expires", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-uncertain-expiry-"));
+  let now = Date.parse("2026-07-29T03:00:00Z");
+  let sequence = 0;
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => now,
+    createToken: () => String(++sequence).repeat(43),
+  });
+
+  const first = await invitations.create({ ttlMs: 60_000 });
+  await invitations.recordTelegramDeliveryUncertain(first.token, {
+    chatId: "-100123",
+  });
+  await assert.rejects(() => invitations.create(), { statusCode: 409 });
+
+  now += 60_001;
+  assert.equal((await invitations.create()).invitation.status, "ringing");
 });
 
 test("parallel answer and decline requests produce exactly one transition", async () => {

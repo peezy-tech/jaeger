@@ -68,7 +68,7 @@ test("registry-managed runtime digest changes with module source and npm shrinkw
     const modulePath = path.join(moduleRoot, "fixture.mjs");
     await writeFile(
       modulePath,
-      `export const fixture = { name: "fixture", setup() {} }\n`,
+      `export const fixture = { name: "fixture", setup() { return "first" } }\n`,
     );
     await writeFile(
       path.join(root, "modules.lock.json"),
@@ -92,12 +92,20 @@ export default { version: 1, modules: [fixture] }
     );
 
     const first = await loadRuntimeModuleConfig(configPath);
+    assert.equal(
+      (first.modules[0]?.setup as unknown as () => string)(),
+      "first",
+    );
     await writeFile(
       modulePath,
-      `export const fixture = { name: "fixture", setup() {} }\n// operator patch\n`,
+      `export const fixture = { name: "fixture", setup() { return "second" } }\n`,
     );
     const second = await loadRuntimeModuleConfig(configPath);
     assert.notEqual(first.digest, second.digest);
+    assert.equal(
+      (second.modules[0]?.setup as unknown as () => string)(),
+      "second",
+    );
     await writeFile(
       shrinkwrapPath,
       `${JSON.stringify({

@@ -44,7 +44,12 @@ export class TelegramCallInvitations {
     return await this.#exclusive(async () => {
       const current = await this.#read();
       const currentStatus = this.#status(current);
-      if (current?.telegramDeliveryUncertain) {
+      if (
+        current?.telegramDeliveryUncertain &&
+        (currentStatus === "ringing" ||
+          (currentStatus === "answered" &&
+            Date.parse(current.accessExpiresAt) > this.now()))
+      ) {
         throw httpError(
           "The Telegram call has an uncertain delivery and must be resolved before creating another",
           409,

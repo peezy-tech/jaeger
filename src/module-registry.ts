@@ -1554,7 +1554,13 @@ async function snapshotPackageState(
   const directories: DirectorySnapshot[] = [];
   if (!snapshotInstalledState) return { files, directories };
   try {
-    for (const [index, name] of ["node_modules", ".yarn/unplugged"].entries()) {
+    for (
+      const [index, name] of [
+        "node_modules",
+        ".yarn/cache",
+        ".yarn/unplugged",
+      ].entries()
+    ) {
       const target = path.join(root, name);
       if (!await pathExists(target)) {
         directories.push({ path: target });
