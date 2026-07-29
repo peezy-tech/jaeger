@@ -260,7 +260,9 @@ export async function resolveModuleItem(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ResolvedModuleItem> {
   if (!reference.trim()) throw new Error("Module source reference must not be empty");
-  const github = parseGithubReference(reference);
+  const github = await existingLocalSource(reference)
+    ? undefined
+    : parseGithubReference(reference);
   let githubToken: string | undefined;
   let manifest: SourceDocument;
   if (
@@ -1652,6 +1654,12 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
     // a path-construction call alongside the quoted module directory.
     const pathCallPattern =
       /(?:(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*)?(?:\bpath\.(?:join|resolve)|\bnew\s+URL)\s*\(([\s\S]*?)\)/g;
+    const stringBindings = new Map<string, string>();
+    const stringBindingPattern =
+      /(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(["'`])([^"'`]*?)\2/g;
+    for (const match of source.matchAll(stringBindingPattern)) {
+      if (match[1] && match[3] !== undefined) stringBindings.set(match[1], match[3]);
+    }
     const modulePathBindings = new Set<string>();
     let changed = true;
     while (changed) {
@@ -1663,7 +1671,15 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
           sourceStringLiteralPattern(argumentsSource, MODULE_DIRECTORY) ||
           [...modulePathBindings].some((value) => sourceTokenPattern(argumentsSource, value));
         if (!hasModuleDirectory) continue;
-        if (sourceTokenPattern(argumentsSource, name)) return true;
+        if (
+          sourceTokenPattern(argumentsSource, name) ||
+          [...stringBindings].some(
+            ([binding, value]) =>
+              value === name && sourceTokenPattern(argumentsSource, binding),
+          )
+        ) {
+          return true;
+        }
         if (binding && !modulePathBindings.has(binding)) {
           modulePathBindings.add(binding);
           changed = true;
@@ -1675,6 +1691,12 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
     if (hasCode(error, "ENOENT")) return false;
     throw error;
   }
+}
+
+async function existingLocalSource(reference: string): Promise<boolean> {
+  const { locator } = splitCatalogReference(reference);
+  if (/^[a-z]+:/i.test(locator)) return false;
+  return await pathExists(path.resolve(locator));
 }
 
 function sourceTokenPattern(source: string, value: string): boolean {

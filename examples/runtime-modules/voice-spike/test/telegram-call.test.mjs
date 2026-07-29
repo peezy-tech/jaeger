@@ -285,6 +285,24 @@ test("an answered invitation grants bounded bearer access", async () => {
   assert.equal(await invitations.authorize(token), false);
 });
 
+test("an answered call without Telegram metadata cannot be replaced", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-answer-no-telegram-"));
+  const token = "h".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  await invitations.answer(token);
+  await assert.rejects(() => invitations.create(), {
+    message: "The answered Telegram call must be finalized before creating another",
+    statusCode: 409,
+  });
+  assert.equal(await invitations.authorize(token), true);
+});
+
 test("a new call cannot discard an expired call before its disposition is finalized", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-replace-expired-"));
   let now = Date.parse("2026-07-29T03:00:00Z");

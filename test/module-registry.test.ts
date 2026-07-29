@@ -773,6 +773,22 @@ test("removal refuses a module still referenced by the runtime composition", asy
     );
     await writeFile(
       path.join(fixture.runtimeRoot, "jaeger.runtime.mjs"),
+      'const modulesDir = path.join(import.meta.url, "modules")\n' +
+        'const name = "alpha"\n' +
+        'const modulePath = path.join(modulesDir, name, "alpha.mjs")\n' +
+        "const alpha = await import(modulePath)\n" +
+        "export default { version: 1, modules: [alpha] }\n",
+    );
+    await assert.rejects(
+      removeModules({
+        root: fixture.runtimeRoot,
+        names: ["alpha"],
+        install: false,
+      }),
+      /referenced by jaeger\.runtime\.mjs/,
+    );
+    await writeFile(
+      path.join(fixture.runtimeRoot, "jaeger.runtime.mjs"),
       'const modules = ["alpha"]\n' +
         "export default { version: 1, modules }\n",
     );
@@ -784,6 +800,28 @@ test("removal refuses a module still referenced by the runtime composition", asy
     assert.deepEqual((await listInstalledModules(fixture.runtimeRoot)).modules, []);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("resolves a nested relative local manifest before GitHub shorthand", async () => {
+  const root = await mkdtemp(path.join(process.cwd(), "module-source-"));
+  try {
+    const sourceRoot = path.join(root, "item");
+    const manifest = path.join(sourceRoot, "jaeger.module.json");
+    await mkdir(sourceRoot, { recursive: true });
+    await writeFile(path.join(sourceRoot, "entry.mjs"), "export const entry = true\n");
+    await writeJson(manifest, {
+      schemaVersion: 1,
+      name: "nested-local",
+      files: ["entry.mjs"],
+      dependencies: {},
+    });
+
+    const resolved = await resolveModuleItem(path.relative(process.cwd(), manifest));
+    assert.equal(resolved.item.name, "nested-local");
+    assert.equal(resolved.resolvedSource, manifest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

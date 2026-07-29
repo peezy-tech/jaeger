@@ -69,7 +69,9 @@ export class TelegramCallInvitations {
       }
       if (
         ["answered", "declined", "expired"].includes(currentStatus) &&
-        current?.telegram &&
+        (current?.telegram ||
+          (currentStatus === "answered" &&
+            Date.parse(current.accessExpiresAt) > this.now())) &&
         !current.dispositionUpdatedAt
       ) {
         throw httpError(
