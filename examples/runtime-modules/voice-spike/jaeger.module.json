@@ -12,6 +12,7 @@
     "jaeger-readonly-tools.mjs",
     "probe.mjs",
     "public/app.js",
+    "public/call-access.js",
     "public/favicon.svg",
     "public/index.html",
     "public/styles.css",

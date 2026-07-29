@@ -79,18 +79,18 @@ const bridge = new CodexAppServer({
   }),
   stateFile,
 });
-const eventClients = new Set();
+const eventClients = new Map();
 
 bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
-  broadcast(method, params);
+  void broadcast(method, params);
 });
-bridge.on("ready", (snapshot) => broadcast("bridge.ready", snapshot));
+bridge.on("ready", (snapshot) => void broadcast("bridge.ready", snapshot));
 bridge.on("disconnected", (error) => {
-  broadcast("bridge.disconnected", { message: error.message });
+  void broadcast("bridge.disconnected", { message: error.message });
 });
 bridge.on("serverRequestDeclined", ({ method }) => {
-  broadcast("bridge.requestDeclined", { method });
+  void broadcast("bridge.requestDeclined", { method });
 });
 
 export const server = createServer(async (request, response) => {
@@ -115,7 +115,7 @@ export const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/api/events") {
-      await assertApiCapability(request);
+      const invitationToken = await assertApiCapability(request);
       response.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-store",
@@ -124,8 +124,8 @@ export const server = createServer(async (request, response) => {
       response.write(
         `event: bridge.state\ndata: ${JSON.stringify(bridge.snapshot())}\n\n`,
       );
-      eventClients.add(response);
-      request.once("close", () => eventClients.delete(response));
+      eventClients.set(response, invitationToken);
+      response.once("close", () => eventClients.delete(response));
       return;
     }
 
@@ -148,7 +148,7 @@ export const server = createServer(async (request, response) => {
       }
       const body = await readJson(request);
       const result = await invitations.answer(body.token);
-      broadcast("telegram.call.answered", result.invitation);
+      void broadcast("telegram.call.answered", result.invitation);
       void updateDisposition(result, "answered");
       return sendJson(response, 200, result.invitation);
     }
@@ -159,7 +159,7 @@ export const server = createServer(async (request, response) => {
     ) {
       const body = await readJson(request);
       const result = await invitations.decline(body.token);
-      broadcast("telegram.call.declined", result.invitation);
+      void broadcast("telegram.call.declined", result.invitation);
       void updateDisposition(result, "declined");
       return sendJson(response, 200, result.invitation);
     }
@@ -225,7 +225,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const result = await invitations.pendingDisposition();
       if (!result) return;
       if (result.invitation.status === "expired") {
-        broadcast("telegram.call.expired", result.invitation);
+        void broadcast("telegram.call.expired", result.invitation);
       }
       await updateDisposition(result, result.invitation.status);
     } catch (error) {
@@ -297,10 +297,12 @@ function assertOrigin(request) {
 async function assertApiCapability(request) {
   try {
     assertCapability(request, capabilityToken);
-    return;
+    return null;
   } catch {
     const invitationToken = bearerCapability(request);
-    if (invitationToken && await invitations.authorize(invitationToken)) return;
+    if (invitationToken && await invitations.authorize(invitationToken)) {
+      return invitationToken;
+    }
     assertCapability(request, capabilityToken);
   }
 }
@@ -333,9 +335,26 @@ function sendJson(response, status, value) {
   response.end(`${JSON.stringify(value)}\n`);
 }
 
-function broadcast(event, data) {
+export async function broadcast(event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of eventClients) client.write(frame);
+  await Promise.all(
+    [...eventClients].map(async ([client, invitationToken]) => {
+      try {
+        if (
+          invitationToken &&
+          !(await invitations.authorize(invitationToken))
+        ) {
+          eventClients.delete(client);
+          client.end();
+          return;
+        }
+        client.write(frame);
+      } catch {
+        eventClients.delete(client);
+        client.end();
+      }
+    }),
+  );
 }
 
 async function callSnapshot() {

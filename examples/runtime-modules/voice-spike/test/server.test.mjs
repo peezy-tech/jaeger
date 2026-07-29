@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -32,7 +32,9 @@ test("state, transcript, and control APIs require the browser capability", async
   await invitations.create();
   await invitations.answer(invitationToken);
 
-  const { server } = await import(`../server.mjs?auth-test=${Date.now()}`);
+  const { broadcast, server } = await import(
+    `../server.mjs?auth-test=${Date.now()}`,
+  );
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
@@ -82,6 +84,32 @@ test("state, transcript, and control APIs require the browser capability", async
       },
     });
     assert.equal(invitationAuthorized.status, 200);
+
+    const eventStream = await fetch(`${base}/api/events`, {
+      headers: {
+        authorization: `Bearer ${invitationToken}`,
+        origin: "https://voice.example",
+      },
+    });
+    assert.equal(eventStream.status, 200);
+    const reader = eventStream.body.getReader();
+    const initialEvent = await reader.read();
+    assert.match(
+      new TextDecoder().decode(initialEvent.value),
+      /event: bridge\.state/,
+    );
+
+    const invitationState = JSON.parse(
+      await readFile(process.env.VOICE_SPIKE_INVITATION_STATE_FILE, "utf8"),
+    );
+    invitationState.accessExpiresAt = new Date(Date.now() - 1).toISOString();
+    await writeFile(
+      process.env.VOICE_SPIKE_INVITATION_STATE_FILE,
+      `${JSON.stringify(invitationState)}\n`,
+      { mode: 0o600 },
+    );
+    await broadcast("bridge.ready", { connected: true });
+    assert.deepEqual(await reader.read(), { value: undefined, done: true });
   } finally {
     await new Promise((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

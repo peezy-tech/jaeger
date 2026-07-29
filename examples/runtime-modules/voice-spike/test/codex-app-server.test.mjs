@@ -52,6 +52,36 @@ test("reconnect resumes the exact persisted operator thread", async () => {
   await bridge.stop();
 });
 
+test("a late exit from a stopped child does not disconnect its replacement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-late-exit-"));
+  const processes = [];
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => {
+      const child = createMockProcess({
+        exitOnKill: processes.length !== 0,
+      });
+      processes.push(child);
+      return child;
+    },
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+  const stopping = bridge.stop();
+  await bridge.start();
+  const pending = bridge.request("test/ping");
+  processes[0].exitCode = 0;
+  processes[0].emit("exit", 0, null);
+
+  await stopping;
+  await pending;
+  assert.equal(bridge.connected, true);
+  assert.equal(bridge.generation, 2);
+  await bridge.stop();
+});
+
 test("WebRTC start forwards the SDP offer and returns the matching answer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-"));
   const child = createMockProcess();
@@ -101,7 +131,7 @@ test("a rejected realtime start cancels its SDP waiter", async () => {
   await bridge.stop();
 });
 
-function createMockProcess() {
+function createMockProcess({ exitOnKill = true } = {}) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
@@ -169,8 +199,10 @@ function createMockProcess() {
     }
   });
   child.kill = () => {
-    child.exitCode = 0;
-    queueMicrotask(() => child.emit("exit", 0, null));
+    if (exitOnKill) {
+      child.exitCode = 0;
+      queueMicrotask(() => child.emit("exit", 0, null));
+    }
     return true;
   };
   return child;

@@ -53,7 +53,7 @@ export class CodexAppServer extends EventEmitter {
   async start() {
     if (this.connected) return;
     this.stopping = false;
-    this.child = this.spawnProcess(
+    const child = this.spawnProcess(
       this.codexBin,
       ["app-server", "--enable", "realtime_conversation"],
       {
@@ -62,19 +62,20 @@ export class CodexAppServer extends EventEmitter {
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
+    this.child = child;
     this.generation += 1;
 
-    const stdout = readline.createInterface({ input: this.child.stdout });
+    const stdout = readline.createInterface({ input: child.stdout });
     stdout.on("line", (line) => this.#handleLine(line));
-    this.child.stderr.on("data", (chunk) => {
+    child.stderr.on("data", (chunk) => {
       this.emit("diagnostic", String(chunk).trim());
     });
-    this.child.once("error", (error) => this.#handleExit(error));
-    this.child.once("exit", (code, signal) => {
+    child.once("error", (error) => this.#handleExit(child, error));
+    child.once("exit", (code, signal) => {
       const reason = new Error(
         `Codex app-server exited (${signal ?? code ?? "unknown"})`,
       );
-      this.#handleExit(reason);
+      this.#handleExit(child, reason);
     });
 
     try {
@@ -425,8 +426,8 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
-  #handleExit(error) {
-    if (!this.child && this.stopping) return;
+  #handleExit(child, error) {
+    if (child !== this.child) return;
     this.child = null;
     this.#rejectPending(error);
     if (!this.stopping) this.emit("disconnected", error);
