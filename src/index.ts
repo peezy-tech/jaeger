@@ -1,5 +1,25 @@
 export { compileWorkflowSource } from "./compiler.js";
 export {
+  addModules,
+  defaultModuleProjectRoot,
+  diffModule,
+  listInstalledModules,
+  removeModules,
+  resolveModuleItem,
+  runtimeModuleProjectDigest,
+  syncModules,
+  type InstalledModuleRecord,
+  type ManagedDependencyRecord,
+  type ModuleAddOptions,
+  type ModuleDiff,
+  type ModuleMutationResult,
+  type ModuleProjectLock,
+  type ModuleRegistryItem,
+  type ModuleRemoveOptions,
+  type ModuleSyncOptions,
+  type ResolvedModuleItem,
+} from "./module-registry.js";
+export {
   HostRuntimeBoundary,
   hostRuntimeBoundary,
 } from "./boundary.js";

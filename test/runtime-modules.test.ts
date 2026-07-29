@@ -1,21 +1,30 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+import { initialize, resolve } from "../src/runtime-module-loader.js";
 import {
   loadRuntimeModuleConfig,
   RuntimeModuleHost,
+  type RuntimeModule,
   type RuntimeModuleConfig,
   type RuntimeModuleOperations,
 } from "../src/runtime-modules.js";
 import type { JsonValue } from "../src/types.js";
+
+const execFileAsync = promisify(execFile);
+const cliPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../src/cli.js");
 
 const operations: RuntimeModuleOperations = {
   listRuns: async () => [],
@@ -60,6 +69,853 @@ export default { version: 1, modules: [fixture] }
   }
 });
 
+test("registry-managed runtime digest changes with module source and npm shrinkwrap", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-digest-"));
+  try {
+    const moduleRoot = path.join(root, "modules", "fixture");
+    await mkdir(moduleRoot, { recursive: true });
+    const modulePath = path.join(moduleRoot, "fixture.mjs");
+    await writeFile(
+      modulePath,
+      `export const fixture = { name: "fixture", setup() { return "first" } }\n`,
+    );
+    await writeFile(
+      path.join(root, "modules.lock.json"),
+      `${JSON.stringify({ schemaVersion: 1, modules: {}, dependencies: {} })}\n`,
+    );
+    await writeFile(
+      path.join(root, "package.json"),
+      `${JSON.stringify({ private: true, type: "module", dependencies: {} })}\n`,
+    );
+    const shrinkwrapPath = path.join(root, "npm-shrinkwrap.json");
+    await writeFile(
+      shrinkwrapPath,
+      `${JSON.stringify({ lockfileVersion: 3, packages: {} })}\n`,
+    );
+    const configPath = path.join(root, "jaeger.runtime.mjs");
+    await writeFile(
+      configPath,
+      `import { fixture } from "./modules/fixture/fixture.mjs"
+export default { version: 1, modules: [fixture] }
+`,
+    );
+
+    const first = await loadRuntimeModuleConfig(configPath);
+    assert.equal(
+      (first.modules[0]?.setup as unknown as () => string)(),
+      "first",
+    );
+    await writeFile(
+      modulePath,
+      `export const fixture = { name: "fixture", setup() { return "second" } }\n`,
+    );
+    const second = await loadRuntimeModuleConfig(configPath);
+    assert.notEqual(first.digest, second.digest);
+    assert.equal(
+      (second.modules[0]?.setup as unknown as () => string)(),
+      "second",
+    );
+    await writeFile(
+      shrinkwrapPath,
+      `${JSON.stringify({
+        lockfileVersion: 3,
+        packages: { "node_modules/fixture": { version: "1.0.0" } },
+      })}\n`,
+    );
+    const third = await loadRuntimeModuleConfig(configPath);
+    assert.notEqual(second.digest, third.digest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the loader hook honors every registered runtime project root", async () => {
+  const first = path.join(os.tmpdir(), "jaeger-loader-first");
+  const second = path.join(os.tmpdir(), "jaeger-loader-second");
+  initialize({ root: first });
+  initialize({ root: second });
+
+  const nextResolve = (specifier: string) => ({ url: specifier, shortCircuit: true });
+  const resolveChild = async (parentRoot: string, digest: string, child: string) =>
+    (
+      await resolve(
+        pathToFileURL(child).href,
+        {
+          conditions: ["node", "import"],
+          importAttributes: {},
+          parentURL: `${pathToFileURL(path.join(parentRoot, "jaeger.runtime.mjs")).href}?jaeger-runtime-digest=${digest}`,
+        },
+        nextResolve,
+      )
+    ).url;
+
+  const firstDigest = "a".repeat(64);
+  const secondDigest = "b".repeat(64);
+  assert.match(
+    await resolveChild(first, firstDigest, path.join(first, "modules", "fixture.mjs")),
+    new RegExp(`jaeger-runtime-digest=${firstDigest}$`),
+  );
+  assert.match(
+    await resolveChild(second, secondDigest, path.join(second, "modules", "fixture.mjs")),
+    new RegExp(`jaeger-runtime-digest=${secondDigest}$`),
+  );
+  assert.doesNotMatch(
+    await resolveChild(first, firstDigest, path.join(os.tmpdir(), "outside-fixture.mjs")),
+    /jaeger-runtime-digest/,
+  );
+});
+
+test("modules validate reads the local project for every runtime selection", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-validate-"));
+  try {
+    const configPath = path.join(root, "jaeger.runtime.mjs");
+    await writeFile(configPath, `export default { version: 1, modules: [] }\n`);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: root,
+      XDG_CONFIG_HOME: path.join(root, "config"),
+      XDG_STATE_HOME: path.join(root, "state"),
+    };
+    delete env.JAEGER_RUNTIME;
+
+    const selections: readonly (readonly string[])[] = [
+      ["modules", "validate", configPath, "--json"],
+      ["--runtime", "prod", "modules", "validate", configPath, "--json"],
+    ];
+    const digests: string[] = [];
+    for (const argv of selections) {
+      const { stdout } = await execFileAsync(process.execPath, [cliPath, ...argv], {
+        cwd: root,
+        env,
+      });
+      const result = JSON.parse(stdout) as { valid: boolean; digest: string };
+      assert.equal(result.valid, true);
+      digests.push(result.digest);
+    }
+    const viaEnvironment = await execFileAsync(
+      process.execPath,
+      [cliPath, "modules", "validate", configPath, "--json"],
+      { cwd: root, env: { ...env, JAEGER_RUNTIME: "prod" } },
+    );
+    digests.push((JSON.parse(viaEnvironment.stdout) as { digest: string }).digest);
+
+    assert.match(String(digests[0]), /^[a-f0-9]{64}$/);
+    assert.equal(new Set(digests).size, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("modules mutation options cannot be consumed as the --root value", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-root-option-"));
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cliPath, "modules", "sync", "--root", "--dry-run"],
+        { cwd: root },
+      ),
+      /--root requires a value/,
+    );
+    await assert.rejects(
+      readFile(path.join(root, "--dry-run", "package.json")),
+      { code: "ENOENT" },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime config generations retire superseded consumer directories", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-"));
+  const module: RuntimeModule = {
+    name: "fixture",
+    setup(runtime) {
+      runtime.events.consume("terminal", "run.terminal", async () => {});
+    },
+  };
+  try {
+    for (const digest of ["a".repeat(64), "b".repeat(64)]) {
+      const host = new RuntimeModuleHost({
+        stateDir: root,
+        config: {
+          version: 1,
+          path: path.join(root, "jaeger.runtime.mjs"),
+          digest,
+          modules: [module],
+        },
+        operations,
+      });
+      await host.initialize();
+      await host.stop();
+    }
+    assert.deepEqual(
+      (
+        await readdir(path.join(root, ".modules", "fixture", "events"))
+      ).sort(),
+      [`fixture-terminal-${"b".repeat(16)}`],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("version 1 runtime modules retain the positional consumer API", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-legacy-consumer-"));
+  const module: RuntimeModule = {
+    name: "fixture",
+    setup(runtime) {
+      runtime.events.consume("run.terminal", async () => {});
+      runtime.events.consume(
+        ["run.accepted", "phase.changed"],
+        async () => {},
+      );
+    },
+  };
+  try {
+    const host = new RuntimeModuleHost({
+      stateDir: root,
+      config: {
+        version: 1,
+        path: path.join(root, "jaeger.runtime.mjs"),
+        digest: "a".repeat(64),
+        modules: [module],
+      },
+      operations,
+    });
+    await host.initialize();
+    await host.stop();
+
+    assert.deepEqual(
+      (
+        await readdir(path.join(root, ".modules", "fixture", "events"))
+      ).sort(),
+      [
+        `fixture-1-${"a".repeat(16)}`,
+        `fixture-2-${"a".repeat(16)}`,
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("consumer delivery state follows names across reordering and insertion", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-order-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const eventId = `evt-${"e".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-eeeeeeeeee" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  const handled: string[] = [];
+  const config = (
+    digest: string,
+    names: readonly string[],
+  ): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        for (const name of names) {
+          runtime.events.consume(name, "run.terminal", async () => {
+            handled.push(name);
+          });
+        }
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64), ["alpha", "beta"]),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => handled.length === 2);
+    await first.stop();
+
+    now = new Date("2026-07-25T00:00:01.000Z");
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64), ["beta", "gamma", "alpha"]),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    second.start();
+    await waitFor(async () => {
+      try {
+        await readFile(
+          path.join(
+            stateDir,
+            ".modules",
+            "fixture",
+            "events",
+            `fixture-gamma-${"b".repeat(16)}`,
+            `${eventId}.json`,
+          ),
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    await second.stop();
+
+    assert.deepEqual(handled.sort(), ["alpha", "beta"]);
+    for (const name of ["alpha", "beta", "gamma"]) {
+      const delivery = JSON.parse(
+        await readFile(
+          path.join(
+            stateDir,
+            ".modules",
+            "fixture",
+            "events",
+            `fixture-${name}-${"b".repeat(16)}`,
+            `${eventId}.json`,
+          ),
+          "utf8",
+        ),
+      ) as Record<string, JsonValue>;
+      assert.equal(
+        delivery.consumer,
+        `fixture-${name}-${"b".repeat(16)}`,
+      );
+      assert.equal(delivery.attempts, name === "gamma" ? 0 : 1);
+    }
+    assert.deepEqual(
+      (await readdir(
+        path.join(stateDir, ".modules", "fixture", "events"),
+      )).sort(),
+      [
+        "fixture-alpha-bbbbbbbbbbbbbbbb",
+        "fixture-beta-bbbbbbbbbbbbbbbb",
+        "fixture-gamma-bbbbbbbbbbbbbbbb",
+      ],
+    );
+  } finally {
+    await second?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("named consumers inherit pending deliveries from positional consumers", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-migration-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const modulesDir = path.join(stateDir, ".modules");
+  const legacyDirectory = path.join(
+    modulesDir,
+    "telegram",
+    "events",
+    "telegram-1",
+  );
+  const eventId = `evt-${"f".repeat(64)}`;
+  const event = {
+    schemaVersion: 1,
+    id: eventId,
+    type: "run.terminal",
+    occurredAt: "2026-07-25T00:00:00.000Z",
+    observedAt: "2026-07-25T00:00:00.000Z",
+    run: { runId: "20260725000000-ffffffffff" },
+    subject: { status: "completed" },
+  };
+  await mkdir(eventsDir, { recursive: true });
+  await mkdir(modulesDir, { recursive: true, mode: 0o700 });
+  await mkdir(legacyDirectory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify(event)}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, "consumer.json"),
+    `${JSON.stringify({
+      version: 1,
+      id: "telegram-1",
+      createdAt: "2026-07-24T00:00:00.000Z",
+    })}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, `${eventId}.json`),
+    `${JSON.stringify({
+      version: 1,
+      consumer: "telegram-1",
+      eventId,
+      eventType: "run.terminal",
+      attempts: 1,
+      status: "retrying",
+      updatedAt: "2026-07-25T00:00:00.000Z",
+      nextAttemptAt: "2026-07-25T00:00:01.000Z",
+      lastError: "retry after upgrade",
+    })}\n`,
+  );
+  let attempts = 0;
+  const host = new RuntimeModuleHost({
+    stateDir,
+    config: {
+      version: 1,
+      path: path.join(root, "jaeger.runtime.mjs"),
+      digest: "b".repeat(64),
+      modules: [{
+        name: "telegram",
+        setup(runtime) {
+          runtime.events.consume("notifications", "run.terminal", async () => {
+            attempts++;
+          });
+        },
+      }],
+    },
+    operations,
+    tickIntervalMs: 10,
+    now: () => new Date("2026-07-25T00:00:02.000Z"),
+  });
+  try {
+    await host.initialize();
+    host.start();
+    await waitFor(() => attempts === 1);
+    await host.stop();
+
+    const currentId = `telegram-notifications-${"b".repeat(16)}`;
+    const currentDirectory = path.join(
+      stateDir,
+      ".modules",
+      "telegram",
+      "events",
+      currentId,
+    );
+    const metadata = JSON.parse(
+      await readFile(path.join(currentDirectory, "consumer.json"), "utf8"),
+    ) as Record<string, JsonValue>;
+    assert.deepEqual(metadata.subscriptions, {
+      "run.terminal": "2026-07-24T00:00:00.000Z",
+    });
+    const delivery = JSON.parse(
+      await readFile(path.join(currentDirectory, `${eventId}.json`), "utf8"),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.consumer, currentId);
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 2);
+    await assert.rejects(readFile(legacyDirectory), { code: "ENOENT" });
+  } finally {
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("inserting a named consumer does not claim an existing positional ledger", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-insert-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const modulesDir = path.join(stateDir, ".modules");
+  const legacyDirectory = path.join(
+    modulesDir,
+    "fixture",
+    "events",
+    "fixture-1",
+  );
+  const eventId = `evt-${"9".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await mkdir(modulesDir, { recursive: true, mode: 0o700 });
+  await mkdir(legacyDirectory, { recursive: true, mode: 0o700 });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-9999999999" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, "consumer.json"),
+    `${JSON.stringify({
+      version: 1,
+      id: "fixture-1",
+      createdAt: "2026-07-24T00:00:00.000Z",
+      subscriptions: {
+        "run.terminal": "2026-07-24T00:00:00.000Z",
+      },
+    })}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, `${eventId}.json`),
+    `${JSON.stringify({
+      version: 1,
+      consumer: "fixture-1",
+      eventId,
+      eventType: "run.terminal",
+      attempts: 1,
+      status: "retrying",
+      updatedAt: "2026-07-25T00:00:00.000Z",
+      nextAttemptAt: "2026-07-25T00:00:01.000Z",
+      lastError: "retry after insertion",
+    })}\n`,
+  );
+  let positionalAttempts = 0;
+  const host = new RuntimeModuleHost({
+    stateDir,
+    config: {
+      version: 1,
+      path: path.join(root, "jaeger.runtime.mjs"),
+      digest: "b".repeat(64),
+      modules: [{
+        name: "fixture",
+        setup(runtime) {
+          runtime.events.consume("inserted", "phase.changed", async () => {});
+          runtime.events.consume("run.terminal", async () => {
+            positionalAttempts++;
+          });
+        },
+      }],
+    },
+    operations,
+    tickIntervalMs: 10,
+    now: () => new Date("2026-07-25T00:00:02.000Z"),
+  });
+  try {
+    await host.initialize();
+    host.start();
+    await waitFor(() => positionalAttempts === 1);
+    await host.stop();
+
+    const currentDirectory = path.join(
+      stateDir,
+      ".modules",
+      "fixture",
+      "events",
+      `fixture-1-${"b".repeat(16)}`,
+    );
+    const delivery = JSON.parse(
+      await readFile(path.join(currentDirectory, `${eventId}.json`), "utf8"),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.consumer, `fixture-1-${"b".repeat(16)}`);
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 2);
+    const insertedMetadata = JSON.parse(
+      await readFile(
+        path.join(
+          stateDir,
+          ".modules",
+          "fixture",
+          "events",
+          `fixture-inserted-${"b".repeat(16)}`,
+          "consumer.json",
+        ),
+        "utf8",
+      ),
+    ) as Record<string, JsonValue>;
+    assert.deepEqual(insertedMetadata.subscriptions, {
+      "phase.changed": "2026-07-25T00:00:02.000Z",
+    });
+    await assert.rejects(readFile(legacyDirectory), { code: "ENOENT" });
+  } finally {
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime config changes preserve pending event retries", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-retry-config-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const eventId = `evt-${"c".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-cccccccccc" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  let attempts = 0;
+  const config = (digest: string, fail: boolean): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        runtime.events.consume("terminal", "run.terminal", async () => {
+          attempts++;
+          if (fail) throw new Error("retry after restart");
+        });
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64), true),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => attempts === 1);
+    await first.stop();
+
+    now = new Date(now.getTime() + 2_000);
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64), false),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    second.start();
+    await waitFor(() => attempts === 2);
+    await second.stop();
+
+    const delivery = JSON.parse(
+      await readFile(
+        path.join(
+          stateDir,
+          ".modules",
+          "fixture",
+          "events",
+          `fixture-terminal-${"b".repeat(16)}`,
+          `${eventId}.json`,
+        ),
+        "utf8",
+      ),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 2);
+  } finally {
+    await second?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("renewed subscriptions do not migrate retries from before their cutoff", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-retry-cutoff-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const eventId = `evt-${"d".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-dddddddddd" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  let attempts = 0;
+  const config = (
+    digest: string,
+    type: "run.accepted" | "run.terminal",
+    fail: boolean,
+  ): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        runtime.events.consume("primary", type, async () => {
+          if (type !== "run.terminal") return;
+          attempts++;
+          if (fail) throw new Error("retry before subscription renewal");
+        });
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64), "run.terminal", true),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  let third: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => attempts === 1);
+    await first.stop();
+
+    now = new Date("2026-07-25T00:00:02.000Z");
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64), "run.accepted", false),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    await second.stop();
+
+    now = new Date("2026-07-25T00:00:04.000Z");
+    third = new RuntimeModuleHost({
+      stateDir,
+      config: config("c".repeat(64), "run.terminal", false),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await third.initialize();
+    third.start();
+    await third.stop();
+
+    assert.equal(attempts, 1);
+    const delivery = JSON.parse(
+      await readFile(
+        path.join(
+          stateDir,
+          ".modules",
+          "fixture",
+          "events",
+          `fixture-primary-${"c".repeat(16)}`,
+          `${eventId}.json`,
+        ),
+        "utf8",
+      ),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 0);
+  } finally {
+    await third?.stop();
+    await second?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime config handoff preserves delivered events and claims unscanned events", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-config-handoff-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const deliveredEventId = `evt-${"a".repeat(64)}`;
+  const unscannedEventId = `evt-${"b".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  const writeEvent = async (eventId: string): Promise<void> => {
+    await writeFile(
+      path.join(eventsDir, `${eventId}.json`),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        id: eventId,
+        type: "run.terminal",
+        occurredAt: now.toISOString(),
+        observedAt: now.toISOString(),
+        run: { runId: "20260725000000-dddddddddd" },
+        subject: { status: "completed" },
+      })}\n`,
+    );
+  };
+  await writeEvent(deliveredEventId);
+  const handled: string[] = [];
+  const config = (digest: string): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        runtime.events.consume("terminal", "run.terminal", async (event) => {
+          handled.push(event.id);
+        });
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64)),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => handled.includes(deliveredEventId));
+    await first.stop();
+
+    now = new Date("2026-07-25T00:00:01.000Z");
+    await writeEvent(unscannedEventId);
+    now = new Date("2026-07-25T00:00:02.000Z");
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64)),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    second.start();
+    await waitFor(() => handled.includes(unscannedEventId));
+    await second.stop();
+
+    assert.deepEqual(handled, [deliveredEventId, unscannedEventId]);
+    for (const eventId of [deliveredEventId, unscannedEventId]) {
+      const delivery = JSON.parse(
+        await readFile(
+          path.join(
+            stateDir,
+            ".modules",
+            "fixture",
+            "events",
+            `fixture-terminal-${"b".repeat(16)}`,
+            `${eventId}.json`,
+          ),
+          "utf8",
+        ),
+      ) as Record<string, JsonValue>;
+      assert.equal(delivery.status, "delivered");
+      assert.equal(delivery.attempts, 1);
+    }
+    assert.deepEqual(
+      await readdir(path.join(stateDir, ".modules", "fixture", "events")),
+      [`fixture-terminal-${"b".repeat(16)}`],
+    );
+  } finally {
+    await second?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runs trusted modules in-process and durably retries lifecycle events", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-host-"));
   const stateDir = path.join(root, "state");
@@ -90,7 +946,7 @@ test("runs trusted modules in-process and durably retries lifecycle events", asy
       {
         name: "fixture",
         setup(runtime) {
-          runtime.events.consume("run.terminal", async () => {
+          runtime.events.consume("terminal", "run.terminal", async () => {
             attempts++;
             handlerPid = process.pid;
             if (attempts === 1) throw new Error("retry me");
@@ -152,9 +1008,9 @@ export default { version: 1, modules: [module, module] }
   }
 });
 
-async function waitFor(predicate: () => boolean): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
   const deadline = Date.now() + 2_000;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error("Timed out waiting for runtime module");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }

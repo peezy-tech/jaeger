@@ -496,8 +496,33 @@ queries, namespaced JSON storage, and logging. Module code shares the backend
 PID and trust boundary. Handler error containment is reliability handling, not
 a security sandbox.
 
-Dependencies resolve normally relative to the configuration project. Jaeger
-does not install packages or maintain a marketplace:
+Modules can be copied from a source registry into the one operator-owned
+runtime project. Like source-component registries, items remain readable and
+editable after installation. Their dependency requirements are reconciled into
+one root `package.json`, one package-manager lockfile, and one `node_modules`;
+module directories are not independent package installations.
+
+Inspect or install the built-in catalog without executing module code:
+
+```bash
+jaeger modules view telegram
+jaeger modules add telegram voice-spike --dry-run
+jaeger modules add telegram
+jaeger modules list
+jaeger modules diff telegram
+```
+
+`modules add` accepts a local manifest, HTTPS manifest or catalog reference,
+and `OWNER/REPOSITORY/ITEM#REF`. GitHub refs resolve to a commit before files
+are fetched. Multi-item additions perform one dependency installation with
+package lifecycle scripts disabled. `modules.lock.json` records source and file
+hashes plus dependency ownership. `modules remove` refuses locally edited
+modules and, because runtime configurations are arbitrary ESM, requires
+`--force` whenever `jaeger.runtime.mjs` exists after the operator removes the
+module from that composition.
+
+Installing source does not activate it. Review and configure the files, then
+cross the existing explicit execution boundary:
 
 ```bash
 jaeger modules validate ~/.config/jaeger/runtime/jaeger.runtime.mjs
@@ -508,7 +533,9 @@ jaeger modules status --json
 
 Configuration loads on backend start. Reinstall or restart after edits.
 `jaeger backend install --clear-runtime-config` removes a broken composition.
-The Telegram reference project is under `examples/runtime-modules/telegram`.
+The source schemas are under `schemas/`, the catalog is
+`jaeger.registry.json`, and reference
+items are under `examples/runtime-modules/`.
 
 ## Run lifecycle
 

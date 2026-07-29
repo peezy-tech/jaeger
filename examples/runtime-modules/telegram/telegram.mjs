@@ -11,13 +11,20 @@ export function telegramModule(options) {
     setup(context) {
       runtime = context;
       runtime.events.consume(
+        "notifications",
         [
           "session.available",
           "phase.changed",
           "run.terminal",
           "session.query.completed",
         ],
-        async (event) => await notifyBindings(event),
+        async (event) =>
+          await notifyTelegramBindings({
+            runtime,
+            bot,
+            event,
+            allowChatIds: options.allowChatIds,
+          }),
       );
       runtime.services.run("telegram-polling", async (signal) => {
         const token = (await readFile(options.tokenFile, "utf8")).trim();
@@ -134,36 +141,12 @@ export function telegramModule(options) {
     });
   }
 
-  async function notifyBindings(event) {
-    if (!bot) throw new Error("Telegram bot is not connected");
-    const keys = (await runtime.storage.get("bindings-index")) ?? [];
-    if (!Array.isArray(keys)) return;
-    for (const key of keys) {
-      if (typeof key !== "string") continue;
-      const binding = await runtime.storage.get(key);
-      if (!binding || binding.runId !== event.run?.runId) continue;
-      if (
-        event.subject?.sessionId &&
-        binding.sessionId !== event.subject.sessionId
-      ) {
-        continue;
-      }
-      await bot.api.sendMessage(
-        binding.chatId,
-        renderEvent(event),
-        binding.threadId ? { message_thread_id: binding.threadId } : {},
-      );
-    }
-  }
-
   function allowed(ctx) {
     const users = options.allowUserIds ?? [];
-    const chats = options.allowChatIds ?? [];
     return (
       users.length > 0 &&
-      chats.length > 0 &&
       users.includes(ctx.from?.id) &&
-      chats.includes(ctx.chat?.id)
+      chatAllowed(options.allowChatIds, ctx.chat?.id)
     );
   }
 
@@ -192,6 +175,44 @@ export function telegramModule(options) {
   function bindingKey(ctx) {
     return `binding-${ctx.chat.id}-${ctx.message?.message_thread_id ?? 0}`;
   }
+}
+
+export async function notifyTelegramBindings({
+  runtime,
+  bot,
+  event,
+  allowChatIds,
+}) {
+  if (!bot) throw new Error("Telegram bot is not connected");
+  const keys = (await runtime.storage.get("bindings-index")) ?? [];
+  if (!Array.isArray(keys)) return;
+  for (const key of keys) {
+    if (typeof key !== "string") continue;
+    const binding = await runtime.storage.get(key);
+    if (
+      !binding ||
+      !chatAllowed(allowChatIds, binding.chatId) ||
+      binding.runId !== event.run?.runId
+    ) {
+      continue;
+    }
+    if (
+      event.subject?.sessionId &&
+      binding.sessionId !== event.subject.sessionId
+    ) {
+      continue;
+    }
+    await bot.api.sendMessage(
+      binding.chatId,
+      renderEvent(event),
+      binding.threadId ? { message_thread_id: binding.threadId } : {},
+    );
+  }
+}
+
+function chatAllowed(allowChatIds, chatId) {
+  const chats = allowChatIds ?? [];
+  return chats.length > 0 && chats.includes(chatId);
 }
 
 function commandArgs(ctx) {
