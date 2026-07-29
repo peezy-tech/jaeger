@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { TelegramCallInvitations } from "../telegram-call.mjs";
 
 test("state, transcript, and control APIs require the browser capability", async () => {
@@ -116,3 +120,196 @@ test("state, transcript, and control APIs require the browser capability", async
     );
   }
 });
+
+test("a closed realtime negotiation is not promoted to the active session", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-server-realtime-close-"));
+  const capability = "s".repeat(43);
+  const capabilityFile = join(directory, "capability-token");
+  const fakeCodex = join(directory, "fake-codex.mjs");
+  const port = await availablePort();
+  await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
+  await writeFile(
+    fakeCodex,
+    `#!/usr/bin/env node
+import readline from "node:readline";
+
+const threadId = "thread-realtime-test";
+let realtimeStarts = 0;
+const input = readline.createInterface({ input: process.stdin });
+const send = (...messages) => {
+  process.stdout.write(
+    messages.map((message) => JSON.stringify(message)).join("\\n") + "\\n",
+  );
+};
+
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  const reply = (result) => ({ id: message.id, result });
+  switch (message.method) {
+    case "initialize":
+      send(reply({}));
+      break;
+    case "thread/start":
+      send(reply({ thread: { id: threadId } }));
+      break;
+    case "turn/start":
+      send(
+        reply({ turn: { id: "turn-bootstrap" } }),
+        {
+          method: "turn/completed",
+          params: { threadId, turn: { status: "completed" } },
+        },
+      );
+      break;
+    case "thread/realtime/start": {
+      realtimeStarts += 1;
+      const notifications = [
+        reply({}),
+        {
+          method: "thread/realtime/sdp",
+          params: { threadId, sdp: "v=0\\r\\nmock-answer" },
+        },
+      ];
+      if (realtimeStarts === 1) {
+        notifications.push({
+          method: "thread/realtime/closed",
+          params: { threadId, reason: "closed during setup" },
+        });
+      }
+      send(...notifications);
+      break;
+    }
+    case "thread/realtime/stop":
+      send(reply({}));
+      break;
+    default:
+      send({
+        id: message.id,
+        error: { message: "unexpected method: " + message.method },
+      });
+  }
+});
+`,
+  );
+  await chmod(fakeCodex, 0o755);
+
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL("../server.mjs", import.meta.url))],
+    {
+      cwd: directory,
+      env: {
+        ...process.env,
+        HOME: directory,
+        VOICE_SPIKE_CAPABILITY_FILE: capabilityFile,
+        VOICE_SPIKE_CODEX_BIN: fakeCodex,
+        VOICE_SPIKE_HOST: "127.0.0.1",
+        VOICE_SPIKE_INVITATION_STATE_FILE: join(directory, "invitations.json"),
+        VOICE_SPIKE_PORT: String(port),
+        VOICE_SPIKE_PUBLIC_ORIGIN: "https://voice.example",
+        VOICE_SPIKE_STATE_FILE: join(directory, "operator.json"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const exited = once(child, "exit");
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  try {
+    await waitForOutput(child.stdout, /Jaeger voice spike listening/).catch(
+      (error) => {
+        throw new Error(`${error.message}\n${stderr}`);
+      },
+    );
+    const base = `http://127.0.0.1:${port}`;
+    const headers = {
+      authorization: `Bearer ${capability}`,
+      "content-type": "application/json",
+      origin: "https://voice.example",
+    };
+    const firstSessionId = "11111111-1111-4111-8111-111111111111";
+    const first = await fetch(`${base}/api/session`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        sessionId: firstSessionId,
+        sdp: "v=0\r\nfirst-offer",
+      }),
+    });
+    assert.equal(first.status, 409);
+    assert.match((await first.json()).error, /cancelled during negotiation/);
+
+    const secondSessionId = "22222222-2222-4222-8222-222222222222";
+    const second = await fetch(`${base}/api/session`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        sessionId: secondSessionId,
+        sdp: "v=0\r\nsecond-offer",
+      }),
+    });
+    assert.equal(second.status, 200);
+    assert.equal((await second.json()).sessionId, secondSessionId);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+    }
+    if (!(await settlesWithin(exited, 3_000))) {
+      child.kill("SIGKILL");
+      await exited;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function availablePort() {
+  const probe = createHttpServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to reserve a voice server test port");
+  }
+  await new Promise((resolve, reject) =>
+    probe.close((error) => (error ? reject(error) : resolve())),
+  );
+  return address.port;
+}
+
+function waitForOutput(stream, pattern, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for output matching ${pattern}`));
+    }, timeoutMs);
+    timer.unref();
+    const cleanup = () => {
+      clearTimeout(timer);
+      stream.off("data", onData);
+    };
+    const onData = (chunk) => {
+      output += String(chunk);
+      if (!pattern.test(output)) return;
+      cleanup();
+      resolve();
+    };
+    stream.on("data", onData);
+  });
+}
+
+async function settlesWithin(promise, timeoutMs) {
+  return await Promise.race([
+    promise.then(() => true),
+    new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      timer.unref();
+    }),
+  ]);
+}

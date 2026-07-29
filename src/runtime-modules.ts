@@ -558,6 +558,12 @@ export class RuntimeModuleHost {
     const eventsRoot = path.join(this.moduleRoot(consumer.module), "events");
     const currentDirectory = this.consumerDirectory(consumer);
     const consumerDirectoryPattern = this.consumerDirectoryPattern(consumer);
+    const metadata = parseModuleConsumerMetadata(
+      JSON.parse(
+        await readFile(path.join(currentDirectory, "consumer.json"), "utf8"),
+      ),
+      consumer.id,
+    );
     const candidates = new Map<
       string,
       { readonly delivery: ModuleDelivery; readonly directory: string }
@@ -594,6 +600,17 @@ export class RuntimeModuleHost {
     }
     for (const { delivery, directory } of candidates.values()) {
       if (directory === currentDirectory) continue;
+      const eventValue = await readOptionalJson(
+        path.join(this.eventsDir, `${delivery.eventId}.json`),
+      );
+      if (eventValue === undefined) continue;
+      const event = parseLifecycleEvent(eventValue);
+      if (event.id !== delivery.eventId || event.type !== delivery.eventType) {
+        throw new Error("Invalid runtime module event delivery");
+      }
+      const subscribedAt =
+        metadata.subscriptions?.[delivery.eventType] ?? metadata.createdAt;
+      if (Date.parse(event.occurredAt) < Date.parse(subscribedAt)) continue;
       await writeJsonAtomic(path.join(currentDirectory, `${delivery.eventId}.json`), {
         ...delivery,
         consumer: consumer.id,

@@ -1016,7 +1016,7 @@ async function installProjectDependencies(
   if (modernYarn) await assertYarnNodeModulesLinker(root);
   const args =
     manager === "pnpm"
-      ? ["install", "--ignore-scripts"]
+      ? ["install", "--ignore-scripts", "--ignore-workspace"]
       : manager === "yarn"
         ? modernYarn
           ? ["install", "--mode=skip-build"]

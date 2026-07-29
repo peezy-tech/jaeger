@@ -346,6 +346,107 @@ test("runtime config changes preserve pending event retries", async () => {
   }
 });
 
+test("renewed subscriptions do not migrate retries from before their cutoff", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-retry-cutoff-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const eventId = `evt-${"d".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-dddddddddd" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  let attempts = 0;
+  const config = (
+    digest: string,
+    type: "run.accepted" | "run.terminal",
+    fail: boolean,
+  ): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        runtime.events.consume(type, async () => {
+          if (type !== "run.terminal") return;
+          attempts++;
+          if (fail) throw new Error("retry before subscription renewal");
+        });
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64), "run.terminal", true),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  let third: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => attempts === 1);
+    await first.stop();
+
+    now = new Date("2026-07-25T00:00:02.000Z");
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64), "run.accepted", false),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    await second.stop();
+
+    now = new Date("2026-07-25T00:00:04.000Z");
+    third = new RuntimeModuleHost({
+      stateDir,
+      config: config("c".repeat(64), "run.terminal", false),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await third.initialize();
+    third.start();
+    await third.stop();
+
+    assert.equal(attempts, 1);
+    const delivery = JSON.parse(
+      await readFile(
+        path.join(
+          stateDir,
+          ".modules",
+          "fixture",
+          "events",
+          `fixture-1-${"c".repeat(16)}`,
+          `${eventId}.json`,
+        ),
+        "utf8",
+      ),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 0);
+  } finally {
+    await third?.stop();
+    await second?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runtime config handoff preserves delivered events and claims unscanned events", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-config-handoff-"));
   const stateDir = path.join(root, "state");

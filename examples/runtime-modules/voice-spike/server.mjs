@@ -96,7 +96,8 @@ bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
   if (method === "thread/realtime/closed") {
     activeRealtimeSessionId = null;
-    if (!startingRealtimeSessionId) clearRealtimeExpiryTimer();
+    startingRealtimeSessionId = null;
+    clearRealtimeExpiryTimer();
   }
   void broadcast(method, params);
 });

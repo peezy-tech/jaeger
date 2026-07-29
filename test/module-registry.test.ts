@@ -118,6 +118,58 @@ test("a multi-module add invokes the shared package manager exactly once", async
   }
 });
 
+test("pnpm installs ignore an ancestor workspace", async () => {
+  const fixture = await registryFixture();
+  try {
+    await writeJson(path.join(fixture.root, "package.json"), {
+      name: "operator-workspace",
+      private: true,
+    });
+    await writeFile(
+      path.join(fixture.root, "pnpm-workspace.yaml"),
+      "packages:\n  - runtime\n",
+    );
+    await writeFile(path.join(fixture.root, "pnpm-lock.yaml"), "operator-lock\n");
+    await writeJson(path.join(fixture.runtimeRoot, "package.json"), {
+      name: "operator-runtime",
+      private: true,
+      type: "module",
+      packageManager: "pnpm@10.14.0",
+    });
+
+    const bin = path.join(fixture.root, "bin");
+    const calls = path.join(fixture.root, "package-manager-calls.txt");
+    await mkdir(bin);
+    const pnpm = path.join(bin, "pnpm");
+    await writeFile(
+      pnpm,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`,
+    );
+    await chmod(pnpm, 0o755);
+
+    const result = await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      env: {
+        ...process.env,
+        PATH: bin,
+      },
+    });
+
+    assert.equal(result.packageManager, "pnpm");
+    assert.equal(
+      (await readFile(calls, "utf8")).trim(),
+      "install --ignore-scripts --ignore-workspace",
+    );
+    assert.equal(
+      await readFile(path.join(fixture.root, "pnpm-lock.yaml"), "utf8"),
+      "operator-lock\n",
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("rejects a filesystem root and preserves existing project directory permissions", async () => {
   const fixture = await registryFixture();
   try {
