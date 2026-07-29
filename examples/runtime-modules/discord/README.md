@@ -104,7 +104,8 @@ disconnect stops realtime and removes the bot from the voice channel.
 `/attach` stores an allowlisted binding to an existing provider session.
 `/ask` always calls Jaeger's session-query API, which forks a fresh read-only
 provider session and does not resume, steer, or mutate the workflow-owned
-thread.
+thread. Queries are capped at ten minutes so the result or timeout remains
+within Discord's interaction-response lifetime.
 
 ## Authority and persistence boundary
 

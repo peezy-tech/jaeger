@@ -124,6 +124,86 @@ test("attention rejects when immediate media startup fails", async () => {
   await fixture.stop();
 });
 
+test("attention rejects instead of acknowledging a pre-DM disconnect", async () => {
+  const fixture = await createServiceFixture({
+    entersState: async (connection) => {
+      connection.emit(
+        "stateChange",
+        { status: "connecting" },
+        { status: "disconnected" },
+      );
+      return connection;
+    },
+  });
+  await fixture.start();
+
+  await assert.rejects(
+    fixture.service.requestAttention("Jaeger requests attention."),
+    /disconnected before attention delivery/,
+  );
+  assert.equal(fixture.owner.messages.length, 0);
+  assert.equal(fixture.connections[0].destroyCalls, 1);
+  await fixture.stop();
+});
+
+test("leaving during the join refresh cannot wedge ringing", async () => {
+  const clock = new FakeClock();
+  const fixture = await createServiceFixture({ clock });
+  await fixture.start();
+  await fixture.service.requestAttention("Attention.");
+
+  const refresh = deferred();
+  fixture.client.fetchVoiceChannel = () => refresh.promise;
+  fixture.voiceChannel.members.set(USER_ID, { id: USER_ID });
+  fixture.client.emit(
+    Events.VoiceStateUpdate,
+    { id: USER_ID, channelId: null, guild: { id: GUILD_ID } },
+    { id: USER_ID, channelId: VOICE_ID, guild: { id: GUILD_ID } },
+  );
+  await settled();
+  assert.equal(clock.timers.size, 1);
+
+  fixture.voiceChannel.members.delete(USER_ID);
+  fixture.client.emit(
+    Events.VoiceStateUpdate,
+    { id: USER_ID, channelId: VOICE_ID, guild: { id: GUILD_ID } },
+    { id: USER_ID, channelId: null, guild: { id: GUILD_ID } },
+  );
+  await settled();
+  assert.equal(fixture.service.phase, "idle");
+  assert.equal(clock.timers.size, 0);
+  assert.equal(fixture.connections[0].destroyCalls, 1);
+
+  refresh.resolve(fixture.voiceChannel);
+  await settled();
+  assert.equal(fixture.bridges.length, 0);
+  await fixture.stop();
+});
+
+test("a join refresh failure ends the ringing call", async () => {
+  const clock = new FakeClock();
+  const fixture = await createServiceFixture({ clock });
+  await fixture.start();
+  await fixture.service.requestAttention("Attention.");
+
+  fixture.client.fetchVoiceChannel = async () => {
+    throw new Error("voice channel refresh failed");
+  };
+  fixture.voiceChannel.members.set(USER_ID, { id: USER_ID });
+  fixture.client.emit(
+    Events.VoiceStateUpdate,
+    { id: USER_ID, channelId: null, guild: { id: GUILD_ID } },
+    { id: USER_ID, channelId: VOICE_ID, guild: { id: GUILD_ID } },
+  );
+  await settled();
+
+  assert.equal(fixture.service.phase, "idle");
+  assert.equal(clock.timers.size, 0);
+  assert.equal(fixture.connections[0].destroyCalls, 1);
+  assert.match(fixture.runtime.errors.at(-1).error.message, /refresh failed/);
+  await fixture.stop();
+});
+
 test("an unexpected participant ends the call without subscribing to media", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -298,7 +378,10 @@ test("guild-scoped allowlisted interactions expose runs, attach, and fresh query
     {
       runId: "run-1",
       sessionId: "session-1",
-      input: { message: "What is the status?" },
+      input: {
+        message: "What is the status?",
+        timeoutMs: 10 * 60_000,
+      },
     },
   ]);
   assert.equal(ask.edits[0].content, "Fresh read-only answer.");
@@ -342,6 +425,7 @@ async function createServiceFixture({
   bridgeStartPending = false,
   bridgeStartError = null,
   joinOnAttention = false,
+  entersState = async (connection) => connection,
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "discord-service-"));
   const tokenFile = join(directory, "token");
@@ -382,7 +466,7 @@ async function createServiceFixture({
       client,
       generateDependencyReport: () =>
         "DAVE Libraries\n- @snazzah/davey: 0.1.12\n",
-      entersState: async (connection) => connection,
+      entersState,
       VoiceConnectionStatus: {
         Ready: "ready",
         Disconnected: "disconnected",
@@ -444,11 +528,12 @@ class FakeClient extends EventEmitter {
     this.channels = {
       fetch: async (id) =>
         id === VOICE_ID
-          ? voiceChannel
+          ? this.fetchVoiceChannel()
           : id === TEXT_ID
             ? notificationChannel
             : null,
     };
+    this.fetchVoiceChannel = async () => voiceChannel;
     this.users = { fetch: async (id) => (id === USER_ID ? owner : null) };
     this.application = {
       commands: {
@@ -634,4 +719,12 @@ function validOptions() {
 async function settled() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
 }

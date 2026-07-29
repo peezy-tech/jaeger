@@ -29,6 +29,7 @@ const NOTIFICATION_EVENTS = [
   "run.terminal",
   "session.query.completed",
 ];
+const ASK_TIMEOUT_MS = 10 * 60_000;
 const COMMANDS = [
   {
     name: "runs",
@@ -309,11 +310,11 @@ export class DiscordService {
         20_000,
       );
       if (this.connection !== connection || this.phase !== "ringing") {
-        return { status: this.phase, coalesced: false };
+        throw new Error("Discord voice disconnected before attention delivery");
       }
       await this.#refreshVoiceChannel();
       if (this.connection !== connection || this.phase !== "ringing") {
-        return { status: this.phase, coalesced: false };
+        throw new Error("Discord voice disconnected before attention delivery");
       }
       this.#assertExpectedParticipants();
       const user = await this.client.users.fetch(this.config.allowUserId);
@@ -373,7 +374,7 @@ export class DiscordService {
     if (
       userId === this.config.allowUserId &&
       left &&
-      ["starting", "active"].includes(this.phase)
+      ["ringing", "starting", "active"].includes(this.phase)
     ) {
       await this.#endCall("allowlisted user left");
       return;
@@ -391,13 +392,23 @@ export class DiscordService {
   async #startMedia() {
     if (this.phase !== "ringing") return;
     const connection = this.connection;
+    try {
+      await this.#refreshVoiceChannel();
+      if (this.connection !== connection || this.phase !== "ringing") return;
+      this.#assertExpectedParticipants();
+      if (!this.#allowedUserPresent()) {
+        await this.#endCall("allowlisted user left before media startup");
+        return;
+      }
+    } catch (error) {
+      if (this.connection === connection && this.phase === "ringing") {
+        await this.#endCall("media startup failed");
+      }
+      throw error;
+    }
+    this.phase = "starting";
     this.clock.clearTimeout(this.ringingTimer);
     this.ringingTimer = null;
-    await this.#refreshVoiceChannel();
-    if (this.connection !== connection || this.phase !== "ringing") return;
-    this.#assertExpectedParticipants();
-    if (!this.#allowedUserPresent()) return;
-    this.phase = "starting";
     this.maximumCallTimer = this.clock.setTimeout(() => {
       this.#requestCallEnd(
         "maximum-call timeout",
@@ -597,6 +608,7 @@ export class DiscordService {
           binding.sessionId,
           {
             message: interaction.options.getString("question", true),
+            timeoutMs: ASK_TIMEOUT_MS,
           },
         );
         const output =
