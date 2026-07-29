@@ -145,6 +145,7 @@ export class TelegramCallInvitations {
       await writeOwnerOnlyJson(this.stateFile, record);
       return {
         invitation: publicInvitation(record, status),
+        invitationKey: record.tokenHash,
         telegram: record.telegram,
       };
     });
@@ -208,15 +209,16 @@ export class TelegramCallInvitations {
       if (record.dispositionUpdatedAt) return null;
       return {
         invitation: publicInvitation(record, status),
+        invitationKey: record.tokenHash,
         telegram: record.telegram,
       };
     });
   }
 
-  async markDispositionUpdated(status, { delivered = true } = {}) {
+  async markDispositionUpdated(pending, { delivered = true } = {}) {
     return await this.#exclusive(async () => {
       const record = await this.#read();
-      if (!record || record.status !== status) return false;
+      if (!dispositionMatches(record, pending)) return false;
       record.dispositionUpdatedAt = new Date(this.now()).toISOString();
       record.dispositionDelivered = delivered;
       await writeOwnerOnlyJson(this.stateFile, record);
@@ -229,10 +231,10 @@ export class TelegramCallInvitations {
    * is spent, so a Telegram endpoint that never recovers cannot wedge the
    * invitation state forever.
    */
-  async recordDispositionAttempt(status) {
+  async recordDispositionAttempt(pending) {
     return await this.#exclusive(async () => {
       const record = await this.#read();
-      if (!record || record.status !== status) return false;
+      if (!dispositionMatches(record, pending)) return false;
       const attempts = (Number(record.dispositionAttempts) || 0) + 1;
       record.dispositionAttempts = attempts;
       await writeOwnerOnlyJson(this.stateFile, record);
@@ -275,6 +277,7 @@ export class TelegramCallInvitations {
       await writeOwnerOnlyJson(this.stateFile, record);
       return {
         invitation: publicInvitation(record, nextStatus),
+        invitationKey: record.tokenHash,
         telegram: record.telegram,
       };
     });
@@ -382,7 +385,7 @@ export async function finalizeTelegramDisposition(
 ) {
   const status = pending.invitation.status;
   if (!telegram || !pending.telegram) {
-    await invitations.markDispositionUpdated(status, { delivered: false });
+    await invitations.markDispositionUpdated(pending, { delivered: false });
     return { finalized: true, delivered: false, error: null };
   }
   try {
@@ -395,14 +398,14 @@ export async function finalizeTelegramDisposition(
       fetchImpl,
     });
   } catch (error) {
-    const exhausted = await invitations.recordDispositionAttempt(status);
+    const exhausted = await invitations.recordDispositionAttempt(pending);
     if (!exhausted && !(error instanceof TelegramMessageUnavailableError)) {
       return { finalized: false, delivered: false, error };
     }
-    await invitations.markDispositionUpdated(status, { delivered: false });
+    await invitations.markDispositionUpdated(pending, { delivered: false });
     return { finalized: true, delivered: false, error };
   }
-  await invitations.markDispositionUpdated(status, { delivered: true });
+  await invitations.markDispositionUpdated(pending, { delivered: true });
   return { finalized: true, delivered: true, error: null };
 }
 
@@ -661,6 +664,15 @@ function tokenMatches(record, token) {
   const actual = Buffer.from(hashToken(token), "hex");
   const expected = Buffer.from(record.tokenHash, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function dispositionMatches(record, pending) {
+  return Boolean(
+    record &&
+      pending?.invitationKey &&
+      record.tokenHash === pending.invitationKey &&
+      record.status === pending.invitation?.status,
+  );
 }
 
 function publicInvitation(record, status) {

@@ -29,6 +29,31 @@ test("creates and reuses an owner-only per-install capability token", async () =
   );
 });
 
+test("preserves permissions on an existing capability parent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-capability-parent-"));
+  const capabilityFile = join(directory, "capability-token");
+  await chmod(directory, 0o755);
+
+  await readOrCreateCapabilityToken(capabilityFile, {
+    createToken: () => "p".repeat(43),
+  });
+
+  assert.equal((await stat(directory)).mode & 0o777, 0o755);
+  assert.equal((await stat(capabilityFile)).mode & 0o777, 0o600);
+});
+
+test("rejects a writable capability parent without changing its mode", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-capability-writable-"));
+  const capabilityFile = join(directory, "capability-token");
+  await chmod(directory, 0o770);
+
+  await assert.rejects(
+    readOrCreateCapabilityToken(capabilityFile),
+    /directory must not be writable by others/,
+  );
+  assert.equal((await stat(directory)).mode & 0o777, 0o770);
+});
+
 test("rejects missing, malformed, and incorrect bearer capabilities", () => {
   const expected = "c".repeat(43);
   const request = (authorization) => ({

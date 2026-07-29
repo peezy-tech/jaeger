@@ -179,6 +179,73 @@ test("late output and server responses stay bound to their child generation", as
   await bridge.stop();
 });
 
+test("a replacement stays unavailable until initialize and resume complete", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-reconnect-ready-"));
+  const processes = [];
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => {
+      const child = createMockProcess({
+        deferredMethods: processes.length === 0
+          ? []
+          : ["initialize", "thread/resume"],
+      });
+      processes.push(child);
+      return child;
+    },
+    requestTimeoutMs: 1_000,
+  });
+  let readyEvents = 0;
+  bridge.on("ready", () => {
+    readyEvents += 1;
+  });
+
+  await bridge.start();
+  const reconnecting = bridge.reconnect();
+  await waitForProcess(processes, 1);
+  await waitForRequest(processes[1], "initialize");
+  assert.equal(bridge.connected, false);
+  assert.equal(bridge.snapshot().connected, false);
+  assert.equal(readyEvents, 1);
+
+  processes[1].release("initialize");
+  await waitForRequest(processes[1], "thread/resume");
+  assert.equal(bridge.connected, false);
+  assert.equal(readyEvents, 1);
+
+  processes[1].release("thread/resume");
+  await reconnecting;
+  assert.equal(bridge.connected, true);
+  assert.equal(readyEvents, 2);
+  await bridge.stop();
+});
+
+test("stdin EPIPE disconnects the bridge and rejects pending requests", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-epipe-"));
+  const child = createMockProcess({ deferredMethods: ["test/pending"] });
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+  });
+  let disconnected = 0;
+  bridge.on("disconnected", () => {
+    disconnected += 1;
+  });
+
+  await bridge.start();
+  const pending = bridge.request("test/pending");
+  await waitForRequest(child, "test/pending");
+  const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+  assert.doesNotThrow(() => child.stdin.emit("error", error));
+
+  await assert.rejects(pending, /write EPIPE/);
+  assert.equal(bridge.connected, false);
+  assert.equal(disconnected, 1);
+});
+
 test("WebRTC start forwards the SDP offer and returns the matching answer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-"));
   const child = createMockProcess();
@@ -265,7 +332,27 @@ test("a rejected realtime start cancels its SDP waiter", async () => {
   await bridge.stop();
 });
 
-function createMockProcess({ exitOnKill = true, exitOnForceKill = true } = {}) {
+async function waitForRequest(child, method) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (child.requests.some((request) => request.method === method)) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for ${method}`);
+}
+
+async function waitForProcess(processes, index) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (processes[index]) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Timed out waiting for process ${index}`);
+}
+
+function createMockProcess({
+  exitOnKill = true,
+  exitOnForceKill = true,
+  deferredMethods = [],
+} = {}) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
@@ -276,6 +363,13 @@ function createMockProcess({ exitOnKill = true, exitOnForceKill = true } = {}) {
   child.signals = [];
   child.rejectRealtimeStart = false;
   child.deferRealtimeSdp = false;
+  child.deferredMethods = new Set(deferredMethods);
+  child.deferredResponses = new Map();
+  child.release = (method) => {
+    const responses = child.deferredResponses.get(method) ?? [];
+    child.deferredResponses.delete(method);
+    for (const respond of responses) respond();
+  };
   child.stdin.on("data", (chunk) => {
     for (const line of String(chunk).trim().split("\n")) {
       if (!line) continue;
@@ -295,7 +389,7 @@ function createMockProcess({ exitOnKill = true, exitOnForceKill = true } = {}) {
           turn: { id: "turn-bootstrap", status: "inProgress", items: [] },
         };
       }
-      queueMicrotask(() => {
+      const respond = () => queueMicrotask(() => {
         child.stdout.write(
           `${JSON.stringify(
             request.method === "thread/realtime/start" && child.rejectRealtimeStart
@@ -334,6 +428,13 @@ function createMockProcess({ exitOnKill = true, exitOnForceKill = true } = {}) {
           );
         }
       });
+      if (child.deferredMethods.has(request.method)) {
+        const responses = child.deferredResponses.get(request.method) ?? [];
+        responses.push(respond);
+        child.deferredResponses.set(request.method, responses);
+      } else {
+        respond();
+      }
     }
   });
   child.kill = (signal) => {

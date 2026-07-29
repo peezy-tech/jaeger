@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, open, readFile, stat } from "node:fs/promises";
+import { mkdir, open, readFile, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export async function readOrCreateCapabilityToken(
@@ -9,8 +9,12 @@ export async function readOrCreateCapabilityToken(
   } = {},
 ) {
   if (!capabilityFile) throw new Error("A capability-token file is required");
-  await mkdir(dirname(capabilityFile), { recursive: true, mode: 0o700 });
-  await chmod(dirname(capabilityFile), 0o700);
+  const directory = dirname(capabilityFile);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directoryMode = (await stat(directory)).mode & 0o777;
+  if ((directoryMode & 0o022) !== 0) {
+    throw new Error(`Capability-token directory must not be writable by others: ${directory}`);
+  }
   try {
     const handle = await open(capabilityFile, "wx", 0o600);
     try {

@@ -275,7 +275,7 @@ test("a new call cannot discard an expired call before its disposition is finali
   assert.equal(expired.telegram.messageId, 991);
   assert.equal((await invitations.expireCurrent()).telegram.messageId, 991);
   await assert.rejects(() => invitations.create(), { statusCode: 409 });
-  assert.equal(await invitations.markDispositionUpdated("expired"), true);
+  assert.equal(await invitations.markDispositionUpdated(expired), true);
   assert.equal(await invitations.expireCurrent(), null);
   assert.equal((await invitations.create()).invitation.status, "ringing");
 });
@@ -309,7 +309,12 @@ test("answered and declined dispositions remain pending until Telegram is update
       message: `The ${status} Telegram call must be finalized before creating another`,
       statusCode: 409,
     });
-    assert.equal(await invitations.markDispositionUpdated(status), true);
+    assert.equal(
+      await invitations.markDispositionUpdated(
+        await invitations.pendingDisposition(),
+      ),
+      true,
+    );
     assert.equal(await invitations.pendingDisposition(), null);
   }
 });
@@ -427,6 +432,122 @@ test("a disposition without a Telegram message is finalized once", async () => {
     error: null,
   });
   assert.equal(await invitations.pendingDisposition(), null);
+});
+
+test("a stale successful disposition edit cannot finalize its replacement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-stale-success-"));
+  const stateFile = join(directory, "telegram-call.json");
+  let sequence = 0;
+  const invitations = new TelegramCallInvitations({
+    stateFile,
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => String(++sequence).repeat(43),
+  });
+
+  const first = await invitations.create();
+  await invitations.recordTelegramDelivery(first.token, {
+    chatId: "-100123",
+    messageId: 991,
+  });
+  const firstPending = await invitations.answer(first.token);
+  let releaseEdit;
+  const staleFinalization = finalizeTelegramDisposition(
+    invitations,
+    { botToken: "secret" },
+    firstPending,
+    {
+      fetchImpl: async () => {
+        await new Promise((resolve) => {
+          releaseEdit = resolve;
+        });
+        return new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await finalizeTelegramDisposition(
+    invitations,
+    { botToken: "secret" },
+    firstPending,
+    {
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    },
+  );
+
+  const second = await invitations.create();
+  await invitations.recordTelegramDelivery(second.token, {
+    chatId: "-100123",
+    messageId: 992,
+  });
+  await invitations.answer(second.token);
+  releaseEdit();
+  await staleFinalization;
+
+  assert.equal((await invitations.pendingDisposition()).telegram.messageId, 992);
+});
+
+test("a stale failed disposition edit cannot consume its replacement retries", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-stale-failure-"));
+  const stateFile = join(directory, "telegram-call.json");
+  let sequence = 0;
+  const invitations = new TelegramCallInvitations({
+    stateFile,
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => String(++sequence).repeat(43),
+  });
+
+  const first = await invitations.create();
+  await invitations.recordTelegramDelivery(first.token, {
+    chatId: "-100123",
+    messageId: 991,
+  });
+  const firstPending = await invitations.answer(first.token);
+  let rejectEdit;
+  const staleFinalization = finalizeTelegramDisposition(
+    invitations,
+    { botToken: "secret" },
+    firstPending,
+    {
+      fetchImpl: async () =>
+        await new Promise((_, reject) => {
+          rejectEdit = reject;
+        }),
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await finalizeTelegramDisposition(
+    invitations,
+    { botToken: "secret" },
+    firstPending,
+    {
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    },
+  );
+
+  const second = await invitations.create();
+  await invitations.recordTelegramDelivery(second.token, {
+    chatId: "-100123",
+    messageId: 992,
+  });
+  await invitations.answer(second.token);
+  rejectEdit(new Error("write failed"));
+  await staleFinalization;
+
+  const record = JSON.parse(await readFile(stateFile, "utf8"));
+  assert.equal(record.telegram.messageId, 992);
+  assert.equal(record.dispositionAttempts, undefined);
+  assert.equal((await invitations.pendingDisposition()).telegram.messageId, 992);
 });
 
 test("Telegram invitation public URLs must use HTTPS", () => {

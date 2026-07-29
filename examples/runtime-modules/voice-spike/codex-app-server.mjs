@@ -49,17 +49,19 @@ export class CodexAppServer extends EventEmitter {
     this.generation = 0;
     this.nextRequestId = 1;
     this.pending = new Map();
+    this.ready = false;
     this.stopping = false;
     this.realtimeStarting = false;
     this.stdoutReaders = new WeakMap();
   }
 
   get connected() {
-    return Boolean(this.child && isChildRunning(this.child));
+    return this.ready && this.#childRunning();
   }
 
   async start() {
-    if (this.connected) return;
+    if (this.#childRunning()) return;
+    this.ready = false;
     this.stopping = false;
     const child = this.spawnProcess(
       this.codexBin,
@@ -78,6 +80,10 @@ export class CodexAppServer extends EventEmitter {
     stdout.on("line", (line) => this.#handleLine(child, line));
     child.stderr.on("data", (chunk) => {
       this.emit("diagnostic", String(chunk).trim());
+    });
+    child.stdin.on("error", (error) => {
+      this.#handleExit(child, error);
+      if (isChildRunning(child)) child.kill("SIGTERM");
     });
     child.once("error", (error) => this.#handleExit(child, error));
     child.once("exit", (code, signal) => {
@@ -98,6 +104,7 @@ export class CodexAppServer extends EventEmitter {
       });
       this.notify("initialized", {});
       await this.#createOrResumeThread();
+      this.ready = true;
       this.emit("ready", this.snapshot());
     } catch (error) {
       await this.stop();
@@ -106,6 +113,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async stop() {
+    this.ready = false;
     if (!this.child) return;
     this.stopping = true;
     const child = this.child;
@@ -191,17 +199,23 @@ export class CodexAppServer extends EventEmitter {
   }
 
   request(method, params = {}) {
-    if (!this.connected) {
+    if (!this.#childRunning()) {
       return Promise.reject(new Error("Codex app-server is not connected"));
     }
     const id = this.nextRequestId++;
-    this.#write({ method, id, params });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`${method} timed out`));
       }, this.requestTimeoutMs);
       this.pending.set(id, { method, resolve, reject, timer });
+      try {
+        this.#write({ method, id, params });
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 
@@ -371,6 +385,10 @@ export class CodexAppServer extends EventEmitter {
     return { promise, cancel };
   }
 
+  #childRunning() {
+    return Boolean(this.child && isChildRunning(this.child));
+  }
+
   #assertReady() {
     if (!this.connected || !this.threadId) {
       throw new Error("Codex app-server is not ready");
@@ -459,6 +477,7 @@ export class CodexAppServer extends EventEmitter {
 
   #handleExit(child, error) {
     if (child !== this.child) return;
+    this.ready = false;
     this.child = null;
     this.#rejectPending(error);
     if (!this.stopping) this.emit("disconnected", error);
