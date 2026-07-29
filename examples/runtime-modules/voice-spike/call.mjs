@@ -38,6 +38,8 @@ if (pending) {
 }
 const { token, invitation } = await invitations.create({ reason });
 const answerUrl = new URL(publicUrl);
+answerUrl.hash = "";
+const answerUrlBase = answerUrl.href;
 answerUrl.hash = new URLSearchParams({ call: token }).toString();
 
 await invitations.recordTelegramDeliveryUncertain(token, {
@@ -68,7 +70,7 @@ const recorded = await invitations.recordTelegramDelivery(token, {
   chatId: telegram.chatId,
   messageThreadId: telegram.messageThreadId,
   messageId: delivery.messageId,
-  answerUrl: answerUrl.href,
+  answerUrlBase,
 });
 await activateTelegramCall({
   ...telegram,

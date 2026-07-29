@@ -141,14 +141,17 @@ export class TelegramCallInvitations {
       ) {
         throw httpError("Telegram call is no longer available", 410);
       }
+      const answerUrlBase = telegram.answerUrlBase
+        ? tokenlessAnswerUrl(telegram.answerUrlBase)
+        : null;
       record.telegram = {
         chatId: String(telegram.chatId),
         messageThreadId: telegram.messageThreadId
           ? String(telegram.messageThreadId)
           : null,
         messageId: Number(telegram.messageId),
-        answerUrl: telegram.answerUrl,
-        activationPending: Boolean(telegram.answerUrl),
+        answerUrlBase,
+        activationPending: Boolean(answerUrlBase),
       };
       delete record.telegramDeliveryUncertain;
       if (status === "expired" && record.status !== "expired") {
@@ -160,6 +163,35 @@ export class TelegramCallInvitations {
         invitation: publicInvitation(record, status),
         invitationKey: record.tokenHash,
         telegram: record.telegram,
+      };
+    });
+  }
+
+  async prepareTelegramDeliveryActivation(pending) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (
+        !dispositionMatches(record, pending) ||
+        this.#status(record) !== "ringing" ||
+        !record.telegram?.activationPending ||
+        !record.telegram.answerUrlBase
+      ) {
+        return null;
+      }
+      const token = this.createToken();
+      const answerUrl = invitationAnswerUrl(
+        record.telegram.answerUrlBase,
+        token,
+      );
+      record.tokenHash = hashToken(token);
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return {
+        answerUrl,
+        pending: {
+          invitation: publicInvitation(record, "ringing"),
+          invitationKey: record.tokenHash,
+          telegram: record.telegram,
+        },
       };
     });
   }
@@ -445,21 +477,28 @@ export async function finalizeTelegramDisposition(
   const status = pending.invitation.status;
   if (status === "ringing" && pending.telegram?.activationPending) {
     if (!telegram) return { finalized: false, delivered: false, error: null };
+    let activation;
     try {
+      activation = await invitations.prepareTelegramDeliveryActivation(pending);
+      if (!activation) {
+        return { finalized: false, delivered: false, error: null };
+      }
       await activateTelegramCall({
         botToken: telegram.botToken,
-        chatId: pending.telegram.chatId,
-        messageId: pending.telegram.messageId,
-        answerUrl: pending.telegram.answerUrl,
-        reason: pending.invitation.reason,
-        expiresAt: pending.invitation.expiresAt,
+        chatId: activation.pending.telegram.chatId,
+        messageId: activation.pending.telegram.messageId,
+        answerUrl: activation.answerUrl,
+        reason: activation.pending.invitation.reason,
+        expiresAt: activation.pending.invitation.expiresAt,
         fetchImpl,
       });
-      await invitations.markTelegramDeliveryActivated(pending);
+      await invitations.markTelegramDeliveryActivated(activation.pending);
       return { finalized: false, delivered: true, error: null };
     } catch (error) {
-      if (error instanceof TelegramMessageUnavailableError) {
-        const finalized = await invitations.markTelegramActivationFailed(pending);
+      if (activation && error instanceof TelegramMessageUnavailableError) {
+        const finalized = await invitations.markTelegramActivationFailed(
+          activation.pending,
+        );
         return { finalized, delivered: false, error };
       }
       return { finalized: false, delivered: false, error };
@@ -767,6 +806,18 @@ function telegramCallText({ reason, expiresAt, active }) {
 
 function hashToken(token) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function tokenlessAnswerUrl(value) {
+  const url = parseHttpsPublicUrl(value);
+  url.hash = "";
+  return url.href;
+}
+
+function invitationAnswerUrl(answerUrlBase, token) {
+  const url = parseHttpsPublicUrl(answerUrlBase);
+  url.hash = new URLSearchParams({ call: token }).toString();
+  return url.href;
 }
 
 function tokenMatches(record, token) {

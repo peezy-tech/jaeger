@@ -35,12 +35,22 @@ test("call invitations persist only a token hash in an owner-only file", async (
   const { token, invitation } = await invitations.create({
     reason: "A workflow needs attention.",
   });
+  await invitations.recordTelegramDelivery(token, {
+    chatId: "-100123",
+    messageId: 991,
+    answerUrlBase: `https://voice.example/jaeger-voice/#call=${token}`,
+  });
   const serialized = await readFile(stateFile, "utf8");
+  const record = JSON.parse(serialized);
 
   assert.equal(token, "a".repeat(43));
   assert.equal(invitation.status, "ringing");
   assert.doesNotMatch(serialized, new RegExp(token));
   assert.match(serialized, /"tokenHash"/);
+  assert.equal(
+    record.telegram.answerUrlBase,
+    "https://voice.example/jaeger-voice/",
+  );
   assert.equal((await stat(stateFile)).mode & 0o777, 0o600);
   assert.equal((await stat(join(directory, "nested"))).mode & 0o777, 0o700);
 });
@@ -476,19 +486,23 @@ test("Telegram delivery activates its answer button after recording the message"
 
 test("a recorded placeholder recovers its answer button after a crash", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-activation-recovery-"));
-  const token = "q".repeat(43);
+  const stateFile = join(directory, "telegram-call.json");
+  const initialToken = "q".repeat(43);
+  const recoveryToken = "r".repeat(43);
+  const tokens = [initialToken, recoveryToken];
   const invitations = new TelegramCallInvitations({
-    stateFile: join(directory, "telegram-call.json"),
+    stateFile,
     now: () => Date.parse("2026-07-29T03:00:00Z"),
-    createToken: () => token,
+    createToken: () => tokens.shift(),
   });
 
   await invitations.create({ reason: "Recover this call." });
-  await invitations.recordTelegramDelivery(token, {
+  await invitations.recordTelegramDelivery(initialToken, {
     chatId: "-100123",
     messageId: 991,
-    answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=recover",
+    answerUrlBase: "https://hq.peezy.tech/jaeger-voice/",
   });
+  assert.doesNotMatch(await readFile(stateFile, "utf8"), new RegExp(initialToken));
   const pending = await invitations.pendingDisposition();
   let request;
   const outcome = await finalizeTelegramDisposition(
@@ -511,6 +525,16 @@ test("a recorded placeholder recovers its answer button after a crash", async ()
   const body = JSON.parse(request.options.body);
   assert.equal(body.message_id, 991);
   assert.equal(body.reply_markup.inline_keyboard[0][0].text, "Answer");
+  assert.equal(
+    body.reply_markup.inline_keyboard[0][0].url,
+    `https://hq.peezy.tech/jaeger-voice/#call=${recoveryToken}`,
+  );
+  assert.doesNotMatch(
+    await readFile(stateFile, "utf8"),
+    new RegExp(recoveryToken),
+  );
+  assert.equal((await invitations.inspect(initialToken)).status, "unavailable");
+  assert.equal((await invitations.inspect(recoveryToken)).status, "ringing");
 });
 
 test("a permanent activation rejection fails the call so the next call can proceed", async () => {
@@ -529,7 +553,7 @@ test("a permanent activation rejection fails the call so the next call can proce
     await invitations.recordTelegramDelivery(token, {
       chatId: "-100123",
       messageId: 991,
-      answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=activation-failure",
+      answerUrlBase: "https://hq.peezy.tech/jaeger-voice/",
     });
     const pending = await invitations.pendingDisposition();
     const outcome = await finalizeTelegramDisposition(
