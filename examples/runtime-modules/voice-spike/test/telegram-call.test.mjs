@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -42,6 +43,23 @@ test("call invitations persist only a token hash in an owner-only file", async (
   assert.match(serialized, /"tokenHash"/);
   assert.equal((await stat(stateFile)).mode & 0o777, 0o600);
   assert.equal((await stat(join(directory, "nested"))).mode & 0o777, 0o700);
+});
+
+test("call state rejects an existing shared directory without changing its mode", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-shared-state-"));
+  const shared = join(directory, "shared");
+  await mkdir(shared);
+  await chmod(shared, 0o750);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(shared, "telegram-call.json"),
+    createToken: () => "p".repeat(43),
+  });
+
+  await assert.rejects(
+    () => invitations.create(),
+    /state directory must be owner-only/,
+  );
+  assert.equal((await stat(shared)).mode & 0o777, 0o750);
 });
 
 test("a call can be answered exactly once", async () => {
@@ -297,10 +315,38 @@ test("an answered call without Telegram metadata cannot be replaced", async () =
   await invitations.create();
   await invitations.answer(token);
   await assert.rejects(() => invitations.create(), {
-    message: "The answered Telegram call must be finalized before creating another",
+    message: "The answered Telegram call still grants browser access",
     statusCode: 409,
   });
   assert.equal(await invitations.authorize(token), true);
+});
+
+test("finalizing an answered call does not revoke its browser access", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-finalized-answer-"));
+  let now = Date.parse("2026-07-29T03:00:00Z");
+  let sequence = 0;
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => now,
+    createToken: () => String(++sequence).repeat(43),
+  });
+
+  const first = await invitations.create();
+  await invitations.recordTelegramDelivery(first.token, {
+    chatId: "-100123",
+    messageId: 991,
+  });
+  const pending = await invitations.answer(first.token);
+  await invitations.markDispositionUpdated(pending);
+
+  await assert.rejects(() => invitations.create(), {
+    message: "The answered Telegram call still grants browser access",
+    statusCode: 409,
+  });
+  assert.equal(await invitations.authorize(first.token), true);
+
+  now += ANSWERED_ACCESS_TTL_MS + 1;
+  assert.equal((await invitations.create()).invitation.status, "ringing");
 });
 
 test("a new call cannot discard an expired call before its disposition is finalized", async () => {
@@ -360,7 +406,10 @@ test("answered and declined dispositions remain pending until Telegram is update
       991,
     );
     await assert.rejects(() => invitations.create(), {
-      message: `The ${status} Telegram call must be finalized before creating another`,
+      message:
+        status === "answered"
+          ? "The answered Telegram call still grants browser access"
+          : "The declined Telegram call must be finalized before creating another",
       statusCode: 409,
     });
     assert.equal(
@@ -596,10 +645,11 @@ test("a disposition without a Telegram message is finalized once", async () => {
 test("a stale successful disposition edit cannot finalize its replacement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-stale-success-"));
   const stateFile = join(directory, "telegram-call.json");
+  let now = Date.parse("2026-07-29T03:00:00Z");
   let sequence = 0;
   const invitations = new TelegramCallInvitations({
     stateFile,
-    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    now: () => now,
     createToken: () => String(++sequence).repeat(43),
   });
 
@@ -640,6 +690,7 @@ test("a stale successful disposition edit cannot finalize its replacement", asyn
     },
   );
 
+  now += ANSWERED_ACCESS_TTL_MS + 1;
   const second = await invitations.create();
   await invitations.recordTelegramDelivery(second.token, {
     chatId: "-100123",
@@ -655,10 +706,11 @@ test("a stale successful disposition edit cannot finalize its replacement", asyn
 test("a stale failed disposition edit cannot consume its replacement retries", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-stale-failure-"));
   const stateFile = join(directory, "telegram-call.json");
+  let now = Date.parse("2026-07-29T03:00:00Z");
   let sequence = 0;
   const invitations = new TelegramCallInvitations({
     stateFile,
-    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    now: () => now,
     createToken: () => String(++sequence).repeat(43),
   });
 
@@ -694,6 +746,7 @@ test("a stale failed disposition edit cannot consume its replacement retries", a
     },
   );
 
+  now += ANSWERED_ACCESS_TTL_MS + 1;
   const second = await invitations.create();
   await invitations.recordTelegramDelivery(second.token, {
     chatId: "-100123",

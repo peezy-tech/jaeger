@@ -486,9 +486,12 @@ async function removeModulesUnlocked(
         `Module ${name} has local changes; inspect with 'jaeger modules diff ${name}' or use --force`,
       );
     }
-    if (!options.force && await runtimeConfigReferencesModule(root, name)) {
+    if (
+      !options.force &&
+      await pathExists(path.join(root, RUNTIME_CONFIG_FILE))
+    ) {
       throw new Error(
-        `Module ${name} is referenced by ${RUNTIME_CONFIG_FILE}; remove it from the runtime configuration first`,
+        `Cannot prove module ${name} is unused while ${RUNTIME_CONFIG_FILE} exists; remove it from the runtime configuration, then use --force`,
       );
     }
   }
@@ -1639,77 +1642,10 @@ function assertOnlyKeys(
   if (unknown) throw new Error(`${label} contains unknown field: ${unknown}`);
 }
 
-async function runtimeConfigReferencesModule(root: string, name: string): Promise<boolean> {
-  try {
-    const source = await readFile(path.join(root, RUNTIME_CONFIG_FILE), "utf8");
-    if (
-      source.includes(`${MODULE_DIRECTORY}/${name}/`) ||
-      source.includes(`${MODULE_DIRECTORY}/\${`)
-    ) {
-      return true;
-    }
-    // A runtime config can construct the module path from separate path
-    // segments, so the complete `modules/<name>/` string need not occur in
-    // the source. Only treat the module name as a reference when it occurs in
-    // a path-construction call alongside the quoted module directory.
-    const pathCallPattern =
-      /(?:(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*)?(?:\bpath\.(?:join|resolve)|\bnew\s+URL)\s*\(([\s\S]*?)\)/g;
-    const stringBindings = new Map<string, string>();
-    const stringBindingPattern =
-      /(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(["'`])([^"'`]*?)\2/g;
-    for (const match of source.matchAll(stringBindingPattern)) {
-      if (match[1] && match[3] !== undefined) stringBindings.set(match[1], match[3]);
-    }
-    const modulePathBindings = new Set<string>();
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const match of source.matchAll(pathCallPattern)) {
-        const binding = match[1];
-        const argumentsSource = match[2] ?? "";
-        const hasModuleDirectory =
-          sourceStringLiteralPattern(argumentsSource, MODULE_DIRECTORY) ||
-          [...stringBindings].some(
-            ([binding, value]) =>
-              value === MODULE_DIRECTORY && sourceTokenPattern(argumentsSource, binding),
-          ) ||
-          [...modulePathBindings].some((value) => sourceTokenPattern(argumentsSource, value));
-        if (!hasModuleDirectory) continue;
-        if (
-          sourceTokenPattern(argumentsSource, name) ||
-          [...stringBindings].some(
-            ([binding, value]) =>
-              value === name && sourceTokenPattern(argumentsSource, binding),
-          )
-        ) {
-          return true;
-        }
-        if (binding && !modulePathBindings.has(binding)) {
-          modulePathBindings.add(binding);
-          changed = true;
-        }
-      }
-    }
-    return false;
-  } catch (error) {
-    if (hasCode(error, "ENOENT")) return false;
-    throw error;
-  }
-}
-
 async function existingLocalSource(reference: string): Promise<boolean> {
   const { locator } = splitCatalogReference(reference);
   if (/^[a-z]+:/i.test(locator)) return false;
   return await pathExists(path.resolve(locator));
-}
-
-function sourceTokenPattern(source: string, value: string): boolean {
-  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:^|[^A-Za-z0-9_-])${escaped}(?:$|[^A-Za-z0-9_-])`).test(source);
-}
-
-function sourceStringLiteralPattern(source: string, value: string): boolean {
-  return source.includes(`"${value}"`) || source.includes(`'${value}'`);
 }
 
 async function listRelativeFiles(root: string): Promise<string[]> {

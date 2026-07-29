@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   chmod,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -68,10 +69,17 @@ export class TelegramCallInvitations {
         throw httpError("A Telegram call is already ringing", 409);
       }
       if (
+        currentStatus === "answered" &&
+        Date.parse(current.accessExpiresAt) > this.now()
+      ) {
+        throw httpError(
+          "The answered Telegram call still grants browser access",
+          409,
+        );
+      }
+      if (
         ["answered", "declined", "expired"].includes(currentStatus) &&
-        (current?.telegram ||
-          (currentStatus === "answered" &&
-            Date.parse(current.accessExpiresAt) > this.now())) &&
+        current?.telegram &&
         !current.dispositionUpdatedAt
       ) {
         throw httpError(
@@ -540,8 +548,7 @@ export function parseEnv(source, allowedKeys = null) {
 
 export async function writeOwnerOnlyJson(path, value) {
   const directory = dirname(path);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
+  await ensureOwnerOnlyDirectory(directory);
   const temporary = join(
     directory,
     `.${randomBytes(12).toString("hex")}.tmp`,
@@ -569,14 +576,36 @@ export async function removeInvitationState(path) {
 
 async function withStateLock(stateFile, operation) {
   const directory = dirname(stateFile);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
+  await ensureOwnerOnlyDirectory(directory);
   const lockPath = `${stateFile}.lock`;
   const owner = await acquireStateLock(lockPath);
   try {
     return await operation();
   } finally {
     await releaseStateLock(lockPath, owner);
+  }
+}
+
+async function ensureOwnerOnlyDirectory(directory) {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(
+      `Telegram invitation state directory must be a real directory: ${directory}`,
+    );
+  }
+  if (
+    typeof process.getuid === "function" &&
+    metadata.uid !== process.getuid()
+  ) {
+    throw new Error(
+      `Telegram invitation state directory must be owned by the current user: ${directory}`,
+    );
+  }
+  if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
+    throw new Error(
+      `Telegram invitation state directory must be owner-only: ${directory}`,
+    );
   }
 }
 

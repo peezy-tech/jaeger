@@ -516,8 +516,10 @@ jaeger modules diff telegram
 and `OWNER/REPOSITORY/ITEM#REF`. GitHub refs resolve to a commit before files
 are fetched. Multi-item additions perform one dependency installation with
 package lifecycle scripts disabled. `modules.lock.json` records source and file
-hashes plus dependency ownership; `modules remove` refuses locally edited or
-still-imported modules unless forced.
+hashes plus dependency ownership. `modules remove` refuses locally edited
+modules and, because runtime configurations are arbitrary ESM, requires
+`--force` whenever `jaeger.runtime.mjs` exists after the operator removes the
+module from that composition.
 
 Installing source does not activate it. Review and configure the files, then
 cross the existing explicit execution boundary:
