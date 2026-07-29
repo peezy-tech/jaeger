@@ -102,6 +102,7 @@ export interface RuntimeModuleOperations {
 
 interface EventConsumer {
   readonly id: string;
+  readonly slot: string;
   readonly module: string;
   readonly types: readonly HookEventType[];
   readonly handler: (event: LifecycleHookEvent) => void | Promise<void>;
@@ -214,6 +215,7 @@ export class RuntimeModuleHost {
         id: consumer.id,
         createdAt: this.now().toISOString(),
       });
+      await this.migratePendingDeliveries(consumer);
     }
   }
 
@@ -298,9 +300,11 @@ export class RuntimeModuleHost {
           }
           const index =
             this.consumers.filter((consumer) => consumer.module === moduleName).length + 1;
+          const slot = `${moduleName}-${index}`;
           const generation = this.config?.digest.slice(0, 16) ?? "unversioned";
           this.consumers.push({
-            id: `${moduleName}-${index}-${generation}`,
+            id: `${slot}-${generation}`,
+            slot,
             module: moduleName,
             types: normalized,
             handler,
@@ -489,6 +493,56 @@ export class RuntimeModuleHost {
     }
   }
 
+  private async migratePendingDeliveries(consumer: EventConsumer): Promise<void> {
+    const eventsRoot = path.join(this.moduleRoot(consumer.module), "events");
+    const currentDirectory = this.consumerDirectory(consumer);
+    const escapedSlot = consumer.slot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const consumerDirectoryPattern = new RegExp(
+      `^${escapedSlot}(?:-[a-f0-9]{16})?$`,
+    );
+    const candidates = new Map<
+      string,
+      { readonly delivery: ModuleDelivery; readonly directory: string }
+    >();
+    for (const directoryEntry of await readdir(eventsRoot, { withFileTypes: true })) {
+      if (
+        !directoryEntry.isDirectory() ||
+        directoryEntry.isSymbolicLink() ||
+        !consumerDirectoryPattern.test(directoryEntry.name)
+      ) {
+        continue;
+      }
+      const directory = path.join(eventsRoot, directoryEntry.name);
+      for (const eventEntry of await readdir(directory, { withFileTypes: true })) {
+        if (
+          !eventEntry.isFile() ||
+          eventEntry.isSymbolicLink() ||
+          !EVENT_FILE.test(eventEntry.name)
+        ) {
+          continue;
+        }
+        const delivery = parseModuleDelivery(
+          JSON.parse(await readFile(path.join(directory, eventEntry.name), "utf8")),
+        );
+        if (`${delivery.eventId}.json` !== eventEntry.name) {
+          throw new Error("Invalid runtime module event delivery");
+        }
+        if (!consumer.types.includes(delivery.eventType)) continue;
+        const previous = candidates.get(delivery.eventId);
+        if (!previous || moduleDeliveryPrecedes(previous.delivery, delivery)) {
+          candidates.set(delivery.eventId, { delivery, directory });
+        }
+      }
+    }
+    for (const { delivery, directory } of candidates.values()) {
+      if (directory === currentDirectory || delivery.status !== "retrying") continue;
+      await writeJsonAtomic(path.join(currentDirectory, `${delivery.eventId}.json`), {
+        ...delivery,
+        consumer: consumer.id,
+      } satisfies ModuleDelivery);
+    }
+  }
+
   private async readStorage(
     moduleName: string,
     key: string,
@@ -593,6 +647,26 @@ function parseModuleDelivery(value: unknown): ModuleDelivery {
     throw new Error("Invalid runtime module event delivery");
   }
   return delivery as unknown as ModuleDelivery;
+}
+
+function moduleDeliveryPrecedes(
+  current: ModuleDelivery,
+  candidate: ModuleDelivery,
+): boolean {
+  if (current.attempts !== candidate.attempts) {
+    return current.attempts < candidate.attempts;
+  }
+  if (current.status !== candidate.status) {
+    return current.status === "retrying";
+  }
+  const currentUpdatedAt = Date.parse(current.updatedAt);
+  const candidateUpdatedAt = Date.parse(candidate.updatedAt);
+  if (currentUpdatedAt !== candidateUpdatedAt) {
+    if (Number.isNaN(currentUpdatedAt)) return true;
+    if (Number.isNaN(candidateUpdatedAt)) return false;
+    return currentUpdatedAt < candidateUpdatedAt;
+  }
+  return false;
 }
 
 function validateStorageKey(key: string): void {

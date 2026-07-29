@@ -1669,6 +1669,10 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
         const argumentsSource = match[2] ?? "";
         const hasModuleDirectory =
           sourceStringLiteralPattern(argumentsSource, MODULE_DIRECTORY) ||
+          [...stringBindings].some(
+            ([binding, value]) =>
+              value === MODULE_DIRECTORY && sourceTokenPattern(argumentsSource, binding),
+          ) ||
           [...modulePathBindings].some((value) => sourceTokenPattern(argumentsSource, value));
         if (!hasModuleDirectory) continue;
         if (
