@@ -534,21 +534,11 @@ export async function finalizeTelegramDisposition(
 export async function readTelegramConfig(envFile, { optional = false } = {}) {
   const handle = await open(envFile, constants.O_RDONLY | constants.O_NOFOLLOW);
   let source;
+  let metadata;
   try {
-    const metadata = await handle.stat();
+    metadata = await handle.stat();
     if (!metadata.isFile()) {
       throw new Error(`Telegram configuration must be a regular file: ${envFile}`);
-    }
-    if (
-      typeof process.getuid === "function" &&
-      metadata.uid !== process.getuid()
-    ) {
-      throw new Error(
-        `Telegram configuration must be owned by the current user: ${envFile}`,
-      );
-    }
-    if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
-      throw new Error(`Telegram configuration must be owner-only: ${envFile}`);
     }
     source = await handle.readFile("utf8");
   } finally {
@@ -565,6 +555,17 @@ export async function readTelegramConfig(envFile, { optional = false } = {}) {
   const botToken = values.TELEGRAM_BOT_TOKEN;
   const chatId = values.TELEGRAM_CHAT_ID;
   if (optional && !botToken && !chatId) return null;
+  if (
+    typeof process.getuid === "function" &&
+    metadata.uid !== process.getuid()
+  ) {
+    throw new Error(
+      `Telegram configuration must be owned by the current user: ${envFile}`,
+    );
+  }
+  if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
+    throw new Error(`Telegram configuration must be owner-only: ${envFile}`);
+  }
   if (!botToken || !chatId) {
     throw new Error(
       "Telegram configuration requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID",

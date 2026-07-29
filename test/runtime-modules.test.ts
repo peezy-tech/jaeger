@@ -521,6 +521,120 @@ test("named consumers inherit pending deliveries from positional consumers", asy
   }
 });
 
+test("inserting a named consumer does not claim an existing positional ledger", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-insert-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const legacyDirectory = path.join(
+    stateDir,
+    ".modules",
+    "fixture",
+    "events",
+    "fixture-1",
+  );
+  const eventId = `evt-${"9".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await mkdir(legacyDirectory, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-9999999999" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, "consumer.json"),
+    `${JSON.stringify({
+      version: 1,
+      id: "fixture-1",
+      createdAt: "2026-07-24T00:00:00.000Z",
+      subscriptions: {
+        "run.terminal": "2026-07-24T00:00:00.000Z",
+      },
+    })}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, `${eventId}.json`),
+    `${JSON.stringify({
+      version: 1,
+      consumer: "fixture-1",
+      eventId,
+      eventType: "run.terminal",
+      attempts: 1,
+      status: "retrying",
+      updatedAt: "2026-07-25T00:00:00.000Z",
+      nextAttemptAt: "2026-07-25T00:00:01.000Z",
+      lastError: "retry after insertion",
+    })}\n`,
+  );
+  let positionalAttempts = 0;
+  const host = new RuntimeModuleHost({
+    stateDir,
+    config: {
+      version: 1,
+      path: path.join(root, "jaeger.runtime.mjs"),
+      digest: "b".repeat(64),
+      modules: [{
+        name: "fixture",
+        setup(runtime) {
+          runtime.events.consume("inserted", "phase.changed", async () => {});
+          runtime.events.consume("run.terminal", async () => {
+            positionalAttempts++;
+          });
+        },
+      }],
+    },
+    operations,
+    tickIntervalMs: 10,
+    now: () => new Date("2026-07-25T00:00:02.000Z"),
+  });
+  try {
+    await host.initialize();
+    host.start();
+    await waitFor(() => positionalAttempts === 1);
+    await host.stop();
+
+    const currentDirectory = path.join(
+      stateDir,
+      ".modules",
+      "fixture",
+      "events",
+      `fixture-1-${"b".repeat(16)}`,
+    );
+    const delivery = JSON.parse(
+      await readFile(path.join(currentDirectory, `${eventId}.json`), "utf8"),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.consumer, `fixture-1-${"b".repeat(16)}`);
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 2);
+    const insertedMetadata = JSON.parse(
+      await readFile(
+        path.join(
+          stateDir,
+          ".modules",
+          "fixture",
+          "events",
+          `fixture-inserted-${"b".repeat(16)}`,
+          "consumer.json",
+        ),
+        "utf8",
+      ),
+    ) as Record<string, JsonValue>;
+    assert.deepEqual(insertedMetadata.subscriptions, {
+      "phase.changed": "2026-07-25T00:00:02.000Z",
+    });
+    await assert.rejects(readFile(legacyDirectory), { code: "ENOENT" });
+  } finally {
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runtime config changes preserve pending event retries", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-retry-config-"));
   const stateDir = path.join(root, "state");

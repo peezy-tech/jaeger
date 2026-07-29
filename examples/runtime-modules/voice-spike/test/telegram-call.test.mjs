@@ -852,6 +852,11 @@ test("Telegram configuration accepts only an owner-only regular file", async () 
       readTelegramConfig(envFile),
       /must be owner-only/,
     );
+    await writeFile(envFile, "UNRELATED_SETTING=enabled\n");
+    assert.equal(
+      await readTelegramConfig(envFile, { optional: true }),
+      null,
+    );
 
     await rm(envFile);
     await mkdir(envFile);

@@ -20,6 +20,7 @@ import {
   listInstalledModules,
   removeModules,
   resolveModuleItem,
+  runtimeModuleProjectDigest,
   syncModules,
 } from "../src/module-registry.js";
 
@@ -1395,6 +1396,33 @@ test("refuses a symlinked destination module tree", async () => {
     await assert.rejects(
       readFile(path.join(outside, "alpha", "alpha.mjs")),
       hasCode("ENOENT"),
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a module source tree writable by other local accounts", async () => {
+  const fixture = await registryFixture();
+  const configPath = path.join(fixture.runtimeRoot, "jaeger.runtime.mjs");
+  try {
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+    const configSource =
+      `export { default } from "./modules/alpha/alpha.mjs";\n`;
+    await writeFile(configPath, configSource);
+    await chmod(path.join(fixture.runtimeRoot, "modules"), 0o777);
+
+    await assert.rejects(
+      listInstalledModules(fixture.runtimeRoot),
+      /writable by other users/,
+    );
+    await assert.rejects(
+      runtimeModuleProjectDigest(configPath, configSource),
+      /writable by other users/,
     );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });

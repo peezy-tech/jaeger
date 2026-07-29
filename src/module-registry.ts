@@ -23,6 +23,7 @@ import {
   ProcessLeaseBusyError,
   releaseProcessLease,
 } from "./process-lease.js";
+import { trustedDirectory, trustedRegularFile } from "./path-trust.js";
 
 const execFileAsync = promisify(execFile);
 const MODULE_LOCK_FILE = "modules.lock.json";
@@ -225,9 +226,11 @@ export async function runtimeModuleProjectDigest(
   const digest = createHash("sha256");
   digest.update("jaeger.runtime.mjs\0");
   digest.update(configSource);
+  await trustedRegularFile(configPath, "Runtime module configuration");
   if (!await pathExists(path.join(root, MODULE_LOCK_FILE))) {
     return digest.digest("hex");
   }
+  await assertSafeModuleProject(root, false);
   for (const relative of [
     "package.json",
     "npm-shrinkwrap.json",
@@ -241,12 +244,6 @@ export async function runtimeModuleProjectDigest(
     await updateDigestFromRegularFile(digest, target, relative);
   }
   const modulesRoot = path.join(root, MODULE_DIRECTORY);
-  if (await pathExists(modulesRoot)) {
-    const modulesStat = await lstat(modulesRoot);
-    if (!modulesStat.isDirectory() || modulesStat.isSymbolicLink()) {
-      throw new Error(`Registry-managed module root is not a regular directory: ${modulesRoot}`);
-    }
-  }
   for (const relative of await listRelativeFiles(modulesRoot)) {
     await updateDigestFromRegularFile(
       digest,
@@ -2161,6 +2158,7 @@ async function assertSafeModuleProject(
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
       throw new Error(`Jaeger module project root is not a regular directory: ${root}`);
     }
+    await trustedDirectory(root, "Jaeger module project root");
   } catch (error) {
     if (allowMissing && hasCode(error, "ENOENT")) return;
     throw error;
@@ -2180,6 +2178,7 @@ async function assertSafeModuleProject(
     ".pnp.loader.mjs",
     ".yarn/build-state.yml",
     ".yarn/install-state.gz",
+    RUNTIME_CONFIG_FILE,
     MODULE_LOCK_FILE,
     MODULE_MUTATION_LOCK_FILE,
   ]) {
@@ -2197,10 +2196,39 @@ async function assertSafeModuleProject(
       if (!valid) {
         throw new Error(`Jaeger module project contains an unsafe path: ${target}`);
       }
+      if (targetStat.isDirectory()) {
+        await trustedDirectory(target, "Registry-managed module project directory");
+      } else {
+        await trustedRegularFile(target, "Registry-managed module project file");
+      }
     } catch (error) {
       if (hasCode(error, "ENOENT")) continue;
       throw error;
     }
+  }
+  const modulesRoot = path.join(root, MODULE_DIRECTORY);
+  for (const relative of await listRelativeFiles(modulesRoot)) {
+    await trustedRegularFile(
+      path.join(modulesRoot, ...relative.split("/")),
+      "Registry-managed module source",
+    );
+  }
+  await assertTrustedModuleDirectories(modulesRoot);
+}
+
+async function assertTrustedModuleDirectories(root: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const target = path.join(root, entry.name);
+    await trustedDirectory(target, "Registry-managed module source directory");
+    await assertTrustedModuleDirectories(target);
   }
 }
 

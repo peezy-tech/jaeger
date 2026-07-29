@@ -110,7 +110,8 @@ export interface RuntimeModuleOperations {
 interface EventConsumer {
   readonly id: string;
   readonly slot: string;
-  readonly legacySlot: string;
+  readonly named: boolean;
+  readonly legacySlots: string[];
   readonly module: string;
   readonly types: readonly HookEventType[];
   readonly handler: (event: LifecycleHookEvent) => void | Promise<void>;
@@ -219,6 +220,7 @@ export class RuntimeModuleHost {
         });
       }
     }
+    await this.assignLegacyConsumerSlots();
     for (const consumer of this.consumers) {
       const directory = this.consumerDirectory(consumer);
       await ensurePrivateDirectory(
@@ -343,10 +345,13 @@ export class RuntimeModuleHost {
               throw new Error(`Runtime module ${moduleName} requested unknown event ${type}`);
             }
           }
-          const index =
-            this.consumers.filter((consumer) => consumer.module === moduleName).length + 1;
-          const legacySlot = `${moduleName}-${index}`;
-          const slot = named ? `${moduleName}-${name}` : legacySlot;
+          const positionalIndex =
+            this.consumers.filter(
+              (consumer) => consumer.module === moduleName && !consumer.named,
+            ).length + 1;
+          const slot = named
+            ? `${moduleName}-${name}`
+            : `${moduleName}-${positionalIndex}`;
           if (this.consumers.some((consumer) => consumer.slot === slot)) {
             throw new Error(
               `Runtime module ${moduleName} event consumer is duplicated: ${name}`,
@@ -356,7 +361,8 @@ export class RuntimeModuleHost {
           this.consumers.push({
             id: `${slot}-${generation}`,
             slot,
-            legacySlot,
+            named,
+            legacySlots: named ? [] : [slot],
             module: moduleName,
             types: normalized as HookEventType[],
             handler,
@@ -588,6 +594,117 @@ export class RuntimeModuleHost {
     return subscriptions;
   }
 
+  private async assignLegacyConsumerSlots(): Promise<void> {
+    for (const moduleName of this.modules.keys()) {
+      const moduleConsumers = this.consumers.filter(
+        (consumer) => consumer.module === moduleName,
+      );
+      const namedConsumers = moduleConsumers.filter((consumer) => consumer.named);
+      if (namedConsumers.length === 0) continue;
+      const eventsRoot = path.join(this.moduleRoot(moduleName), "events");
+      let entries;
+      try {
+        entries = await readdir(eventsRoot, { withFileTypes: true });
+      } catch (error) {
+        if (hasCode(error, "ENOENT")) continue;
+        throw error;
+      }
+      const escapedModule = moduleName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const legacyPattern = new RegExp(
+        `^(${escapedModule}-[1-9][0-9]*)(?:-[a-f0-9]{16})?$`,
+      );
+      const positionalSlots = new Set(
+        moduleConsumers
+          .filter((consumer) => !consumer.named)
+          .map((consumer) => consumer.slot),
+      );
+      const namedHistory = new Set<string>();
+      const legacyDirectories = new Map<string, string[]>();
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        const legacy = legacyPattern.exec(entry.name)?.[1];
+        if (legacy) {
+          if (positionalSlots.has(legacy)) continue;
+          const directories = legacyDirectories.get(legacy) ?? [];
+          directories.push(path.join(eventsRoot, entry.name));
+          legacyDirectories.set(legacy, directories);
+          continue;
+        }
+        for (const consumer of namedConsumers) {
+          if (
+            entry.name === consumer.slot ||
+            entry.name.startsWith(`${consumer.slot}-`)
+          ) {
+            namedHistory.add(consumer.slot);
+          }
+        }
+      }
+      const eligibleConsumers = namedConsumers.filter(
+        (consumer) => !namedHistory.has(consumer.slot),
+      );
+      const matches = new Map<string, EventConsumer[]>();
+      for (const [legacySlot, directories] of legacyDirectories) {
+        const persistedTypes = await this.legacyConsumerTypes(directories);
+        if (persistedTypes.size === 0) continue;
+        const candidates = eligibleConsumers.filter(
+          (consumer) =>
+            consumer.types.length === persistedTypes.size &&
+            consumer.types.every((type) => persistedTypes.has(type)),
+        );
+        matches.set(legacySlot, candidates);
+      }
+      for (const [legacySlot, candidates] of matches) {
+        if (candidates.length === 0) continue;
+        if (
+          candidates.length !== 1 ||
+          [...matches.values()].filter(
+            (other) => other.length === 1 && other[0] === candidates[0],
+          ).length !== 1
+        ) {
+          throw new Error(
+            `Cannot safely attribute legacy runtime consumer state ${legacySlot}; ` +
+            "use stable named consumers before changing consumer order",
+          );
+        }
+        candidates[0]?.legacySlots.push(legacySlot);
+      }
+    }
+  }
+
+  private async legacyConsumerTypes(
+    directories: readonly string[],
+  ): Promise<Set<HookEventType>> {
+    const types = new Set<HookEventType>();
+    for (const directory of directories) {
+      const metadataValue = await readOptionalJson(path.join(directory, "consumer.json"));
+      if (metadataValue !== undefined) {
+        const metadata = parseModuleConsumerMetadata(
+          metadataValue,
+          path.basename(directory),
+        );
+        for (const type of Object.keys(metadata.subscriptions ?? {})) {
+          if (HOOK_EVENT_TYPES.includes(type as HookEventType)) {
+            types.add(type as HookEventType);
+          }
+        }
+      }
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (
+          !entry.isFile() ||
+          entry.isSymbolicLink() ||
+          !EVENT_FILE.test(entry.name)
+        ) {
+          continue;
+        }
+        const delivery = parseModuleDelivery(
+          JSON.parse(await readFile(path.join(directory, entry.name), "utf8")),
+        );
+        types.add(delivery.eventType);
+      }
+    }
+    return types;
+  }
+
   private async migrateDeliveries(consumer: EventConsumer): Promise<void> {
     const eventsRoot = path.join(this.moduleRoot(consumer.module), "events");
     const currentDirectory = this.consumerDirectory(consumer);
@@ -602,7 +719,7 @@ export class RuntimeModuleHost {
       string,
       { readonly delivery: ModuleDelivery; readonly directory: string }
     >();
-    const supersededDirectories: string[] = [];
+    const supersededDirectories = new Map<string, boolean>();
     for (const directoryEntry of await readdir(eventsRoot, { withFileTypes: true })) {
       if (
         !directoryEntry.isDirectory() ||
@@ -612,7 +729,7 @@ export class RuntimeModuleHost {
         continue;
       }
       const directory = path.join(eventsRoot, directoryEntry.name);
-      if (directory !== currentDirectory) supersededDirectories.push(directory);
+      if (directory !== currentDirectory) supersededDirectories.set(directory, true);
       for (const eventEntry of await readdir(directory, { withFileTypes: true })) {
         if (
           !eventEntry.isFile() ||
@@ -627,7 +744,10 @@ export class RuntimeModuleHost {
         if (`${delivery.eventId}.json` !== eventEntry.name) {
           throw new Error("Invalid runtime module event delivery");
         }
-        if (!consumer.types.includes(delivery.eventType)) continue;
+        if (!consumer.types.includes(delivery.eventType)) {
+          supersededDirectories.set(directory, false);
+          continue;
+        }
         const previous = candidates.get(delivery.eventId);
         if (!previous || moduleDeliveryPrecedes(previous.delivery, delivery)) {
           candidates.set(delivery.eventId, { delivery, directory });
@@ -652,13 +772,13 @@ export class RuntimeModuleHost {
         consumer: consumer.id,
       } satisfies ModuleDelivery);
     }
-    for (const directory of supersededDirectories) {
-      await rm(directory, { recursive: true });
+    for (const [directory, retire] of supersededDirectories) {
+      if (retire) await rm(directory, { recursive: true });
     }
   }
 
   private consumerDirectoryPattern(consumer: EventConsumer): RegExp {
-    const escapedSlots = [...new Set([consumer.slot, consumer.legacySlot])]
+    const escapedSlots = [...new Set([consumer.slot, ...consumer.legacySlots])]
       .map((slot) => slot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
       .join("|");
     return new RegExp(`^(?:${escapedSlots})(?:-[a-f0-9]{16})?$`);
