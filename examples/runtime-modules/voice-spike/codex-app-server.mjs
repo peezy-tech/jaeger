@@ -1,0 +1,447 @@
+import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import readline from "node:readline";
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export const OPERATOR_INSTRUCTIONS = `You are the read-only Jaeger voice operator for a compatibility spike.
+
+Your only operational purpose is to inspect Jaeger and report concise spoken
+answers. Use the jaeger_status tool for current Jaeger status. It is a narrow,
+read-only bridge to the installed Jaeger CLI. Do not use shell commands.
+
+Never start, resume, steer, interrupt, stop, or otherwise mutate a Jaeger run or
+session. Never edit files. Never install software. Never retry an uncertain
+operation. If a request would mutate state, explain that this spike is
+read-only. Preserve opaque IDs exactly. Keep spoken answers under 70 words unless
+the operator asks for detail.`;
+
+export class CodexAppServer extends EventEmitter {
+  constructor({
+    codexBin = "codex",
+    cwd,
+    childEnv = {},
+    dynamicTools = [],
+    requestHandlers = {},
+    stateFile,
+    spawnProcess = spawn,
+    requestTimeoutMs = DEFAULT_TIMEOUT_MS,
+  }) {
+    super();
+    this.codexBin = codexBin;
+    this.cwd = cwd;
+    this.childEnv = childEnv;
+    this.dynamicTools = dynamicTools;
+    this.requestHandlers = requestHandlers;
+    this.stateFile = stateFile;
+    this.spawnProcess = spawnProcess;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.child = null;
+    this.threadId = null;
+    this.generation = 0;
+    this.nextRequestId = 1;
+    this.pending = new Map();
+    this.stopping = false;
+  }
+
+  get connected() {
+    return Boolean(this.child && this.child.exitCode === null);
+  }
+
+  async start() {
+    if (this.connected) return;
+    this.stopping = false;
+    this.child = this.spawnProcess(
+      this.codexBin,
+      ["app-server", "--enable", "realtime_conversation"],
+      {
+        cwd: this.cwd,
+        env: { ...process.env, ...this.childEnv },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    this.generation += 1;
+
+    const stdout = readline.createInterface({ input: this.child.stdout });
+    stdout.on("line", (line) => this.#handleLine(line));
+    this.child.stderr.on("data", (chunk) => {
+      this.emit("diagnostic", String(chunk).trim());
+    });
+    this.child.once("error", (error) => this.#handleExit(error));
+    this.child.once("exit", (code, signal) => {
+      const reason = new Error(
+        `Codex app-server exited (${signal ?? code ?? "unknown"})`,
+      );
+      this.#handleExit(reason);
+    });
+
+    try {
+      await this.request("initialize", {
+        clientInfo: {
+          name: "jaeger_voice_spike",
+          title: "Jaeger Voice Compatibility Spike",
+          version: "0.1.0",
+        },
+        capabilities: { experimentalApi: true },
+      });
+      this.notify("initialized", {});
+      await this.#createOrResumeThread();
+      this.emit("ready", this.snapshot());
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
+  }
+
+  async stop() {
+    if (!this.child) return;
+    this.stopping = true;
+    const child = this.child;
+    this.child = null;
+    this.#rejectPending(new Error("Codex app-server stopped"));
+    child.stdin.end();
+    if (child.exitCode === null) child.kill("SIGTERM");
+    await Promise.race([
+      new Promise((resolve) => child.once("exit", resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+  }
+
+  async reconnect() {
+    const expectedThreadId = this.threadId;
+    if (!expectedThreadId) throw new Error("No operator thread exists");
+    await this.stop();
+    this.threadId = expectedThreadId;
+    await this.start();
+    if (this.threadId !== expectedThreadId) {
+      throw new Error("App-server reconnect did not preserve the operator thread");
+    }
+    return this.snapshot();
+  }
+
+  async startRealtime({ sdp, voice = "juniper" }) {
+    this.#assertReady();
+    if (typeof sdp !== "string" || !sdp.startsWith("v=0")) {
+      throw new Error("A valid WebRTC SDP offer is required");
+    }
+
+    const answer = this.#waitForRealtimeSdp();
+
+    await this.request("thread/realtime/start", {
+      threadId: this.threadId,
+      outputModality: "audio",
+      transport: { type: "webrtc", sdp },
+      version: "v3",
+      voice,
+      includeStartupContext: true,
+    });
+
+    const params = await answer;
+    return { sdp: params.sdp, threadId: this.threadId };
+  }
+
+  async appendText(text) {
+    this.#assertReady();
+    if (typeof text !== "string" || text.trim().length === 0) {
+      throw new Error("Text is required");
+    }
+    await this.request("thread/realtime/appendText", {
+      threadId: this.threadId,
+      role: "user",
+      text: text.trim(),
+    });
+  }
+
+  async stopRealtime() {
+    if (!this.connected || !this.threadId) return;
+    await this.request("thread/realtime/stop", {
+      threadId: this.threadId,
+    });
+  }
+
+  snapshot() {
+    return {
+      connected: this.connected,
+      generation: this.generation,
+      threadId: this.threadId,
+    };
+  }
+
+  request(method, params = {}) {
+    if (!this.connected) {
+      return Promise.reject(new Error("Codex app-server is not connected"));
+    }
+    const id = this.nextRequestId++;
+    this.#write({ method, id, params });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out`));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { method, resolve, reject, timer });
+    });
+  }
+
+  notify(method, params = {}) {
+    this.#write({ method, params });
+  }
+
+  waitForNotification(method, predicate = () => true, timeoutMs = DEFAULT_TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+      const handler = (params) => {
+        if (!predicate(params)) return;
+        clearTimeout(timer);
+        this.off(method, handler);
+        resolve(params);
+      };
+      const timer = setTimeout(() => {
+        this.off(method, handler);
+        reject(new Error(`${method} notification timed out`));
+      }, timeoutMs);
+      this.on(method, handler);
+    });
+  }
+
+  async #createOrResumeThread() {
+    const stored = await readThreadState(this.stateFile);
+    if (stored) {
+      const result = await this.request("thread/resume", {
+        threadId: stored.threadId,
+        cwd: this.cwd,
+        approvalPolicy: "never",
+        sandbox: "read-only",
+        developerInstructions: OPERATOR_INSTRUCTIONS,
+      });
+      this.threadId = result.thread?.id;
+      if (this.threadId !== stored.threadId) {
+        throw new Error("Codex resumed an unexpected operator thread");
+      }
+      return;
+    }
+
+    const result = await this.request("thread/start", {
+      cwd: this.cwd,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      developerInstructions: OPERATOR_INSTRUCTIONS,
+      dynamicTools: this.dynamicTools,
+      ephemeral: false,
+      serviceName: "jaeger-voice-spike",
+    });
+    this.threadId = result.thread?.id;
+    if (!this.threadId) throw new Error("Codex did not return an operator thread ID");
+    await this.#bootstrapThread();
+    await writeThreadState(this.stateFile, this.threadId);
+  }
+
+  async #bootstrapThread() {
+    const completed = this.#notificationWaiter(
+      "turn/completed",
+      (params) => params.threadId === this.threadId,
+      120_000,
+    );
+    try {
+      await this.request("turn/start", {
+        threadId: this.threadId,
+        input: [
+          {
+            type: "text",
+            text: "Initialize this persistent voice-operator thread. Do not inspect Jaeger yet. Reply with READY only.",
+          },
+        ],
+      });
+      const result = await completed.promise;
+      if (result.turn?.status !== "completed") {
+        throw new Error(
+          `Operator bootstrap turn ended with ${result.turn?.status ?? "unknown status"}`,
+        );
+      }
+    } finally {
+      completed.cancel();
+    }
+  }
+
+  #notificationWaiter(method, predicate, timeoutMs) {
+    let settled = false;
+    let resolvePromise;
+    let rejectPromise;
+    let timer;
+    const promise = new Promise((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    const cleanup = () => {
+      clearTimeout(timer);
+      this.off(method, handler);
+    };
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+    };
+    const handler = (params) => {
+      if (settled || !predicate(params)) return;
+      settled = true;
+      cleanup();
+      resolvePromise(params);
+    };
+    this.on(method, handler);
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(new Error(`${method} notification timed out`));
+    }, timeoutMs);
+    return { promise, cancel };
+  }
+
+  #waitForRealtimeSdp() {
+    return new Promise((resolve, reject) => {
+      const matches = (params) => params.threadId === this.threadId;
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("thread/realtime/sdp", onSdp);
+        this.off("thread/realtime/error", onError);
+        this.off("thread/realtime/closed", onClosed);
+      };
+      const onSdp = (params) => {
+        if (!matches(params)) return;
+        cleanup();
+        resolve(params);
+      };
+      const onError = (params) => {
+        if (!matches(params)) return;
+        cleanup();
+        reject(new Error(params.message));
+      };
+      const onClosed = (params) => {
+        if (!matches(params)) return;
+        cleanup();
+        reject(
+          new Error(params.reason ?? "Realtime transport closed during setup"),
+        );
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("thread/realtime/sdp notification timed out"));
+      }, 45_000);
+      this.on("thread/realtime/sdp", onSdp);
+      this.on("thread/realtime/error", onError);
+      this.on("thread/realtime/closed", onClosed);
+    });
+  }
+
+  #assertReady() {
+    if (!this.connected || !this.threadId) {
+      throw new Error("Codex app-server is not ready");
+    }
+  }
+
+  #write(message) {
+    if (!this.child?.stdin.writable) {
+      throw new Error("Codex app-server input is unavailable");
+    }
+    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+  }
+
+  #handleLine(line) {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      this.emit("diagnostic", "Ignored malformed app-server output");
+      return;
+    }
+
+    if (message.id !== undefined && !message.method) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      if (message.error) {
+        pending.reject(
+          new Error(
+            `${pending.method} failed: ${message.error.message ?? "unknown error"}`,
+          ),
+        );
+      } else {
+        pending.resolve(message.result ?? {});
+      }
+      return;
+    }
+
+    if (message.id !== undefined && message.method) {
+      void this.#handleServerRequest(message);
+      return;
+    }
+
+    if (typeof message.method === "string") {
+      this.emit(message.method, message.params ?? {});
+      this.emit("notification", message);
+    }
+  }
+
+  async #handleServerRequest(message) {
+    const handler = this.requestHandlers[message.method];
+    if (!handler) {
+      // This spike has no mutation authority. Fail closed on unknown requests.
+      this.#write({ id: message.id, result: { decision: "decline" } });
+      this.emit("serverRequestDeclined", { method: message.method });
+      return;
+    }
+    try {
+      const result = await handler(message.params ?? {});
+      this.#write({ id: message.id, result });
+    } catch (error) {
+      this.#write({
+        id: message.id,
+        error: {
+          code: -32_000,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  }
+
+  #handleExit(error) {
+    if (!this.child && this.stopping) return;
+    this.child = null;
+    this.#rejectPending(error);
+    if (!this.stopping) this.emit("disconnected", error);
+  }
+
+  #rejectPending(error) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+}
+
+export async function readThreadState(stateFile) {
+  try {
+    const value = JSON.parse(await readFile(stateFile, "utf8"));
+    if (typeof value.threadId !== "string" || value.threadId.length === 0) {
+      throw new Error("Operator state does not contain a thread ID");
+    }
+    return value;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+export async function writeThreadState(stateFile, threadId) {
+  const directory = dirname(stateFile);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const temporary = `${stateFile}.${process.pid}.tmp`;
+  await writeFile(
+    temporary,
+    `${JSON.stringify({ threadId }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  await rename(temporary, stateFile);
+}
