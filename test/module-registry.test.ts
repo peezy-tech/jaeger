@@ -308,7 +308,7 @@ test("rejects Yarn Plug'n'Play runtime projects before installation", async () =
   }
 });
 
-test("Yarn Modern installs dependencies with build scripts disabled", async () => {
+test("Yarn Modern installs with scripts disabled and forces the node-modules linker", async () => {
   const fixture = await registryFixture();
   try {
     const bin = path.join(fixture.root, "bin");
@@ -324,6 +324,7 @@ test("Yarn Modern installs dependencies with build scripts disabled", async () =
     await writeFile(
       yarn,
       "#!/bin/sh\n" +
+        'test "$YARN_NODE_LINKER" = "node-modules" || exit 19\n' +
         "test -f .yarn/cache/fixture.zip || exit 18\n" +
         "printf 'new-cache\\n' > .yarn/cache/new.zip\n" +
         `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`,
@@ -336,6 +337,7 @@ test("Yarn Modern installs dependencies with build scripts disabled", async () =
       env: {
         ...process.env,
         PATH: bin,
+        YARN_NODE_LINKER: "pnp",
       },
     });
 

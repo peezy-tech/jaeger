@@ -135,6 +135,7 @@ import readline from "node:readline";
 
 const threadId = "thread-realtime-test";
 let realtimeStarts = 0;
+let realtimeStops = 0;
 const input = readline.createInterface({ input: process.stdin });
 const send = (...messages) => {
   process.stdout.write(
@@ -181,6 +182,18 @@ input.on("line", (line) => {
       break;
     }
     case "thread/realtime/stop":
+      realtimeStops += 1;
+      send(reply({}));
+      if (realtimeStops === 2) {
+        setTimeout(() => {
+          send({
+            method: "thread/realtime/closed",
+            params: { threadId, reason: "requested" },
+          });
+        }, 150);
+      }
+      break;
+    case "thread/realtime/appendText":
       send(reply({}));
       break;
     default:
@@ -254,6 +267,39 @@ input.on("line", (line) => {
     });
     assert.equal(second.status, 200);
     assert.equal((await second.json()).sessionId, secondSessionId);
+
+    const eventStream = await fetch(`${base}/api/events`, { headers });
+    assert.equal(eventStream.status, 200);
+    const eventReader = eventStream.body.getReader();
+    await readServerEvent(eventReader, "bridge.state");
+
+    const stopping = fetch(`${base}/api/stop`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ sessionId: secondSessionId }),
+    });
+    assert.equal(await settlesWithin(stopping, 50), false);
+    const stopped = await stopping;
+    assert.equal(stopped.status, 200);
+    assert.deepEqual(await stopped.json(), { stopped: true });
+    const closed = await readServerEvent(
+      eventReader,
+      "thread/realtime/closed",
+    );
+    assert.equal(closed.sessionId, secondSessionId);
+
+    const replacementSessionId = "33333333-3333-4333-8333-333333333333";
+    const replacement = await fetch(`${base}/api/session`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        sessionId: replacementSessionId,
+        sdp: "v=0\r\nreplacement-offer",
+      }),
+    });
+    assert.equal(replacement.status, 200);
+    assert.equal((await replacement.json()).sessionId, replacementSessionId);
+    await eventReader.cancel();
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGTERM");
@@ -280,6 +326,34 @@ async function availablePort() {
     probe.close((error) => (error ? reject(error) : resolve())),
   );
   return address.port;
+}
+
+async function readServerEvent(reader, expectedEvent, timeoutMs = 2_000) {
+  const decoder = new TextDecoder();
+  let buffered = "";
+  const timeout = new Promise((_, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Timed out waiting for ${expectedEvent}`)),
+      timeoutMs,
+    );
+    timer.unref();
+  });
+  while (true) {
+    const { done, value } = await Promise.race([reader.read(), timeout]);
+    if (done) throw new Error(`Event stream ended before ${expectedEvent}`);
+    buffered += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    const frames = buffered.split("\n\n");
+    buffered = frames.pop() ?? "";
+    for (const frame of frames) {
+      let event = "message";
+      const data = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+      }
+      if (event === expectedEvent) return JSON.parse(data.join("\n"));
+    }
+  }
 }
 
 function waitForOutput(stream, pattern, timeoutMs = 5_000) {

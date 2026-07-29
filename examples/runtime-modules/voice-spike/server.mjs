@@ -94,12 +94,15 @@ let realtimeExpiryTimer = null;
 
 bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
+  let eventParams = params;
   if (method === "thread/realtime/closed") {
+    const sessionId = activeRealtimeSessionId ?? startingRealtimeSessionId;
     activeRealtimeSessionId = null;
     startingRealtimeSessionId = null;
     clearRealtimeExpiryTimer();
+    if (sessionId) eventParams = { ...params, sessionId };
   }
-  void broadcast(method, params);
+  void broadcast(method, eventParams);
 });
 bridge.on("ready", (snapshot) => void broadcast("bridge.ready", snapshot));
 bridge.on("disconnected", (error) => {
@@ -300,14 +303,22 @@ async function stopOwnedRealtimeSession(sessionId) {
     activeRealtimeSessionId === sessionId ||
     startingRealtimeSessionId === sessionId;
   if (!ownsSession) return false;
-  await bridge.stopRealtime();
+  const threadId = bridge.threadId;
+  const closed = bridge.waitForNotification(
+    "thread/realtime/closed",
+    (params) => params.threadId === threadId,
+  );
+  await Promise.all([bridge.stopRealtime(), closed]);
+  let clearedOwnership = false;
   if (activeRealtimeSessionId === sessionId) {
     activeRealtimeSessionId = null;
+    clearedOwnership = true;
   }
   if (startingRealtimeSessionId === sessionId) {
     startingRealtimeSessionId = null;
+    clearedOwnership = true;
   }
-  clearRealtimeExpiryTimer();
+  if (clearedOwnership) clearRealtimeExpiryTimer();
   return true;
 }
 

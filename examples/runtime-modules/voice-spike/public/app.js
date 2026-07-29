@@ -1,4 +1,9 @@
-import { loadAccessTokens } from "./call-access.js";
+import {
+  answerInvitationWithRecovery,
+  hasActiveAnsweredAccess,
+  isCurrentRealtimeSession,
+  loadAccessTokens,
+} from "./call-access.js";
 
 const elements = {
   answerCall: document.querySelector("#answer-call"),
@@ -37,6 +42,7 @@ const state = {
   sessionActive: false,
   sessionId: null,
   sessionStart: null,
+  startingRealtimeSessionId: null,
   transcriptDrafts: new Map(),
 };
 
@@ -65,8 +71,9 @@ elements.answerCall.addEventListener("click", async () => {
   elements.answerCall.textContent = "Connecting…";
   try {
     const invitationCapability = state.callToken;
-    await post("api/invitations/answer", {
-      token: state.callToken,
+    await answerInvitationWithRecovery(invitationCapability, {
+      answer: (token) => post("api/invitations/answer", { token }),
+      inspect: (token) => post("api/invitations/inspect", { token }),
     });
     state.capabilityToken = invitationCapability;
     clearCallInvitation();
@@ -162,6 +169,7 @@ async function startSession() {
 async function startSessionAttempt() {
   elements.talkButton.disabled = true;
   const requestedSessionId = crypto.randomUUID();
+  state.startingRealtimeSessionId = requestedSessionId;
   setSignal("Requesting microphone");
   try {
     state.inputStream = await navigator.mediaDevices.getUserMedia({
@@ -205,8 +213,12 @@ async function startSessionAttempt() {
       sessionId: requestedSessionId,
     });
     await state.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    if (state.startingRealtimeSessionId !== requestedSessionId) {
+      throw new Error("Voice session closed during negotiation");
+    }
 
     state.sessionId = answer.sessionId;
+    state.startingRealtimeSessionId = null;
     state.sessionActive = true;
     elements.talkButton.classList.add("active");
     elements.talkLabel.textContent = "End session";
@@ -215,6 +227,9 @@ async function startSessionAttempt() {
     return true;
   } catch (error) {
     await post("api/stop", { sessionId: requestedSessionId }).catch(() => {});
+    if (state.startingRealtimeSessionId === requestedSessionId) {
+      state.startingRealtimeSessionId = null;
+    }
     closePeer();
     setSignal(error.message, true);
     return false;
@@ -227,10 +242,7 @@ async function loadCallInvitation(token) {
   if (!token) return;
   try {
     const invitation = await post("api/invitations/inspect", { token });
-    if (
-      invitation.status === "answered" &&
-      Date.parse(invitation.accessExpiresAt) > Date.now()
-    ) {
+    if (hasActiveAnsweredAccess(invitation)) {
       state.capabilityToken = token;
       await refreshState();
       connectEvents();
@@ -319,6 +331,7 @@ function closePeer() {
 function resetSessionUi() {
   state.sessionActive = false;
   state.sessionId = null;
+  state.startingRealtimeSessionId = null;
   elements.talkButton.classList.remove("active");
   elements.talkLabel.textContent = "Open microphone";
   elements.muteButton.textContent = "Mute mic";
@@ -375,6 +388,14 @@ function connectEvents() {
   });
   source.addEventListener("thread/realtime/closed", (event) => {
     const params = JSON.parse(event.data);
+    if (
+      !isCurrentRealtimeSession(params, {
+        activeSessionId: state.sessionId,
+        startingSessionId: state.startingRealtimeSessionId,
+      })
+    ) {
+      return;
+    }
     closePeer();
     resetSessionUi();
     setSignal(

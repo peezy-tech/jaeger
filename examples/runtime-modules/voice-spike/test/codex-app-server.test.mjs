@@ -356,6 +356,57 @@ test("a concurrent WebRTC start is rejected before it can share an SDP waiter", 
   await bridge.stop();
 });
 
+test("an early realtime error is observed while the start RPC is still pending", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-early-error-"));
+  const processes = [];
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => {
+      const child = createMockProcess({
+        deferredMethods:
+          processes.length === 0 ? ["thread/realtime/start"] : [],
+      });
+      processes.push(child);
+      return child;
+    },
+    requestTimeoutMs: 5_000,
+  });
+
+  await bridge.start();
+  const realtime = bridge.startRealtime({
+    sdp: "v=0\r\nearly-error-offer",
+  }).then(
+    () => ({ status: "fulfilled" }),
+    (error) => ({ status: "rejected", error }),
+  );
+  await waitForRequest(processes[0], "thread/realtime/start");
+  processes[0].stdout.write(
+    `${JSON.stringify({
+      method: "thread/realtime/error",
+      params: {
+        threadId: bridge.threadId,
+        message: "early realtime failure",
+      },
+    })}\n`,
+  );
+
+  let timer;
+  const outcome = await Promise.race([
+    realtime,
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ status: "timed-out" }), 1_000);
+      timer.unref();
+    }),
+  ]);
+  clearTimeout(timer);
+  assert.equal(outcome.status, "rejected");
+  assert.match(outcome.error.message, /early realtime failure/);
+  assert.equal(bridge.connected, true);
+  assert.equal(bridge.generation, 2);
+  await bridge.stop();
+});
+
 test("a rejected realtime start cancels its SDP waiter", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-reject-"));
   const processes = [];

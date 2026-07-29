@@ -199,16 +199,17 @@ export class CodexAppServer extends EventEmitter {
 
     const answer = this.#realtimeSdpWaiter();
     try {
-      await this.request("thread/realtime/start", {
-        threadId: this.threadId,
-        outputModality: "audio",
-        transport: { type: "webrtc", sdp },
-        version: "v3",
-        voice,
-        includeStartupContext: true,
-      });
-
-      const params = await answer.promise;
+      const [, params] = await Promise.all([
+        this.request("thread/realtime/start", {
+          threadId: this.threadId,
+          outputModality: "audio",
+          transport: { type: "webrtc", sdp },
+          version: "v3",
+          voice,
+          includeStartupContext: true,
+        }),
+        answer.promise,
+      ]);
       return { sdp: params.sdp, threadId: this.threadId };
     } catch (error) {
       try {

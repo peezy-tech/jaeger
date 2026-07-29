@@ -1014,6 +1014,7 @@ async function installProjectDependencies(
   const manager = await detectPackageManager(root, packageJson);
   const modernYarn = manager === "yarn" && await usesModernYarn(root, packageJson);
   if (modernYarn) await assertYarnNodeModulesLinker(root);
+  const installEnv = modernYarn ? yarnNodeModulesEnvironment(env) : env;
   const args =
     manager === "pnpm"
       ? ["install", "--ignore-scripts", "--ignore-workspace"]
@@ -1025,7 +1026,7 @@ async function installProjectDependencies(
   try {
     await execFileAsync(manager, args, {
       cwd: root,
-      env,
+      env: installEnv,
       maxBuffer: 10 * 1024 * 1024,
     });
   } catch (error) {
@@ -1065,6 +1066,15 @@ async function usesModernYarn(
   if (typeof declared !== "string") return false;
   const match = /^yarn@(\d+)(?:[.+-]|$)/.exec(declared);
   return match ? Number(match[1]) >= 2 : false;
+}
+
+function yarnNodeModulesEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (name.toUpperCase() !== "YARN_NODE_LINKER") result[name] = value;
+  }
+  result.YARN_NODE_LINKER = "node-modules";
+  return result;
 }
 
 async function assertYarnNodeModulesLinker(root: string): Promise<void> {
