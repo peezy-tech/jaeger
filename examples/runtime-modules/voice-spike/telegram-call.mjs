@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { constants } from "node:fs";
 import {
   chmod,
   lstat,
@@ -531,8 +532,30 @@ export async function finalizeTelegramDisposition(
 }
 
 export async function readTelegramConfig(envFile, { optional = false } = {}) {
+  const handle = await open(envFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let source;
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) {
+      throw new Error(`Telegram configuration must be a regular file: ${envFile}`);
+    }
+    if (
+      typeof process.getuid === "function" &&
+      metadata.uid !== process.getuid()
+    ) {
+      throw new Error(
+        `Telegram configuration must be owned by the current user: ${envFile}`,
+      );
+    }
+    if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
+      throw new Error(`Telegram configuration must be owner-only: ${envFile}`);
+    }
+    source = await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
   const values = parseEnv(
-    await readFile(envFile, "utf8"),
+    source,
     new Set([
       "TELEGRAM_BOT_TOKEN",
       "TELEGRAM_CHAT_ID",

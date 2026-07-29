@@ -1012,6 +1012,7 @@ async function installProjectDependencies(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const manager = await detectPackageManager(root, packageJson);
+  if (manager === "yarn") await assertNoAncestorYarnWorkspace(root);
   const modernYarn = manager === "yarn" && await usesModernYarn(root, packageJson);
   if (modernYarn) await assertYarnNodeModulesLinker(root);
   const installEnv = modernYarn ? yarnNodeModulesEnvironment(env) : env;
@@ -1034,6 +1035,34 @@ async function installProjectDependencies(
       `Shared runtime dependency installation failed: ${manager} ${args.join(" ")}`,
       { cause: error },
     );
+  }
+}
+
+async function assertNoAncestorYarnWorkspace(root: string): Promise<void> {
+  let ancestor = path.dirname(root);
+  while (true) {
+    const packagePath = path.join(ancestor, "package.json");
+    try {
+      const packageJson = parseJsonObject(await readFile(packagePath, "utf8"), packagePath);
+      const workspaces = packageJson.workspaces;
+      if (
+        Array.isArray(workspaces) ||
+        (
+          typeof workspaces === "object" &&
+          workspaces !== null &&
+          Array.isArray((workspaces as Record<string, unknown>).packages)
+        )
+      ) {
+        throw new Error(
+          `Yarn runtime module project ${root} is nested beneath workspace ${ancestor}; ` +
+            "move the runtime project outside the workspace so installs cannot mutate ancestor state",
+        );
+      }
+    } catch (error) {
+      if (!hasCode(error, "ENOENT")) throw error;
+    }
+    if (path.dirname(ancestor) === ancestor) break;
+    ancestor = path.dirname(ancestor);
   }
 }
 

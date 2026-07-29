@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rm,
   stat,
   utimes,
   writeFile,
@@ -17,6 +18,7 @@ import {
   finalizeTelegramDisposition,
   parseHttpsPublicUrl,
   parseEnv,
+  readTelegramConfig,
   sendTelegramCall,
   TelegramDeliveryUncertainError,
   TelegramCallInvitations,
@@ -828,4 +830,36 @@ test("env parsing supports quoted values without evaluating shell syntax", () =>
     TELEGRAM_CHAT_ID: "-100123",
     TELEGRAM_MESSAGE_THREAD_ID: "42",
   });
+});
+
+test("Telegram configuration accepts only an owner-only regular file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-telegram-config-"));
+  const envFile = join(directory, ".env");
+  try {
+    await writeFile(
+      envFile,
+      "TELEGRAM_BOT_TOKEN=bot-token\nTELEGRAM_CHAT_ID=-100123\n",
+      { mode: 0o600 },
+    );
+    assert.deepEqual(await readTelegramConfig(envFile), {
+      botToken: "bot-token",
+      chatId: "-100123",
+      messageThreadId: null,
+    });
+
+    await chmod(envFile, 0o644);
+    await assert.rejects(
+      readTelegramConfig(envFile),
+      /must be owner-only/,
+    );
+
+    await rm(envFile);
+    await mkdir(envFile);
+    await assert.rejects(
+      readTelegramConfig(envFile),
+      /must be a regular file/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

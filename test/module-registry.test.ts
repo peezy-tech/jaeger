@@ -180,6 +180,74 @@ test("pnpm installs ignore an ancestor workspace", async () => {
   }
 });
 
+test("Yarn installs reject runtime projects nested beneath an ancestor workspace", async () => {
+  for (const version of ["1.22.22", "4.9.2"]) {
+    const fixture = await registryFixture();
+    try {
+      await writeJson(path.join(fixture.root, "package.json"), {
+        name: "operator-workspace",
+        private: true,
+        workspaces: version.startsWith("1.")
+          ? ["runtime"]
+          : { packages: ["runtime"] },
+      });
+      await writeFile(path.join(fixture.root, "yarn.lock"), "operator-lock\n");
+      await writeJson(path.join(fixture.runtimeRoot, "package.json"), {
+        name: "operator-runtime",
+        private: true,
+        type: "module",
+        packageManager: `yarn@${version}`,
+      });
+      if (version.startsWith("4.")) {
+        await writeFile(
+          path.join(fixture.runtimeRoot, ".yarnrc.yml"),
+          "nodeLinker: node-modules\n",
+        );
+      }
+
+      const bin = path.join(fixture.root, "bin");
+      const calls = path.join(fixture.root, "package-manager-calls.txt");
+      await mkdir(bin);
+      const yarn = path.join(bin, "yarn");
+      await writeFile(
+        yarn,
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`,
+      );
+      await chmod(yarn, 0o755);
+
+      await assert.rejects(
+        addModules({
+          root: fixture.runtimeRoot,
+          references: [`${fixture.catalogPath}#alpha`],
+          env: {
+            ...process.env,
+            PATH: bin,
+          },
+        }),
+        /nested beneath workspace/,
+      );
+      await assert.rejects(readFile(calls), hasCode("ENOENT"));
+      assert.equal(
+        await readFile(path.join(fixture.root, "yarn.lock"), "utf8"),
+        "operator-lock\n",
+      );
+      assert.deepEqual(
+        JSON.parse(
+          await readFile(path.join(fixture.runtimeRoot, "package.json"), "utf8"),
+        ),
+        {
+          name: "operator-runtime",
+          private: true,
+          type: "module",
+          packageManager: `yarn@${version}`,
+        },
+      );
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("rejects a filesystem root and preserves existing project directory permissions", async () => {
   const fixture = await registryFixture();
   try {

@@ -97,7 +97,8 @@ Telegram is a signaling adapter only. It never carries live audio and it does
 not expose chat commands, polling, or webhook authority. The outbound command
 reads only `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and the optional
 `TELEGRAM_MESSAGE_THREAD_ID` from `VOICE_TELEGRAM_ENV_FILE`, which defaults to
-`~/.env`.
+`~/.env`. The file must be a regular file owned by the current user with no
+group or world permissions (for example, mode `0600`).
 
 Place a call:
 

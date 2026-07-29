@@ -7,6 +7,7 @@ import {
   readdir,
   realpath,
   rename,
+  rm,
 } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -601,6 +602,7 @@ export class RuntimeModuleHost {
       string,
       { readonly delivery: ModuleDelivery; readonly directory: string }
     >();
+    const supersededDirectories: string[] = [];
     for (const directoryEntry of await readdir(eventsRoot, { withFileTypes: true })) {
       if (
         !directoryEntry.isDirectory() ||
@@ -610,6 +612,7 @@ export class RuntimeModuleHost {
         continue;
       }
       const directory = path.join(eventsRoot, directoryEntry.name);
+      if (directory !== currentDirectory) supersededDirectories.push(directory);
       for (const eventEntry of await readdir(directory, { withFileTypes: true })) {
         if (
           !eventEntry.isFile() ||
@@ -648,6 +651,9 @@ export class RuntimeModuleHost {
         ...delivery,
         consumer: consumer.id,
       } satisfies ModuleDelivery);
+    }
+    for (const directory of supersededDirectories) {
+      await rm(directory, { recursive: true });
     }
   }
 

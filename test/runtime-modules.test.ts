@@ -226,7 +226,7 @@ test("modules mutation options cannot be consumed as the --root value", async ()
   }
 });
 
-test("runtime config generations receive distinct durable consumer identities", async () => {
+test("runtime config generations retire superseded consumer directories", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-"));
   const module: RuntimeModule = {
     name: "fixture",
@@ -253,10 +253,7 @@ test("runtime config generations receive distinct durable consumer identities", 
       (
         await readdir(path.join(root, ".modules", "fixture", "events"))
       ).sort(),
-      [
-        `fixture-terminal-${"a".repeat(16)}`,
-        `fixture-terminal-${"b".repeat(16)}`,
-      ],
+      [`fixture-terminal-${"b".repeat(16)}`],
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -405,6 +402,16 @@ test("consumer delivery state follows names across reordering and insertion", as
       );
       assert.equal(delivery.attempts, name === "gamma" ? 0 : 1);
     }
+    assert.deepEqual(
+      (await readdir(
+        path.join(stateDir, ".modules", "fixture", "events"),
+      )).sort(),
+      [
+        "fixture-alpha-bbbbbbbbbbbbbbbb",
+        "fixture-beta-bbbbbbbbbbbbbbbb",
+        "fixture-gamma-bbbbbbbbbbbbbbbb",
+      ],
+    );
   } finally {
     await second?.stop();
     await first.stop();
@@ -507,6 +514,7 @@ test("named consumers inherit pending deliveries from positional consumers", asy
     assert.equal(delivery.consumer, currentId);
     assert.equal(delivery.status, "delivered");
     assert.equal(delivery.attempts, 2);
+    await assert.rejects(readFile(legacyDirectory), { code: "ENOENT" });
   } finally {
     await host.stop();
     await rm(root, { recursive: true, force: true });
@@ -781,6 +789,10 @@ test("runtime config handoff preserves delivered events and claims unscanned eve
       assert.equal(delivery.status, "delivered");
       assert.equal(delivery.attempts, 1);
     }
+    assert.deepEqual(
+      await readdir(path.join(stateDir, ".modules", "fixture", "events")),
+      [`fixture-terminal-${"b".repeat(16)}`],
+    );
   } finally {
     await second?.stop();
     await first.stop();
