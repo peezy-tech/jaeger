@@ -1650,14 +1650,24 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
     // segments, so the complete `modules/<name>/` string need not occur in
     // the source. Only treat the module name as a reference when it occurs in
     // a path-construction call alongside the quoted module directory.
-    const pathCallPattern = /(?:\bpath\.(?:join|resolve)|\bnew\s+URL)\s*\(([\s\S]*?)\)/g;
-    for (const match of source.matchAll(pathCallPattern)) {
-      const argumentsSource = match[1] ?? "";
-      if (
-        sourceStringLiteralPattern(argumentsSource, MODULE_DIRECTORY) &&
-        sourceTokenPattern(argumentsSource, name)
-      ) {
-        return true;
+    const pathCallPattern =
+      /(?:(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*)?(?:\bpath\.(?:join|resolve)|\bnew\s+URL)\s*\(([\s\S]*?)\)/g;
+    const modulePathBindings = new Set<string>();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const match of source.matchAll(pathCallPattern)) {
+        const binding = match[1];
+        const argumentsSource = match[2] ?? "";
+        const hasModuleDirectory =
+          sourceStringLiteralPattern(argumentsSource, MODULE_DIRECTORY) ||
+          [...modulePathBindings].some((value) => sourceTokenPattern(argumentsSource, value));
+        if (!hasModuleDirectory) continue;
+        if (sourceTokenPattern(argumentsSource, name)) return true;
+        if (binding && !modulePathBindings.has(binding)) {
+          modulePathBindings.add(binding);
+          changed = true;
+        }
       }
     }
     return false;

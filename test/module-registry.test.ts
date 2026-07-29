@@ -758,6 +758,21 @@ test("removal refuses a module still referenced by the runtime composition", asy
     );
     await writeFile(
       path.join(fixture.runtimeRoot, "jaeger.runtime.mjs"),
+      'const modulesDir = path.join(import.meta.url, "modules")\n' +
+        'const alphaPath = path.join(modulesDir, "alpha", "alpha.mjs")\n' +
+        "const alpha = await import(alphaPath)\n" +
+        "export default { version: 1, modules: [alpha] }\n",
+    );
+    await assert.rejects(
+      removeModules({
+        root: fixture.runtimeRoot,
+        names: ["alpha"],
+        install: false,
+      }),
+      /referenced by jaeger\.runtime\.mjs/,
+    );
+    await writeFile(
+      path.join(fixture.runtimeRoot, "jaeger.runtime.mjs"),
       'const modules = ["alpha"]\n' +
         "export default { version: 1, modules }\n",
     );
