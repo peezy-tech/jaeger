@@ -263,6 +263,46 @@ test("runtime config generations receive distinct durable consumer identities", 
   }
 });
 
+test("version 1 runtime modules retain the positional consumer API", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-legacy-consumer-"));
+  const module: RuntimeModule = {
+    name: "fixture",
+    setup(runtime) {
+      runtime.events.consume("run.terminal", async () => {});
+      runtime.events.consume(
+        ["run.accepted", "phase.changed"],
+        async () => {},
+      );
+    },
+  };
+  try {
+    const host = new RuntimeModuleHost({
+      stateDir: root,
+      config: {
+        version: 1,
+        path: path.join(root, "jaeger.runtime.mjs"),
+        digest: "a".repeat(64),
+        modules: [module],
+      },
+      operations,
+    });
+    await host.initialize();
+    await host.stop();
+
+    assert.deepEqual(
+      (
+        await readdir(path.join(root, ".modules", "fixture", "events"))
+      ).sort(),
+      [
+        `fixture-1-${"a".repeat(16)}`,
+        `fixture-2-${"a".repeat(16)}`,
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("consumer delivery state follows names across reordering and insertion", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-order-"));
   const stateDir = path.join(root, "state");
@@ -368,6 +408,107 @@ test("consumer delivery state follows names across reordering and insertion", as
   } finally {
     await second?.stop();
     await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("named consumers inherit pending deliveries from positional consumers", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-migration-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const legacyDirectory = path.join(
+    stateDir,
+    ".modules",
+    "telegram",
+    "events",
+    "telegram-1",
+  );
+  const eventId = `evt-${"f".repeat(64)}`;
+  const event = {
+    schemaVersion: 1,
+    id: eventId,
+    type: "run.terminal",
+    occurredAt: "2026-07-25T00:00:00.000Z",
+    observedAt: "2026-07-25T00:00:00.000Z",
+    run: { runId: "20260725000000-ffffffffff" },
+    subject: { status: "completed" },
+  };
+  await mkdir(eventsDir, { recursive: true });
+  await mkdir(legacyDirectory, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify(event)}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, "consumer.json"),
+    `${JSON.stringify({
+      version: 1,
+      id: "telegram-1",
+      createdAt: "2026-07-24T00:00:00.000Z",
+    })}\n`,
+  );
+  await writeFile(
+    path.join(legacyDirectory, `${eventId}.json`),
+    `${JSON.stringify({
+      version: 1,
+      consumer: "telegram-1",
+      eventId,
+      eventType: "run.terminal",
+      attempts: 1,
+      status: "retrying",
+      updatedAt: "2026-07-25T00:00:00.000Z",
+      nextAttemptAt: "2026-07-25T00:00:01.000Z",
+      lastError: "retry after upgrade",
+    })}\n`,
+  );
+  let attempts = 0;
+  const host = new RuntimeModuleHost({
+    stateDir,
+    config: {
+      version: 1,
+      path: path.join(root, "jaeger.runtime.mjs"),
+      digest: "b".repeat(64),
+      modules: [{
+        name: "telegram",
+        setup(runtime) {
+          runtime.events.consume("notifications", "run.terminal", async () => {
+            attempts++;
+          });
+        },
+      }],
+    },
+    operations,
+    tickIntervalMs: 10,
+    now: () => new Date("2026-07-25T00:00:02.000Z"),
+  });
+  try {
+    await host.initialize();
+    host.start();
+    await waitFor(() => attempts === 1);
+    await host.stop();
+
+    const currentId = `telegram-notifications-${"b".repeat(16)}`;
+    const currentDirectory = path.join(
+      stateDir,
+      ".modules",
+      "telegram",
+      "events",
+      currentId,
+    );
+    const metadata = JSON.parse(
+      await readFile(path.join(currentDirectory, "consumer.json"), "utf8"),
+    ) as Record<string, JsonValue>;
+    assert.deepEqual(metadata.subscriptions, {
+      "run.terminal": "2026-07-24T00:00:00.000Z",
+    });
+    const delivery = JSON.parse(
+      await readFile(path.join(currentDirectory, `${eventId}.json`), "utf8"),
+    ) as Record<string, JsonValue>;
+    assert.equal(delivery.consumer, currentId);
+    assert.equal(delivery.status, "delivered");
+    assert.equal(delivery.attempts, 2);
+  } finally {
+    await host.stop();
     await rm(root, { recursive: true, force: true });
   }
 });

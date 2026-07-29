@@ -45,6 +45,10 @@ export interface RuntimeModule {
 export interface RuntimeModuleContext {
   readonly events: {
     consume(
+      types: HookEventType | readonly HookEventType[],
+      handler: (event: LifecycleHookEvent) => void | Promise<void>,
+    ): void;
+    consume(
       name: string,
       types: HookEventType | readonly HookEventType[],
       handler: (event: LifecycleHookEvent) => void | Promise<void>,
@@ -105,6 +109,7 @@ export interface RuntimeModuleOperations {
 interface EventConsumer {
   readonly id: string;
   readonly slot: string;
+  readonly legacySlot: string;
   readonly module: string;
   readonly types: readonly HookEventType[];
   readonly handler: (event: LifecycleHookEvent) => void | Promise<void>;
@@ -308,11 +313,25 @@ export class RuntimeModuleHost {
   private context(moduleName: string): RuntimeModuleContext {
     return {
       events: {
-        consume: (name, types, handler) => {
-          if (!CONSUMER_NAME.test(name)) {
+        consume: ((
+          nameOrTypes: string | readonly HookEventType[],
+          typesOrHandler:
+            | HookEventType
+            | readonly HookEventType[]
+            | ((event: LifecycleHookEvent) => void | Promise<void>),
+          namedHandler?: (event: LifecycleHookEvent) => void | Promise<void>,
+        ) => {
+          const named = namedHandler !== undefined;
+          const name = named ? nameOrTypes : undefined;
+          const types = named ? typesOrHandler : nameOrTypes;
+          const handler = named ? namedHandler : typesOrHandler;
+          if (named && (typeof name !== "string" || !CONSUMER_NAME.test(name))) {
             throw new Error(
               `Runtime module ${moduleName} event consumer name is invalid: ${name}`,
             );
+          }
+          if (typeof handler !== "function") {
+            throw new Error(`Runtime module ${moduleName} event consumer requires a handler`);
           }
           const normalized = Array.isArray(types) ? [...types] : [types];
           if (normalized.length === 0) {
@@ -323,7 +342,10 @@ export class RuntimeModuleHost {
               throw new Error(`Runtime module ${moduleName} requested unknown event ${type}`);
             }
           }
-          const slot = `${moduleName}-${name}`;
+          const index =
+            this.consumers.filter((consumer) => consumer.module === moduleName).length + 1;
+          const legacySlot = `${moduleName}-${index}`;
+          const slot = named ? `${moduleName}-${name}` : legacySlot;
           if (this.consumers.some((consumer) => consumer.slot === slot)) {
             throw new Error(
               `Runtime module ${moduleName} event consumer is duplicated: ${name}`,
@@ -333,11 +355,12 @@ export class RuntimeModuleHost {
           this.consumers.push({
             id: `${slot}-${generation}`,
             slot,
+            legacySlot,
             module: moduleName,
-            types: normalized,
+            types: normalized as HookEventType[],
             handler,
           });
-        },
+        }) as RuntimeModuleContext["events"]["consume"],
       },
       services: {
         run: (name, worker) => {
@@ -629,8 +652,10 @@ export class RuntimeModuleHost {
   }
 
   private consumerDirectoryPattern(consumer: EventConsumer): RegExp {
-    const escapedSlot = consumer.slot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`^${escapedSlot}(?:-[a-f0-9]{16})?$`);
+    const escapedSlots = [...new Set([consumer.slot, consumer.legacySlot])]
+      .map((slot) => slot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("|");
+    return new RegExp(`^(?:${escapedSlots})(?:-[a-f0-9]{16})?$`);
   }
 
   private async readStorage(
