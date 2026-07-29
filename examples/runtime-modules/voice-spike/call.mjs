@@ -4,6 +4,7 @@ import {
   readTelegramConfig,
   sendTelegramCall,
   TelegramCallInvitations,
+  updateTelegramCall,
 } from "./telegram-call.mjs";
 
 const stateRoot =
@@ -20,6 +21,16 @@ const reason = process.argv.slice(2).join(" ").trim() || "Jaeger wants to talk."
 
 const invitations = new TelegramCallInvitations({ stateFile });
 const telegram = await readTelegramConfig(envFile);
+const expired = await invitations.expireCurrent();
+if (expired?.telegram) {
+  await updateTelegramCall({
+    ...telegram,
+    ...expired.telegram,
+    status: "expired",
+    reason: expired.invitation.reason,
+  });
+  await invitations.markDispositionUpdated("expired");
+}
 const { token, invitation } = await invitations.create({ reason });
 const answerUrl = new URL(publicUrl);
 answerUrl.hash = new URLSearchParams({ call: token }).toString();

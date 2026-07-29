@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rename,
@@ -20,6 +21,7 @@ import { Range, minVersion, validRange } from "semver";
 
 const execFileAsync = promisify(execFile);
 const MODULE_LOCK_FILE = "modules.lock.json";
+const MODULE_MUTATION_LOCK_FILE = ".modules-mutation.lock";
 const MODULE_DIRECTORY = "modules";
 const RUNTIME_CONFIG_FILE = "jaeger.runtime.mjs";
 const MAX_MODULE_FILE_BYTES = 5 * 1024 * 1024;
@@ -273,6 +275,17 @@ async function bundledRegistryPath(): Promise<string> {
 export async function addModules(
   options: ModuleAddOptions,
 ): Promise<ModuleMutationResult> {
+  const root = path.resolve(options.root);
+  await assertSafeModuleProject(root, true);
+  if (options.dryRun) return await addModulesUnlocked(options);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  return await withModuleMutationLock(root, async () => await addModulesUnlocked(options));
+}
+
+async function addModulesUnlocked(
+  options: ModuleAddOptions,
+): Promise<ModuleMutationResult> {
   if (options.references.length === 0) throw new Error("modules add requires a source");
   const root = path.resolve(options.root);
   await assertSafeModuleProject(root, true);
@@ -360,6 +373,15 @@ export async function addModules(
 export async function removeModules(
   options: ModuleRemoveOptions,
 ): Promise<ModuleMutationResult> {
+  const root = path.resolve(options.root);
+  await assertSafeModuleProject(root, false);
+  if (options.dryRun) return await removeModulesUnlocked(options);
+  return await withModuleMutationLock(root, async () => await removeModulesUnlocked(options));
+}
+
+async function removeModulesUnlocked(
+  options: ModuleRemoveOptions,
+): Promise<ModuleMutationResult> {
   if (options.names.length === 0) throw new Error("modules remove requires a module name");
   assertUnique(options.names, "Module removal list contains duplicate module");
   const root = path.resolve(options.root);
@@ -430,6 +452,17 @@ export async function removeModules(
 }
 
 export async function syncModules(
+  options: ModuleSyncOptions,
+): Promise<ModuleMutationResult> {
+  const root = path.resolve(options.root);
+  await assertSafeModuleProject(root, true);
+  if (options.dryRun) return await syncModulesUnlocked(options);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await chmod(root, 0o700);
+  return await withModuleMutationLock(root, async () => await syncModulesUnlocked(options));
+}
+
+async function syncModulesUnlocked(
   options: ModuleSyncOptions,
 ): Promise<ModuleMutationResult> {
   const root = path.resolve(options.root);
@@ -1120,11 +1153,7 @@ async function readJsonDocument(locator: string): Promise<SourceDocument> {
 
 async function readSourceBytes(locator: string): Promise<Buffer> {
   if (/^https:\/\//i.test(locator)) {
-    const response = await fetch(locator, {
-      headers: { "User-Agent": "jaeger-module-registry" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(30_000),
-    });
+    const response = await fetchHttps(locator);
     if (!response.ok) throw new Error(`Unable to fetch module source ${locator}: HTTP ${response.status}`);
     const length = Number(response.headers.get("content-length") ?? "0");
     if (length > MAX_MODULE_FILE_BYTES) throw new Error(`Remote module source is too large: ${locator}`);
@@ -1134,6 +1163,7 @@ async function readSourceBytes(locator: string): Promise<Buffer> {
     }
     return contents;
   }
+  await assertNoSymlinkComponents(locator);
   const targetStat = await lstat(locator);
   if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
     throw new Error(`Module source is not a regular file: ${locator}`);
@@ -1143,6 +1173,39 @@ async function readSourceBytes(locator: string): Promise<Buffer> {
     throw new Error(`Module source is too large: ${locator}`);
   }
   return contents;
+}
+
+async function assertNoSymlinkComponents(locator: string): Promise<void> {
+  const resolved = path.resolve(locator);
+  const root = path.parse(resolved).root;
+  let current = root;
+  for (const component of resolved.slice(root.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    if ((await lstat(current)).isSymbolicLink()) {
+      throw new Error(`Module source path contains a symlink: ${locator}`);
+    }
+  }
+}
+
+async function fetchHttps(locator: string): Promise<Response> {
+  let current = new URL(locator);
+  for (let redirects = 0; redirects <= 10; redirects += 1) {
+    if (current.protocol !== "https:") {
+      throw new Error(`Remote module sources require HTTPS: ${current.toString()}`);
+    }
+    const response = await fetch(current, {
+      headers: { "User-Agent": "jaeger-module-registry" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    if (!location) {
+      throw new Error(`Module source redirect is missing a location: ${current.toString()}`);
+    }
+    current = new URL(location, current);
+  }
+  throw new Error(`Module source has too many redirects: ${locator}`);
 }
 
 function hashModule(item: ModuleRegistryItem, files: ReadonlyMap<string, Buffer>): string {
@@ -1341,6 +1404,32 @@ async function writeJsonAtomic(target: string, value: unknown): Promise<void> {
   await chmod(target, 0o600);
 }
 
+async function withModuleMutationLock<T>(
+  root: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lockPath = path.join(root, MODULE_MUTATION_LOCK_FILE);
+  const deadline = Date.now() + 30_000;
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (!hasCode(error, "EEXIST")) throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`Another Jaeger module mutation holds ${lockPath}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close();
+    await rm(lockPath, { force: true });
+  }
+}
+
 async function snapshotPackageFiles(root: string): Promise<FileSnapshot[]> {
   return await Promise.all(
     ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"].map(
@@ -1414,6 +1503,7 @@ async function assertSafeModuleProject(
     "pnpm-lock.yaml",
     "yarn.lock",
     MODULE_LOCK_FILE,
+    MODULE_MUTATION_LOCK_FILE,
   ]) {
     const target = path.join(root, relative);
     try {

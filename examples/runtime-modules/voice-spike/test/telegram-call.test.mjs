@@ -54,6 +54,26 @@ test("a call can be answered exactly once", async () => {
   );
 });
 
+test("parallel answer and decline requests produce exactly one transition", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-race-"));
+  const token = "r".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  const results = await Promise.allSettled([
+    invitations.answer(token),
+    invitations.decline(token),
+  ]);
+  assert.equal(results.filter(({ status }) => status === "fulfilled").length, 1);
+  const rejected = results.find(({ status }) => status === "rejected");
+  assert.equal(rejected.reason.statusCode, 410);
+  assert.match((await invitations.current()).status, /^(answered|declined)$/);
+});
+
 test("an expired call cannot be answered", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-expiry-"));
   let now = Date.parse("2026-07-29T03:00:00Z");
@@ -68,6 +88,55 @@ test("an expired call cannot be answered", async () => {
   now += 60_001;
   assert.equal((await invitations.inspect(token)).status, "expired");
   await assert.rejects(() => invitations.answer(token), { statusCode: 410 });
+});
+
+test("an answered invitation grants bounded bearer access", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-access-"));
+  let now = Date.parse("2026-07-29T03:00:00Z");
+  const token = "g".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => now,
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  assert.equal(await invitations.authorize(token), false);
+  await invitations.answer(token);
+  assert.equal(await invitations.authorize(token), true);
+  now += 30 * 60 * 1_000 + 1;
+  assert.equal(await invitations.authorize(token), false);
+});
+
+test("a new call cannot discard an expired call before its disposition is finalized", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-replace-expired-"));
+  let now = Date.parse("2026-07-29T03:00:00Z");
+  let sequence = 0;
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => now,
+    createToken: () => String(++sequence).repeat(43),
+  });
+
+  const first = await invitations.create({ ttlMs: 60_000 });
+  await invitations.recordTelegramDelivery(first.token, {
+    chatId: "-100123",
+    messageId: 991,
+  });
+  now += 60_001;
+
+  await assert.rejects(() => invitations.create(), {
+    message: "The expired Telegram call must be finalized before creating another",
+    statusCode: 409,
+  });
+  const expired = await invitations.expireCurrent();
+  assert.equal(expired.invitation.status, "expired");
+  assert.equal(expired.telegram.messageId, 991);
+  assert.equal((await invitations.expireCurrent()).telegram.messageId, 991);
+  await assert.rejects(() => invitations.create(), { statusCode: 409 });
+  assert.equal(await invitations.markDispositionUpdated("expired"), true);
+  assert.equal(await invitations.expireCurrent(), null);
+  assert.equal((await invitations.create()).invitation.status, "ringing");
 });
 
 test("Telegram delivery uses a loud notification and an HTTPS answer button", async () => {

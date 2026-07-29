@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertCapability,
+  bearerCapability,
+  readOrCreateCapabilityToken,
+} from "./capability.mjs";
 import { CodexAppServer } from "./codex-app-server.mjs";
 import {
   createJaegerReadonlyRequestHandlers,
@@ -36,6 +41,15 @@ const invitationStateFile =
     "voice-spike",
     "telegram-call.json",
   );
+const capabilityFile =
+  process.env.VOICE_SPIKE_CAPABILITY_FILE ??
+  join(
+    process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
+    "jaeger",
+    "voice-spike",
+    "capability-token",
+  );
+const capabilityToken = await readOrCreateCapabilityToken(capabilityFile);
 const telegramEnvFile = process.env.VOICE_TELEGRAM_ENV_FILE;
 const telegram = telegramEnvFile
   ? await readTelegramConfig(telegramEnvFile)
@@ -81,15 +95,15 @@ export const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://voice-spike.local");
 
     if (request.method === "GET" && url.pathname === "/healthz") {
-      const call = await callSnapshot();
       return sendJson(response, bridge.connected ? 200 : 503, {
         ok: bridge.connected,
-        ...bridge.snapshot(),
-        telegramCall: call,
       });
     }
 
+    if (url.pathname.startsWith("/api/")) assertOrigin(request);
+
     if (request.method === "GET" && url.pathname === "/api/state") {
+      await assertApiCapability(request);
       return sendJson(response, 200, {
         ...bridge.snapshot(),
         telegramCall: await callSnapshot(),
@@ -97,6 +111,7 @@ export const server = createServer(async (request, response) => {
     }
 
     if (request.method === "GET" && url.pathname === "/api/events") {
+      await assertApiCapability(request);
       response.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-store",
@@ -109,8 +124,6 @@ export const server = createServer(async (request, response) => {
       request.once("close", () => eventClients.delete(response));
       return;
     }
-
-    if (request.method === "POST") assertOrigin(request);
 
     if (
       request.method === "POST" &&
@@ -145,6 +158,10 @@ export const server = createServer(async (request, response) => {
       broadcast("telegram.call.declined", result.invitation);
       void updateDisposition(result, "declined");
       return sendJson(response, 200, result.invitation);
+    }
+
+    if (url.pathname.startsWith("/api/")) {
+      await assertApiCapability(request);
     }
 
     if (request.method === "POST" && url.pathname === "/api/session") {
@@ -254,10 +271,26 @@ function setSecurityHeaders(response) {
 
 function assertOrigin(request) {
   const origin = request.headers.origin;
-  if (origin && origin !== publicOrigin) {
+  const fetchSite = request.headers["sec-fetch-site"];
+  const rejected =
+    (origin && origin !== publicOrigin) ||
+    fetchSite === "cross-site" ||
+    (request.method === "POST" && origin !== publicOrigin);
+  if (rejected) {
     const error = new Error("Origin rejected");
     error.statusCode = 403;
     throw error;
+  }
+}
+
+async function assertApiCapability(request) {
+  try {
+    assertCapability(request, capabilityToken);
+    return;
+  } catch {
+    const invitationToken = bearerCapability(request);
+    if (invitationToken && await invitations.authorize(invitationToken)) return;
+    assertCapability(request, capabilityToken);
   }
 }
 
@@ -313,6 +346,7 @@ async function updateDisposition(result, status) {
       status,
       reason: result.invitation.reason,
     });
+    await invitations.markDispositionUpdated(status);
   } catch (error) {
     process.stderr.write(
       `Telegram call disposition update failed: ${error.message}\n`,

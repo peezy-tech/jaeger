@@ -127,19 +127,22 @@ export class CodexAppServer extends EventEmitter {
       throw new Error("A valid WebRTC SDP offer is required");
     }
 
-    const answer = this.#waitForRealtimeSdp();
+    const answer = this.#realtimeSdpWaiter();
+    try {
+      await this.request("thread/realtime/start", {
+        threadId: this.threadId,
+        outputModality: "audio",
+        transport: { type: "webrtc", sdp },
+        version: "v3",
+        voice,
+        includeStartupContext: true,
+      });
 
-    await this.request("thread/realtime/start", {
-      threadId: this.threadId,
-      outputModality: "audio",
-      transport: { type: "webrtc", sdp },
-      version: "v3",
-      voice,
-      includeStartupContext: true,
-    });
-
-    const params = await answer;
-    return { sdp: params.sdp, threadId: this.threadId };
+      const params = await answer.promise;
+      return { sdp: params.sdp, threadId: this.threadId };
+    } finally {
+      answer.cancel();
+    }
   }
 
   async appendText(text) {
@@ -297,40 +300,57 @@ export class CodexAppServer extends EventEmitter {
     return { promise, cancel };
   }
 
-  #waitForRealtimeSdp() {
-    return new Promise((resolve, reject) => {
-      const matches = (params) => params.threadId === this.threadId;
-      const cleanup = () => {
-        clearTimeout(timer);
-        this.off("thread/realtime/sdp", onSdp);
-        this.off("thread/realtime/error", onError);
-        this.off("thread/realtime/closed", onClosed);
-      };
-      const onSdp = (params) => {
-        if (!matches(params)) return;
-        cleanup();
-        resolve(params);
-      };
-      const onError = (params) => {
-        if (!matches(params)) return;
-        cleanup();
-        reject(new Error(params.message));
-      };
-      const onClosed = (params) => {
-        if (!matches(params)) return;
-        cleanup();
-        reject(
-          new Error(params.reason ?? "Realtime transport closed during setup"),
-        );
-      };
-      const timer = setTimeout(() => {
-        cleanup();
-        reject(new Error("thread/realtime/sdp notification timed out"));
-      }, 45_000);
-      this.on("thread/realtime/sdp", onSdp);
-      this.on("thread/realtime/error", onError);
-      this.on("thread/realtime/closed", onClosed);
+  #realtimeSdpWaiter() {
+    let settled = false;
+    let resolvePromise;
+    let rejectPromise;
+    let timer;
+    const promise = new Promise((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
     });
+    const matches = (params) => params.threadId === this.threadId;
+    const cleanup = () => {
+      clearTimeout(timer);
+      this.off("thread/realtime/sdp", onSdp);
+      this.off("thread/realtime/error", onError);
+      this.off("thread/realtime/closed", onClosed);
+    };
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+    };
+    const onSdp = (params) => {
+      if (settled || !matches(params)) return;
+      settled = true;
+      cleanup();
+      resolvePromise(params);
+    };
+    const onError = (params) => {
+      if (settled || !matches(params)) return;
+      settled = true;
+      cleanup();
+      rejectPromise(new Error(params.message));
+    };
+    const onClosed = (params) => {
+      if (settled || !matches(params)) return;
+      settled = true;
+      cleanup();
+      rejectPromise(
+        new Error(params.reason ?? "Realtime transport closed during setup"),
+      );
+    };
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(new Error("thread/realtime/sdp notification timed out"));
+    }, 45_000);
+    this.on("thread/realtime/sdp", onSdp);
+    this.on("thread/realtime/error", onError);
+    this.on("thread/realtime/closed", onClosed);
+    return { promise, cancel };
   }
 
   #assertReady() {

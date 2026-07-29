@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 
 export const DEFAULT_CALL_TTL_MS = 10 * 60 * 1_000;
 export const MAX_CALL_TTL_MS = 30 * 60 * 1_000;
+export const ANSWERED_ACCESS_TTL_MS = 30 * 60 * 1_000;
 
 export class TelegramCallInvitations {
   constructor({
@@ -29,28 +30,38 @@ export class TelegramCallInvitations {
     reason = "Jaeger wants to talk.",
     ttlMs = DEFAULT_CALL_TTL_MS,
   } = {}) {
-    const current = await this.#read();
-    if (this.#status(current) === "ringing") {
-      throw httpError("A Telegram call is already ringing", 409);
-    }
-    if (!Number.isFinite(ttlMs) || ttlMs < 60_000 || ttlMs > MAX_CALL_TTL_MS) {
-      throw httpError("Call lifetime must be between 1 and 30 minutes", 400);
-    }
+    return await this.#exclusive(async () => {
+      const current = await this.#read();
+      const currentStatus = this.#status(current);
+      if (currentStatus === "ringing") {
+        throw httpError("A Telegram call is already ringing", 409);
+      }
+      if (
+        currentStatus === "expired" &&
+        current?.telegram &&
+        !current.dispositionUpdatedAt
+      ) {
+        throw httpError("The expired Telegram call must be finalized before creating another", 409);
+      }
+      if (!Number.isFinite(ttlMs) || ttlMs < 60_000 || ttlMs > MAX_CALL_TTL_MS) {
+        throw httpError("Call lifetime must be between 1 and 30 minutes", 400);
+      }
 
-    const token = this.createToken();
-    const createdAt = new Date(this.now()).toISOString();
-    const expiresAt = new Date(this.now() + ttlMs).toISOString();
-    const record = {
-      version: 1,
-      tokenHash: hashToken(token),
-      status: "ringing",
-      reason: normalizeReason(reason),
-      createdAt,
-      expiresAt,
-      telegram: null,
-    };
-    await writeOwnerOnlyJson(this.stateFile, record);
-    return { token, invitation: publicInvitation(record, "ringing") };
+      const token = this.createToken();
+      const createdAt = new Date(this.now()).toISOString();
+      const expiresAt = new Date(this.now() + ttlMs).toISOString();
+      const record = {
+        version: 1,
+        tokenHash: hashToken(token),
+        status: "ringing",
+        reason: normalizeReason(reason),
+        createdAt,
+        expiresAt,
+        telegram: null,
+      };
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return { token, invitation: publicInvitation(record, "ringing") };
+    });
   }
 
   async inspect(token) {
@@ -67,42 +78,69 @@ export class TelegramCallInvitations {
     return this.#transition(token, "declined");
   }
 
-  async recordTelegramDelivery(token, telegram) {
+  async authorize(token) {
     const record = await this.#read();
-    if (!tokenMatches(record, token) || this.#status(record) !== "ringing") {
-      throw httpError("Telegram call is no longer available", 410);
-    }
-    record.telegram = {
-      chatId: String(telegram.chatId),
-      messageThreadId: telegram.messageThreadId
-        ? String(telegram.messageThreadId)
-        : null,
-      messageId: Number(telegram.messageId),
-    };
-    await writeOwnerOnlyJson(this.stateFile, record);
-    return publicInvitation(record, "ringing");
+    return Boolean(
+      tokenMatches(record, token) &&
+        record.status === "answered" &&
+        Date.parse(record.accessExpiresAt) > this.now(),
+    );
+  }
+
+  async recordTelegramDelivery(token, telegram) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!tokenMatches(record, token) || this.#status(record) !== "ringing") {
+        throw httpError("Telegram call is no longer available", 410);
+      }
+      record.telegram = {
+        chatId: String(telegram.chatId),
+        messageThreadId: telegram.messageThreadId
+          ? String(telegram.messageThreadId)
+          : null,
+        messageId: Number(telegram.messageId),
+      };
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return publicInvitation(record, "ringing");
+    });
   }
 
   async fail(token) {
-    const record = await this.#read();
-    if (!tokenMatches(record, token)) return unavailableInvitation();
-    record.status = "failed";
-    record.failedAt = new Date(this.now()).toISOString();
-    await writeOwnerOnlyJson(this.stateFile, record);
-    return publicInvitation(record, "failed");
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!tokenMatches(record, token)) return unavailableInvitation();
+      record.status = "failed";
+      record.failedAt = new Date(this.now()).toISOString();
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return publicInvitation(record, "failed");
+    });
   }
 
   async expireCurrent() {
-    const record = await this.#read();
-    if (!record || this.#status(record) !== "expired") return null;
-    if (record.status === "expired") return null;
-    record.status = "expired";
-    record.expiredAt = new Date(this.now()).toISOString();
-    await writeOwnerOnlyJson(this.stateFile, record);
-    return {
-      invitation: publicInvitation(record, "expired"),
-      telegram: record.telegram,
-    };
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!record || this.#status(record) !== "expired") return null;
+      if (record.status !== "expired") {
+        record.status = "expired";
+        record.expiredAt = new Date(this.now()).toISOString();
+        await writeOwnerOnlyJson(this.stateFile, record);
+      }
+      if (record.dispositionUpdatedAt) return null;
+      return {
+        invitation: publicInvitation(record, "expired"),
+        telegram: record.telegram,
+      };
+    });
+  }
+
+  async markDispositionUpdated(status) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!record || record.status !== status) return false;
+      record.dispositionUpdatedAt = new Date(this.now()).toISOString();
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return true;
+    });
   }
 
   async current() {
@@ -112,21 +150,28 @@ export class TelegramCallInvitations {
   }
 
   async #transition(token, nextStatus) {
-    const record = await this.#read();
-    if (!tokenMatches(record, token)) {
-      throw httpError("Telegram call is no longer available", 410);
-    }
-    const status = this.#status(record);
-    if (status !== "ringing") {
-      throw httpError("Telegram call is no longer available", 410);
-    }
-    record.status = nextStatus;
-    record[`${nextStatus}At`] = new Date(this.now()).toISOString();
-    await writeOwnerOnlyJson(this.stateFile, record);
-    return {
-      invitation: publicInvitation(record, nextStatus),
-      telegram: record.telegram,
-    };
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!tokenMatches(record, token)) {
+        throw httpError("Telegram call is no longer available", 410);
+      }
+      const status = this.#status(record);
+      if (status !== "ringing") {
+        throw httpError("Telegram call is no longer available", 410);
+      }
+      record.status = nextStatus;
+      record[`${nextStatus}At`] = new Date(this.now()).toISOString();
+      if (nextStatus === "answered") {
+        record.accessExpiresAt = new Date(
+          this.now() + ANSWERED_ACCESS_TTL_MS,
+        ).toISOString();
+      }
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return {
+        invitation: publicInvitation(record, nextStatus),
+        telegram: record.telegram,
+      };
+    });
   }
 
   #status(record) {
@@ -147,6 +192,10 @@ export class TelegramCallInvitations {
       if (error.code === "ENOENT") return null;
       throw error;
     }
+  }
+
+  async #exclusive(operation) {
+    return await withStateLock(this.stateFile, operation);
   }
 }
 
@@ -284,6 +333,34 @@ export async function removeInvitationState(path) {
   await unlink(path).catch((error) => {
     if (error.code !== "ENOENT") throw error;
   });
+}
+
+async function withStateLock(stateFile, operation) {
+  const directory = dirname(stateFile);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
+  const lockPath = `${stateFile}.lock`;
+  const deadline = Date.now() + 5_000;
+  let handle;
+  while (!handle) {
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`Another Telegram call operation holds ${lockPath}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close();
+    await unlink(lockPath).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
 }
 
 function normalizeReason(reason) {

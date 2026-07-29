@@ -116,6 +116,36 @@ test("a multi-module add invokes the shared package manager exactly once", async
   }
 });
 
+test("serializes concurrent module additions without losing lock state", async () => {
+  const fixture = await registryFixture();
+  try {
+    await Promise.all([
+      addModules({
+        root: fixture.runtimeRoot,
+        references: [`${fixture.catalogPath}#alpha`],
+        install: false,
+      }),
+      addModules({
+        root: fixture.runtimeRoot,
+        references: [`${fixture.catalogPath}#beta`],
+        install: false,
+      }),
+    ]);
+
+    const installed = await listInstalledModules(fixture.runtimeRoot);
+    assert.deepEqual(installed.modules.map(({ name }) => name), ["alpha", "beta"]);
+    assert.deepEqual(
+      installed.dependencies["fixture-dependency"]?.requestedBy,
+      {
+        alpha: ">=1 <4",
+        beta: "^2.0.0",
+      },
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("fails closed on conflicting module dependency requirements before writing the project", async () => {
   const fixture = await registryFixture({
     betaDependencies: { "fixture-dependency": "^5.0.0" },
@@ -268,6 +298,61 @@ test("rejects module file traversal before reading source bytes", async () => {
     await assert.rejects(resolveModuleItem(manifest), /escapes or is not normalized/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a local module source below a symlinked directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-registry-source-link-"));
+  try {
+    const source = path.join(root, "source");
+    const outside = path.join(root, "outside");
+    await Promise.all([mkdir(source), mkdir(outside)]);
+    await writeFile(path.join(outside, "secret.mjs"), "export const secret = true\n");
+    await symlink(outside, path.join(source, "linked"));
+    const manifest = path.join(source, "jaeger.module.json");
+    await writeJson(manifest, {
+      schemaVersion: 1,
+      name: "escape",
+      files: ["linked/secret.mjs"],
+      dependencies: {},
+    });
+
+    await assert.rejects(resolveModuleItem(manifest), /path contains a symlink/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects an HTTPS module source redirect to HTTP", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url === "https://registry.example/jaeger.module.json") {
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          name: "redirect",
+          files: ["source.mjs"],
+          dependencies: {},
+        }),
+        { status: 200 },
+      );
+    }
+    if (url === "https://registry.example/source.mjs") {
+      return new Response(null, {
+        status: 302,
+        headers: { location: "http://registry.example/source.mjs" },
+      });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      resolveModuleItem("https://registry.example/jaeger.module.json"),
+      /Remote module sources require HTTPS: http:\/\/registry\.example\/source\.mjs/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

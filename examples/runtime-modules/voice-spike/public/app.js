@@ -28,6 +28,8 @@ const state = {
   channel: null,
   callCountdown: null,
   callToken: null,
+  capabilityToken: null,
+  eventStreamStarted: false,
   inputStream: null,
   peer: null,
   sessionActive: false,
@@ -36,8 +38,14 @@ const state = {
 
 const apiUrl = (path) => new URL(path.replace(/^\//, ""), window.location.href);
 
-await refreshState();
-connectEvents();
+const invitationToken = loadAccessFragment();
+if (state.capabilityToken) {
+  await refreshState();
+  connectEvents();
+} else {
+  renderBridge({ connected: false, generation: "—", threadId: "—" });
+  setSignal("Answer an invitation or open with the capability token");
+}
 drawWaveform();
 
 elements.answerCall.addEventListener("click", async () => {
@@ -46,8 +54,14 @@ elements.answerCall.addEventListener("click", async () => {
   elements.declineCall.disabled = true;
   elements.answerCall.textContent = "Connecting…";
   try {
-    await post("api/invitations/answer", { token: state.callToken });
+    const invitationCapability = state.callToken;
+    await post("api/invitations/answer", {
+      token: state.callToken,
+    });
+    state.capabilityToken = invitationCapability;
     clearCallInvitation();
+    await refreshState();
+    connectEvents();
     const connected = await startSession();
     if (!connected) showCallNotice("Call answered. Tap Open microphone to retry.");
   } catch (error) {
@@ -73,7 +87,7 @@ elements.declineCall.addEventListener("click", async () => {
   }
 });
 
-await loadCallInvitation();
+await loadCallInvitation(invitationToken);
 
 elements.talkButton.addEventListener("click", async () => {
   if (state.sessionActive) {
@@ -175,15 +189,23 @@ async function startSession() {
   }
 }
 
-async function loadCallInvitation() {
+function loadAccessFragment() {
   const params = new URLSearchParams(window.location.hash.slice(1));
   const token = params.get("call");
+  const capability = params.get("capability");
+  if (capability) state.capabilityToken = capability;
+  if (token || capability) {
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+  }
+  return token;
+}
+
+async function loadCallInvitation(token) {
   if (!token) return;
-  window.history.replaceState(
-    null,
-    "",
-    `${window.location.pathname}${window.location.search}`,
-  );
   try {
     const invitation = await post("api/invitations/inspect", { token });
     if (invitation.status !== "ringing") {
@@ -287,7 +309,9 @@ function renderBridge(bridge) {
 }
 
 function connectEvents() {
-  const source = new EventSource(apiUrl("api/events"));
+  if (state.eventStreamStarted) return;
+  state.eventStreamStarted = true;
+  const source = new EventTarget();
   source.addEventListener("bridge.state", (event) => {
     renderBridge(JSON.parse(event.data));
   });
@@ -323,6 +347,47 @@ function connectEvents() {
         : params.reason || "Realtime channel closed",
     );
   });
+  void consumeEvents(source);
+}
+
+async function consumeEvents(target) {
+  while (state.capabilityToken) {
+    try {
+      const response = await fetch(apiUrl("api/events"), {
+        cache: "no-store",
+        headers: authorizationHeaders(),
+      });
+      if (!response.ok) await parseResponse(response);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffered = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        buffered += decoder.decode(value ?? new Uint8Array(), {
+          stream: !done,
+        });
+        const frames = buffered.replace(/\r\n/g, "\n").split("\n\n");
+        buffered = frames.pop() ?? "";
+        for (const frame of frames) dispatchServerEvent(target, frame);
+        if (done) break;
+      }
+    } catch (error) {
+      setSignal(`Event stream disconnected: ${error.message}`, true);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+  }
+}
+
+function dispatchServerEvent(target, frame) {
+  let event = "message";
+  const data = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (data.length > 0) {
+    target.dispatchEvent(new MessageEvent(event, { data: data.join("\n") }));
+  }
 }
 
 function handleDataChannelEvent(event) {
@@ -443,14 +508,20 @@ function waitForIceGathering(peer) {
 }
 
 async function get(path) {
-  const response = await fetch(apiUrl(path), { cache: "no-store" });
+  const response = await fetch(apiUrl(path), {
+    cache: "no-store",
+    headers: authorizationHeaders(),
+  });
   return parseResponse(response);
 }
 
 async function post(path, body) {
   const response = await fetch(apiUrl(path), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...authorizationHeaders(),
+    },
     body: JSON.stringify(body),
   });
   return parseResponse(response);
@@ -460,4 +531,10 @@ async function parseResponse(response) {
   const value = await response.json();
   if (!response.ok) throw new Error(value.error ?? `Request failed: ${response.status}`);
   return value;
+}
+
+function authorizationHeaders() {
+  return state.capabilityToken
+    ? { authorization: `Bearer ${state.capabilityToken}` }
+    : {};
 }

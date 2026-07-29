@@ -79,6 +79,28 @@ test("WebRTC start forwards the SDP offer and returns the matching answer", asyn
   await bridge.stop();
 });
 
+test("a rejected realtime start cancels its SDP waiter", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-reject-"));
+  const child = createMockProcess();
+  child.rejectRealtimeStart = true;
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+  await assert.rejects(
+    bridge.startRealtime({ sdp: "v=0\r\nmock-offer" }),
+    /thread\/realtime\/start failed: rejected for test/,
+  );
+  assert.equal(bridge.listenerCount("thread/realtime/sdp"), 0);
+  assert.equal(bridge.listenerCount("thread/realtime/error"), 0);
+  assert.equal(bridge.listenerCount("thread/realtime/closed"), 0);
+  await bridge.stop();
+});
+
 function createMockProcess() {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
@@ -86,6 +108,7 @@ function createMockProcess() {
   child.stderr = new PassThrough();
   child.exitCode = null;
   child.requests = [];
+  child.rejectRealtimeStart = false;
   child.stdin.on("data", (chunk) => {
     for (const line of String(chunk).trim().split("\n")) {
       if (!line) continue;
@@ -106,7 +129,13 @@ function createMockProcess() {
         };
       }
       queueMicrotask(() => {
-        child.stdout.write(`${JSON.stringify({ id: request.id, result })}\n`);
+        child.stdout.write(
+          `${JSON.stringify(
+            request.method === "thread/realtime/start" && child.rejectRealtimeStart
+              ? { id: request.id, error: { message: "rejected for test" } }
+              : { id: request.id, result },
+          )}\n`,
+        );
         if (request.method === "turn/start") {
           child.stdout.write(
             `${JSON.stringify({
@@ -122,7 +151,10 @@ function createMockProcess() {
             })}\n`,
           );
         }
-        if (request.method === "thread/realtime/start") {
+        if (
+          request.method === "thread/realtime/start" &&
+          !child.rejectRealtimeStart
+        ) {
           child.stdout.write(
             `${JSON.stringify({
               method: "thread/realtime/sdp",

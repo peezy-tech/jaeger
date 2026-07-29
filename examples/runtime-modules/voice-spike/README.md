@@ -54,6 +54,20 @@ VOICE_SPIKE_PUBLIC_ORIGIN=https://hq.peezy.tech \
   npm start
 ```
 
+On first startup the service creates a 256-bit capability at
+`~/.local/state/jaeger/voice-spike/capability-token` with mode `0600`. Copy that
+value into the URL fragment when opening the browser directly:
+
+```text
+https://hq.peezy.tech/jaeger-voice/#capability=<copied capability token>
+```
+
+The browser removes the fragment immediately and keeps the token only in
+memory. State, transcript events, realtime controls, and reconnect requests
+require the token as a bearer capability. A valid Telegram invitation receives
+30 minutes of browser access only after its single-use answer transition
+succeeds; it never receives the per-install capability.
+
 The operator thread ID is the only durable conversation state written by the
 spike. It lives at
 `~/.local/state/jaeger/voice-spike/operator.json` with mode `0600`. Audio and
@@ -109,7 +123,7 @@ probe manually.
 
 ## Live proof
 
-1. Open `https://hq.peezy.tech/jaeger-voice/`.
+1. Open the private route with the capability-token fragment described above.
 2. Select **Open microphone** and allow microphone access.
 3. Ask: “Give me the current Jaeger status.”
 4. Confirm the spoken reply matches `jaeger status --json`.
