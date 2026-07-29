@@ -5,6 +5,8 @@ import { dirname } from "node:path";
 import readline from "node:readline";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_STOP_TIMEOUT_MS = 2_000;
+const DEFAULT_FORCE_STOP_TIMEOUT_MS = 2_000;
 
 export const OPERATOR_INSTRUCTIONS = `You are the read-only Jaeger voice operator for a compatibility spike.
 
@@ -28,6 +30,8 @@ export class CodexAppServer extends EventEmitter {
     stateFile,
     spawnProcess = spawn,
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
+    stopTimeoutMs = DEFAULT_STOP_TIMEOUT_MS,
+    forceStopTimeoutMs = DEFAULT_FORCE_STOP_TIMEOUT_MS,
   }) {
     super();
     this.codexBin = codexBin;
@@ -38,6 +42,8 @@ export class CodexAppServer extends EventEmitter {
     this.stateFile = stateFile;
     this.spawnProcess = spawnProcess;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.stopTimeoutMs = stopTimeoutMs;
+    this.forceStopTimeoutMs = forceStopTimeoutMs;
     this.child = null;
     this.threadId = null;
     this.generation = 0;
@@ -49,7 +55,7 @@ export class CodexAppServer extends EventEmitter {
   }
 
   get connected() {
-    return Boolean(this.child && this.child.exitCode === null);
+    return Boolean(this.child && isChildRunning(this.child));
   }
 
   async start() {
@@ -103,16 +109,17 @@ export class CodexAppServer extends EventEmitter {
     if (!this.child) return;
     this.stopping = true;
     const child = this.child;
-    this.child = null;
     this.stdoutReaders.get(child)?.close();
     this.stdoutReaders.delete(child);
     this.#rejectPending(new Error("Codex app-server stopped"));
     child.stdin.end();
-    if (child.exitCode === null) child.kill("SIGTERM");
-    await Promise.race([
-      new Promise((resolve) => child.once("exit", resolve)),
-      new Promise((resolve) => setTimeout(resolve, 2_000)),
-    ]);
+    if (!isChildRunning(child)) return;
+    child.kill("SIGTERM");
+    if (await waitForChildExit(child, this.stopTimeoutMs)) return;
+    if (!isChildRunning(child)) return;
+    child.kill("SIGKILL");
+    if (await waitForChildExit(child, this.forceStopTimeoutMs)) return;
+    throw new Error("Codex app-server did not exit after SIGKILL");
   }
 
   async reconnect() {
@@ -464,6 +471,29 @@ export class CodexAppServer extends EventEmitter {
     }
     this.pending.clear();
   }
+}
+
+function isChildRunning(child) {
+  return child.exitCode === null && child.signalCode == null;
+}
+
+async function waitForChildExit(child, timeoutMs) {
+  if (!isChildRunning(child)) return true;
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const onExit = () => finish(true);
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    child.once("exit", onExit);
+    timer = setTimeout(() => finish(false), timeoutMs);
+    if (!isChildRunning(child)) finish(true);
+  });
 }
 
 export async function readThreadState(stateFile) {

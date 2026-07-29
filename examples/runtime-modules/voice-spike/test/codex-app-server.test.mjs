@@ -52,6 +52,33 @@ test("reconnect resumes the exact persisted operator thread", async () => {
   await bridge.stop();
 });
 
+test("reconnect escalates and waits for an uncooperative app-server", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-force-stop-"));
+  const processes = [];
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => {
+      const child = createMockProcess({
+        exitOnKill: false,
+        exitOnForceKill: true,
+      });
+      processes.push(child);
+      return child;
+    },
+    requestTimeoutMs: 1_000,
+    stopTimeoutMs: 10,
+    forceStopTimeoutMs: 10,
+  });
+
+  await bridge.start();
+  await bridge.reconnect();
+
+  assert.deepEqual(processes[0].signals, ["SIGTERM", "SIGKILL"]);
+  assert.equal(processes.length, 2);
+  await bridge.stop();
+});
+
 test("a late exit from a stopped child does not disconnect its replacement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-late-exit-"));
   const processes = [];
@@ -66,10 +93,13 @@ test("a late exit from a stopped child does not disconnect its replacement", asy
       return child;
     },
     requestTimeoutMs: 1_000,
+    stopTimeoutMs: 10,
+    forceStopTimeoutMs: 10,
   });
 
   await bridge.start();
   const stopping = bridge.stop();
+  await stopping;
   await bridge.start();
   const pending = bridge.request("test/ping");
   processes[0].exitCode = 0;
@@ -110,6 +140,8 @@ test("late output and server responses stay bound to their child generation", as
       },
     },
     requestTimeoutMs: 1_000,
+    stopTimeoutMs: 10,
+    forceStopTimeoutMs: 10,
   });
   let staleNotifications = 0;
   bridge.on("test/stale", () => {
@@ -123,6 +155,7 @@ test("late output and server responses stay bound to their child generation", as
   await started;
 
   const stopping = bridge.stop();
+  await stopping;
   await bridge.start();
   processes[0].stdout.write(
     `${JSON.stringify({ method: "test/stale", params: {} })}\n`,
@@ -142,7 +175,6 @@ test("late output and server responses stay bound to their child generation", as
   );
   processes[0].exitCode = 0;
   processes[0].emit("exit", 0, null);
-  await stopping;
   assert.equal(bridge.connected, true);
   await bridge.stop();
 });
@@ -233,13 +265,15 @@ test("a rejected realtime start cancels its SDP waiter", async () => {
   await bridge.stop();
 });
 
-function createMockProcess({ exitOnKill = true } = {}) {
+function createMockProcess({ exitOnKill = true, exitOnForceKill = true } = {}) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.exitCode = null;
+  child.signalCode = null;
   child.requests = [];
+  child.signals = [];
   child.rejectRealtimeStart = false;
   child.deferRealtimeSdp = false;
   child.stdin.on("data", (chunk) => {
@@ -302,8 +336,9 @@ function createMockProcess({ exitOnKill = true } = {}) {
       });
     }
   });
-  child.kill = () => {
-    if (exitOnKill) {
+  child.kill = (signal) => {
+    child.signals.push(signal);
+    if (signal === "SIGTERM" ? exitOnKill : exitOnForceKill) {
       child.exitCode = 0;
       queueMicrotask(() => child.emit("exit", 0, null));
     }

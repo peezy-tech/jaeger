@@ -647,12 +647,15 @@ function reconcilePackageProject(
   const requested = new Map<string, Record<string, string>>();
   for (const [moduleName, module] of Object.entries(modules)) {
     for (const [dependency, range] of Object.entries(module.dependencies)) {
-      if (rootDevDependencies[dependency] !== undefined && rootDependencies[dependency] === undefined) {
+      if (
+        Object.hasOwn(rootDevDependencies, dependency) &&
+        !Object.hasOwn(rootDependencies, dependency)
+      ) {
         throw new Error(
           `Runtime dependency ${dependency} is operator-owned in devDependencies; move it to dependencies before installing ${moduleName}`,
         );
       }
-      if (rootOptionalDependencies[dependency] !== undefined) {
+      if (Object.hasOwn(rootOptionalDependencies, dependency)) {
         throw new Error(
           `Runtime dependency ${dependency} is operator-owned in optionalDependencies; move it to dependencies before installing ${moduleName}`,
         );
@@ -671,7 +674,9 @@ function reconcilePackageProject(
   ]);
   for (const dependency of [...managedNames].sort()) {
     const previous = currentLock.dependencies[dependency];
-    const currentRange = rootDependencies[dependency];
+    const currentRange = Object.hasOwn(rootDependencies, dependency)
+      ? rootDependencies[dependency]
+      : undefined;
     let operatorRange = previous?.operatorRange;
     if (previous) {
       if (currentRange !== previous.appliedRange) operatorRange = currentRange;
@@ -897,11 +902,13 @@ async function installProjectDependencies(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   const manager = await detectPackageManager(root, packageJson);
+  const modernYarn = manager === "yarn" && await usesModernYarn(root, packageJson);
+  if (modernYarn) await assertYarnNodeModulesLinker(root);
   const args =
     manager === "pnpm"
       ? ["install", "--ignore-scripts"]
       : manager === "yarn"
-        ? await usesModernYarn(root, packageJson)
+        ? modernYarn
           ? ["install", "--mode=skip-build"]
           : ["install", "--ignore-scripts"]
         : ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
@@ -948,6 +955,30 @@ async function usesModernYarn(
   if (typeof declared !== "string") return false;
   const match = /^yarn@(\d+)(?:[.+-]|$)/.exec(declared);
   return match ? Number(match[1]) >= 2 : false;
+}
+
+async function assertYarnNodeModulesLinker(root: string): Promise<void> {
+  const configPath = path.join(root, ".yarnrc.yml");
+  let source: string;
+  try {
+    source = await readFile(configPath, "utf8");
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) {
+      throw new Error(
+        "Yarn Modern runtime module projects must set nodeLinker: node-modules in .yarnrc.yml; " +
+          "Jaeger starts runtime modules with raw Node and cannot load Yarn Plug'n'Play dependencies",
+      );
+    }
+    throw error;
+  }
+  const match = /^nodeLinker\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*(?:#.*)?$/m.exec(source);
+  const linker = match?.[1] ?? match?.[2] ?? match?.[3];
+  if (linker !== "node-modules") {
+    throw new Error(
+      `Yarn Modern runtime module projects require nodeLinker: node-modules in ${configPath}; ` +
+        "Jaeger starts runtime modules with raw Node and cannot load Yarn Plug'n'Play dependencies",
+    );
+  }
 }
 
 async function resolveCatalogItem(

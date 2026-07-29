@@ -229,45 +229,15 @@ test("failed dependency installs restore manifests and the installed dependency 
   }
 });
 
-test("failed Yarn installs restore Plug'n'Play and unplugged package state", async () => {
+test("rejects Yarn Plug'n'Play runtime projects before installation", async () => {
   const fixture = await registryFixture();
   try {
-    const yarnState = new Map([
-      [".pnp.cjs", "old-pnp\n"],
-      [".pnp.loader.mjs", "old-loader\n"],
-      [".yarn/build-state.yml", "old-build-state\n"],
-      [".yarn/install-state.gz", "old-install-state\n"],
-      [".yarn/cache/fixture.zip", "old-cache\n"],
-      [".yarn/unplugged/fixture/index.js", "old-unplugged\n"],
-    ]);
     await writeFile(
       path.join(fixture.runtimeRoot, ".yarnrc.yml"),
       "nodeLinker: pnp\n",
     );
-    for (const [relative, contents] of yarnState) {
-      const target = path.join(fixture.runtimeRoot, relative);
-      await mkdir(path.dirname(target), { recursive: true });
-      await writeFile(target, contents);
-    }
-
     const bin = path.join(fixture.root, "bin");
     await mkdir(bin);
-    const yarn = path.join(bin, "yarn");
-    await writeFile(
-      yarn,
-      "#!/bin/sh\n" +
-        "/bin/mkdir -p .yarn/cache\n" +
-        "/bin/mkdir -p .yarn/unplugged/fixture\n" +
-        "printf 'new-pnp\\n' > .pnp.cjs\n" +
-        "printf 'new-loader\\n' > .pnp.loader.mjs\n" +
-        "printf 'new-build-state\\n' > .yarn/build-state.yml\n" +
-        "printf 'new-install-state\\n' > .yarn/install-state.gz\n" +
-        "printf 'new-cache\\n' > .yarn/cache/fixture.zip\n" +
-        "printf 'new-only-cache\\n' > .yarn/cache/new.zip\n" +
-        "printf 'new-unplugged\\n' > .yarn/unplugged/fixture/index.js\n" +
-        "exit 17\n",
-    );
-    await chmod(yarn, 0o755);
 
     await assert.rejects(
       addModules({
@@ -275,16 +245,10 @@ test("failed Yarn installs restore Plug'n'Play and unplugged package state", asy
         references: [`${fixture.catalogPath}#alpha`],
         env: { ...process.env, PATH: bin },
       }),
-      /dependency installation failed/,
+      /require nodeLinker: node-modules/,
     );
-    for (const [relative, contents] of yarnState) {
-      assert.equal(
-        await readFile(path.join(fixture.runtimeRoot, relative), "utf8"),
-        contents,
-      );
-    }
     await assert.rejects(
-      readFile(path.join(fixture.runtimeRoot, ".yarn/cache/new.zip")),
+      readFile(path.join(fixture.runtimeRoot, "package.json")),
       hasCode("ENOENT"),
     );
   } finally {
@@ -935,7 +899,7 @@ async function registryFixture(
       schemaVersion: 1,
       name: "constructor",
       files: ["constructor.mjs"],
-      dependencies: {},
+      dependencies: { constructor: "^1.0.0" },
     }),
   ]);
   const catalogPath = path.join(sourceRoot, "jaeger.registry.json");
