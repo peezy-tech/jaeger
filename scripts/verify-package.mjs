@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFile, spawn } from "node:child_process"
-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -321,23 +321,9 @@ exec ${JSON.stringify(realNpm)} "$@"
     ],
   )
   const discordRuntimeConfig = path.join(moduleProject, "jaeger.runtime.mjs")
-  await writeFile(
+  await copyFile(
+    path.join(moduleProject, "modules", "discord", "jaeger.runtime.mjs"),
     discordRuntimeConfig,
-    `import { discordModule } from "./modules/discord/discord.mjs"
-export default {
-  version: 1,
-  modules: [discordModule({
-    tokenFile: new URL("./secrets/discord-bot-token", import.meta.url),
-    guildId: "10000000000000001",
-    voiceChannelId: "10000000000000002",
-    allowUserId: "10000000000000003",
-    ringingTimeoutMs: 600000,
-    silenceTimeoutMs: 120000,
-    maximumCallTimeoutMs: 1800000,
-    operatorStateFile: new URL("./state/discord-operator.json", import.meta.url),
-  })],
-}
-`,
   )
   const discordValidation = JSON.parse(
     (await run(

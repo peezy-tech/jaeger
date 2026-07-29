@@ -206,8 +206,13 @@ export class DiscordService {
     }
   }
 
-  requestAttention(reason) {
-    return this.#enqueue(() => this.#requestAttention(reason));
+  async requestAttention(reason) {
+    const result = await this.#enqueue(() => this.#requestAttention(reason));
+    await result.mediaStartup;
+    return {
+      status: this.phase,
+      coalesced: result.coalesced,
+    };
   }
 
   async notifyLifecycle(event) {
@@ -329,8 +334,10 @@ export class DiscordService {
         );
       }, this.config.ringingTimeoutMs);
       this.ringingTimer.unref?.();
-      if (this.#allowedUserPresent()) await this.#startMedia();
-      return { status: this.phase, coalesced: false };
+      const mediaStartup = this.#allowedUserPresent()
+        ? this.#startMedia()
+        : undefined;
+      return { coalesced: false, mediaStartup };
     } catch (error) {
       await this.#endCall("attention delivery failed");
       throw error;
@@ -358,7 +365,9 @@ export class DiscordService {
       return;
     }
     if (userId === this.config.allowUserId && entered && this.phase === "ringing") {
-      await this.#startMedia();
+      void this.#startMedia().catch((error) => {
+        this.runtime.log.error("Discord media startup failed", error);
+      });
       return;
     }
     if (
@@ -413,7 +422,7 @@ export class DiscordService {
         );
       }
     });
-    void Promise.resolve()
+    return Promise.resolve()
       .then(() => bridge.start())
       .then(
         () =>
@@ -432,10 +441,7 @@ export class DiscordService {
             await this.#endCall("media startup failed");
             throw error;
           }),
-      )
-      .catch((error) => {
-        this.runtime.log.error("Discord media startup failed", error);
-      });
+      );
   }
 
   async #completeMediaStartup(connection, bridge) {

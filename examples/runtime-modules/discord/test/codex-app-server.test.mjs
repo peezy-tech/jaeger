@@ -182,6 +182,31 @@ test("reconnect resumes the exact dedicated operator thread", async () => {
   await bridge.stop();
 });
 
+test("stopping during realtime startup does not reconnect", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "discord-operator-stop-"));
+  const children = [];
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => {
+      const child = createMockProcess({ deferRealtimeSdp: true });
+      children.push(child);
+      return child;
+    },
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+  const realtime = bridge.startRealtime({ sdp: "v=0\r\noffer\r\n" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await bridge.stop();
+  await assert.rejects(realtime, /Codex app-server stopped/);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(children.length, 1);
+  assert.equal(bridge.connected, false);
+});
+
 test("unknown app-server requests are declined", async () => {
   const directory = await mkdtemp(join(tmpdir(), "discord-operator-decline-"));
   const child = createMockProcess();

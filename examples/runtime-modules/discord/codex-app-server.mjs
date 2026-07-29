@@ -97,6 +97,7 @@ export class CodexAppServer extends EventEmitter {
     this.stopping = false;
     this.realtimeStarting = false;
     this.reconnecting = null;
+    this.stopGeneration = 0;
     this.stdoutReaders = new WeakMap();
   }
 
@@ -158,6 +159,12 @@ export class CodexAppServer extends EventEmitter {
   }
 
   async stop() {
+    this.stopGeneration += 1;
+    this.emit("stopRequested");
+    await this.#stopChild();
+  }
+
+  async #stopChild() {
     this.ready = false;
     if (!this.child) return;
     this.stopping = true;
@@ -177,7 +184,7 @@ export class CodexAppServer extends EventEmitter {
 
   reconnect() {
     if (this.reconnecting) return this.reconnecting;
-    const reconnecting = this.#reconnect();
+    const reconnecting = this.#reconnect(this.stopGeneration);
     this.reconnecting = reconnecting;
     void reconnecting.then(
       () => {
@@ -190,12 +197,21 @@ export class CodexAppServer extends EventEmitter {
     return reconnecting;
   }
 
-  async #reconnect() {
+  async #reconnect(stopGeneration) {
     const expectedThreadId = this.threadId;
     if (!expectedThreadId) throw new Error("No operator thread exists");
-    await this.stop();
+    if (this.stopGeneration !== stopGeneration) {
+      throw new Error("Codex app-server stopped during reconnect");
+    }
+    await this.#stopChild();
+    if (this.stopGeneration !== stopGeneration) {
+      throw new Error("Codex app-server stopped during reconnect");
+    }
     this.threadId = expectedThreadId;
     await this.start();
+    if (this.stopGeneration !== stopGeneration) {
+      throw new Error("Codex app-server stopped during reconnect");
+    }
     if (this.threadId !== expectedThreadId) {
       throw new Error("App-server reconnect did not preserve the operator thread");
     }
@@ -211,6 +227,7 @@ export class CodexAppServer extends EventEmitter {
       throw new Error("Realtime startup is already in progress");
     }
     this.realtimeStarting = true;
+    const stopGeneration = this.stopGeneration;
 
     const answer = this.#realtimeSdpWaiter();
     try {
@@ -231,6 +248,7 @@ export class CodexAppServer extends EventEmitter {
         sdp: params.sdp,
       };
     } catch (error) {
+      if (this.stopGeneration !== stopGeneration) throw error;
       try {
         // Replacing the app-server generation guarantees that a partially
         // opened transport cannot leak into the next Discord media session.
@@ -424,6 +442,7 @@ export class CodexAppServer extends EventEmitter {
       this.off("thread/realtime/error", onError);
       this.off("thread/realtime/closed", onClosed);
       this.off("disconnected", onDisconnected);
+      this.off("stopRequested", onStopRequested);
     };
     const cancel = () => {
       if (settled) return;
@@ -460,6 +479,12 @@ export class CodexAppServer extends EventEmitter {
           : new Error("Codex app-server disconnected during setup"),
       );
     };
+    const onStopRequested = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(new Error("Codex app-server stopped"));
+    };
     timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -470,6 +495,7 @@ export class CodexAppServer extends EventEmitter {
     this.on("thread/realtime/error", onError);
     this.on("thread/realtime/closed", onClosed);
     this.on("disconnected", onDisconnected);
+    this.on("stopRequested", onStopRequested);
     return { promise, cancel };
   }
 

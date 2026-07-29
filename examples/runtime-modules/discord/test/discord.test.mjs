@@ -107,6 +107,23 @@ test("attention joins and DMs before starting media, then leaves cleanly", async
   await fixture.stop();
 });
 
+test("attention rejects when immediate media startup fails", async () => {
+  const fixture = await createServiceFixture({
+    joinOnAttention: true,
+    bridgeStartError: new Error("realtime negotiation failed"),
+  });
+  await fixture.start();
+
+  await assert.rejects(
+    fixture.service.requestAttention("Jaeger requests attention."),
+    /realtime negotiation failed/,
+  );
+  assert.equal(fixture.bridges[0].stopCalls, 1);
+  assert.equal(fixture.connections[0].destroyCalls, 1);
+  assert.match(fixture.runtime.infos.at(-1), /media startup failed/);
+  await fixture.stop();
+});
+
 test("an unexpected participant ends the call without subscribing to media", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -323,6 +340,8 @@ async function createServiceFixture({
   options = {},
   notificationChannel = null,
   bridgeStartPending = false,
+  bridgeStartError = null,
+  joinOnAttention = false,
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "discord-service-"));
   const tokenFile = join(directory, "token");
@@ -331,6 +350,9 @@ async function createServiceFixture({
     messages: [],
     async send(message) {
       this.messages.push(message);
+      if (joinOnAttention) {
+        voiceChannel.members.set(USER_ID, { id: USER_ID });
+      }
     },
   };
   const voiceChannel = {
@@ -372,7 +394,10 @@ async function createServiceFixture({
         return connection;
       },
       bridgeFactory: () => {
-        const bridge = new FakeBridge({ startPending: bridgeStartPending });
+        const bridge = new FakeBridge({
+          startPending: bridgeStartPending,
+          startError: bridgeStartError,
+        });
         bridges.push(bridge);
         return bridge;
       },
@@ -469,13 +494,15 @@ class FakeBridge extends EventEmitter {
   startCalls = 0;
   stopCalls = 0;
 
-  constructor({ startPending = false } = {}) {
+  constructor({ startPending = false, startError = null } = {}) {
     super();
     this.startPending = startPending;
+    this.startError = startError;
   }
 
   async start() {
     this.startCalls += 1;
+    if (this.startError) throw this.startError;
     if (this.startPending) await new Promise(() => {});
   }
 

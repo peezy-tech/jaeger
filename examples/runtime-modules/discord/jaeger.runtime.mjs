@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { discordModule } from "./discord.mjs";
+import { discordModule } from "./modules/discord/discord.mjs";
 
 const home = homedir();
 
