@@ -302,6 +302,31 @@ test("Yarn Modern installs dependencies with build scripts disabled", async () =
   }
 });
 
+test("rejects symlinked Yarn state before moving dependency data", async () => {
+  const fixture = await registryFixture();
+  try {
+    const outside = path.join(fixture.root, "outside-yarn");
+    await mkdir(path.join(outside, "unplugged"), { recursive: true });
+    await writeFile(path.join(outside, "unplugged", "operator.txt"), "keep\n");
+    await symlink(outside, path.join(fixture.runtimeRoot, ".yarn"));
+
+    await assert.rejects(
+      addModules({
+        root: fixture.runtimeRoot,
+        references: [`${fixture.catalogPath}#alpha`],
+        install: false,
+      }),
+      /unsafe path/,
+    );
+    assert.equal(
+      await readFile(path.join(outside, "unplugged", "operator.txt"), "utf8"),
+      "keep\n",
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("serializes concurrent module additions without losing lock state", async () => {
   const fixture = await registryFixture();
   try {
@@ -354,6 +379,77 @@ test("recovers a module mutation lock whose owner process exited", async () => {
       ["alpha"],
     );
     await assert.rejects(readFile(lockPath), hasCode("ENOENT"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rolls back an interrupted durable module transaction before the next mutation", async () => {
+  const fixture = await registryFixture();
+  try {
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+    const packagePath = path.join(fixture.runtimeRoot, "package.json");
+    const lockPath = path.join(fixture.runtimeRoot, "modules.lock.json");
+    const packageBefore = await readFile(packagePath);
+    const lockBefore = await readFile(lockPath);
+    const staging = path.join(fixture.runtimeRoot, ".modules-stage-interrupted");
+    const fileNames = [
+      "package.json",
+      "npm-shrinkwrap.json",
+      "package-lock.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      ".pnp.cjs",
+      ".pnp.loader.mjs",
+      ".yarn/build-state.yml",
+      ".yarn/install-state.gz",
+      "modules.lock.json",
+    ];
+    await mkdir(path.join(staging, "package-files"), { recursive: true });
+    const files = [];
+    for (const [index, name] of fileNames.entries()) {
+      const target = path.join(fixture.runtimeRoot, name);
+      try {
+        const contents = await readFile(target);
+        await writeFile(
+          path.join(staging, "package-files", String(index)),
+          contents,
+        );
+        files.push({ name, existed: true, mode: 0o600 });
+      } catch (error) {
+        if (!hasCode("ENOENT")(error)) throw error;
+        files.push({ name, existed: false });
+      }
+    }
+    await writeJson(path.join(staging, "transaction.json"), {
+      schemaVersion: 1,
+      phase: "active",
+      action: "add",
+      modules: [{ name: "beta", existed: false }],
+      files,
+      directories: [],
+    });
+
+    await writeFile(packagePath, '{"private":false}\n');
+    await writeFile(lockPath, '{"invalid":"interrupted"}\n');
+    const interruptedModule = path.join(
+      fixture.runtimeRoot,
+      "modules",
+      "beta",
+    );
+    await mkdir(interruptedModule, { recursive: true });
+    await writeFile(path.join(interruptedModule, "beta.mjs"), "partial\n");
+
+    await syncModules({ root: fixture.runtimeRoot, install: false });
+
+    assert.deepEqual(await readFile(packagePath), packageBefore);
+    assert.deepEqual(await readFile(lockPath), lockBefore);
+    await assert.rejects(readFile(path.join(interruptedModule, "beta.mjs")), hasCode("ENOENT"));
+    await assert.rejects(readFile(staging), hasCode("ENOENT"));
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -792,6 +888,38 @@ test("rejects module file traversal before reading source bytes", async () => {
     await assert.rejects(resolveModuleItem(manifest), /escapes or is not normalized/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects percent-encoded remote traversal before fetching source bytes", async () => {
+  const originalFetch = globalThis.fetch;
+  const fetched: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    fetched.push(url);
+    if (url === "https://registry.example/modules/jaeger.module.json") {
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          name: "escape",
+          files: ["%2e%2e/private.mjs"],
+          dependencies: {},
+        }),
+        { status: 200 },
+      );
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    await assert.rejects(
+      resolveModuleItem("https://registry.example/modules/jaeger.module.json"),
+      /escapes or is not normalized/,
+    );
+    assert.deepEqual(fetched, [
+      "https://registry.example/modules/jaeger.module.json",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

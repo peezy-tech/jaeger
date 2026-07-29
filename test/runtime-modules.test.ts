@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -16,6 +17,7 @@ import { initialize, resolve } from "../src/runtime-module-loader.js";
 import {
   loadRuntimeModuleConfig,
   RuntimeModuleHost,
+  type RuntimeModule,
   type RuntimeModuleConfig,
   type RuntimeModuleOperations,
 } from "../src/runtime-modules.js";
@@ -199,6 +201,63 @@ test("modules validate reads the local project for every runtime selection", asy
 
     assert.match(String(digests[0]), /^[a-f0-9]{64}$/);
     assert.equal(new Set(digests).size, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("modules mutation options cannot be consumed as the --root value", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-root-option-"));
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [cliPath, "modules", "sync", "--root", "--dry-run"],
+        { cwd: root },
+      ),
+      /--root requires a value/,
+    );
+    await assert.rejects(
+      readFile(path.join(root, "--dry-run", "package.json")),
+      { code: "ENOENT" },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime config generations receive distinct durable consumer identities", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-"));
+  const module: RuntimeModule = {
+    name: "fixture",
+    setup(runtime) {
+      runtime.events.consume("run.terminal", async () => {});
+    },
+  };
+  try {
+    for (const digest of ["a".repeat(64), "b".repeat(64)]) {
+      const host = new RuntimeModuleHost({
+        stateDir: root,
+        config: {
+          version: 1,
+          path: path.join(root, "jaeger.runtime.mjs"),
+          digest,
+          modules: [module],
+        },
+        operations,
+      });
+      await host.initialize();
+      await host.stop();
+    }
+    assert.deepEqual(
+      (
+        await readdir(path.join(root, ".modules", "fixture", "events"))
+      ).sort(),
+      [
+        `fixture-1-${"a".repeat(16)}`,
+        `fixture-1-${"b".repeat(16)}`,
+      ],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

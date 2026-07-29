@@ -29,6 +29,12 @@ const MODULE_LOCK_FILE = "modules.lock.json";
 const MODULE_MUTATION_LOCK_FILE = ".modules-mutation.lock";
 const MODULE_DIRECTORY = "modules";
 const RUNTIME_CONFIG_FILE = "jaeger.runtime.mjs";
+const MODULE_TRANSACTION_FILE = "transaction.json";
+const MODULE_TRANSACTION_PREFIXES = [
+  ".modules-stage-",
+  ".modules-remove-",
+  ".modules-sync-",
+] as const;
 const MAX_MODULE_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_MODULE_BYTES = 25 * 1024 * 1024;
 const MODULE_REGISTRY_CODE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
@@ -164,7 +170,7 @@ interface PackageReconciliation {
 
 interface FileSnapshot {
   readonly path: string;
-  readonly contents?: Buffer;
+  readonly backup?: string;
   readonly mode?: number;
 }
 
@@ -176,6 +182,25 @@ interface DirectorySnapshot {
 interface PackageSnapshot {
   readonly files: readonly FileSnapshot[];
   readonly directories: readonly DirectorySnapshot[];
+}
+
+interface ModuleTransaction {
+  readonly schemaVersion: 1;
+  readonly phase: "active" | "committed";
+  readonly action: "add" | "remove" | "sync";
+  readonly modules: readonly {
+    readonly name: string;
+    readonly existed: boolean;
+  }[];
+  readonly files: readonly {
+    readonly name: string;
+    readonly existed: boolean;
+    readonly mode?: number;
+  }[];
+  readonly directories: readonly {
+    readonly name: string;
+    readonly existed: boolean;
+  }[];
 }
 
 interface RollbackFailure {
@@ -302,7 +327,10 @@ export async function addModules(
   await assertSafeModuleProject(root, true);
   if (options.dryRun) return await addModulesUnlocked(options);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  return await withModuleMutationLock(root, async () => await addModulesUnlocked(options));
+  return await withModuleMutationLock(root, async () => {
+    await recoverModuleTransactions(root);
+    return await addModulesUnlocked(options);
+  });
 }
 
 async function addModulesUnlocked(
@@ -357,7 +385,18 @@ async function addModulesUnlocked(
   if (options.dryRun) return result;
 
   const staging = await mkdtemp(path.join(root, ".modules-stage-"));
-  const snapshots = await snapshotPackageState(root, staging, shouldInstall);
+  const snapshots = await snapshotPackageState(
+    root,
+    staging,
+    shouldInstall,
+    "add",
+    await Promise.all(
+      names.map(async (name) => ({
+        name,
+        existed: await pathExists(path.join(root, MODULE_DIRECTORY, name)),
+      })),
+    ),
+  );
   const promoted: Array<{ readonly target: string; readonly backup?: string }> = [];
   let preserveStaging = false;
   try {
@@ -392,6 +431,7 @@ async function addModulesUnlocked(
       modules: sortRecord(nextModules),
       dependencies: reconciliation.dependencies,
     });
+    await markModuleTransactionCommitted(staging);
   } catch (error) {
     const failures: RollbackFailure[] = [];
     for (const entry of promoted.reverse()) {
@@ -420,7 +460,10 @@ export async function removeModules(
   const root = path.resolve(options.root);
   await assertSafeModuleProject(root, false);
   if (options.dryRun) return await removeModulesUnlocked(options);
-  return await withModuleMutationLock(root, async () => await removeModulesUnlocked(options));
+  return await withModuleMutationLock(root, async () => {
+    await recoverModuleTransactions(root);
+    return await removeModulesUnlocked(options);
+  });
 }
 
 async function removeModulesUnlocked(
@@ -469,7 +512,18 @@ async function removeModulesUnlocked(
   if (options.dryRun) return result;
 
   const staging = await mkdtemp(path.join(root, ".modules-remove-"));
-  const snapshots = await snapshotPackageState(root, staging, shouldInstall);
+  const snapshots = await snapshotPackageState(
+    root,
+    staging,
+    shouldInstall,
+    "remove",
+    await Promise.all(
+      options.names.map(async (name) => ({
+        name,
+        existed: await pathExists(path.join(root, MODULE_DIRECTORY, name)),
+      })),
+    ),
+  );
   const removed: Array<{ readonly target: string; readonly backup: string }> = [];
   let preserveStaging = false;
   try {
@@ -493,6 +547,7 @@ async function removeModulesUnlocked(
       modules: sortRecord(nextModules),
       dependencies: reconciliation.dependencies,
     });
+    await markModuleTransactionCommitted(staging);
   } catch (error) {
     const failures: RollbackFailure[] = [];
     for (const entry of removed.reverse()) {
@@ -523,7 +578,10 @@ export async function syncModules(
   await assertSafeModuleProject(root, true);
   if (options.dryRun) return await syncModulesUnlocked(options);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  return await withModuleMutationLock(root, async () => await syncModulesUnlocked(options));
+  return await withModuleMutationLock(root, async () => {
+    await recoverModuleTransactions(root);
+    return await syncModulesUnlocked(options);
+  });
 }
 
 async function syncModulesUnlocked(
@@ -553,7 +611,13 @@ async function syncModulesUnlocked(
   };
   if (options.dryRun) return result;
   const staging = await mkdtemp(path.join(root, ".modules-sync-"));
-  const snapshots = await snapshotPackageState(root, staging, shouldInstall);
+  const snapshots = await snapshotPackageState(
+    root,
+    staging,
+    shouldInstall,
+    "sync",
+    [],
+  );
   let preserveStaging = false;
   try {
     await writeJsonAtomic(path.join(root, "package.json"), reconciliation.packageJson);
@@ -565,6 +629,7 @@ async function syncModulesUnlocked(
       modules: currentLock.modules,
       dependencies: reconciliation.dependencies,
     });
+    await markModuleTransactionCommitted(staging);
   } catch (error) {
     const failures: RollbackFailure[] = [];
     await restorePackageSnapshot(snapshots, failures);
@@ -1273,14 +1338,43 @@ function normalizeLocator(locator: string): string {
 
 function resolveRelativeLocator(base: string, relativeInput: string): string {
   const relative = safeModuleRelativePath(relativeInput, "Module source path");
-  if (/^https:\/\//i.test(base)) return new URL(relative, base).toString();
+  if (/^https:\/\//i.test(base)) {
+    return resolveContainedRemoteLocator(base, relative, "Module source path");
+  }
   return path.resolve(path.dirname(base), ...relative.split("/"));
 }
 
 function resolveCatalogRelativeLocator(base: string, relativeInput: string): string {
   const relative = safeCatalogRelativePath(relativeInput, "Registry item path");
-  if (/^https:\/\//i.test(base)) return new URL(relative, base).toString();
+  if (/^https:\/\//i.test(base)) {
+    return resolveContainedRemoteLocator(base, relative, "Registry item path");
+  }
   return path.resolve(path.dirname(base), ...relative.split("/"));
+}
+
+function resolveContainedRemoteLocator(
+  base: string,
+  relative: string,
+  label: string,
+): string {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(relative);
+  } catch (error) {
+    throw new Error(`${label} contains invalid percent encoding: ${relative}`, {
+      cause: error,
+    });
+  }
+  safeModuleRelativePath(decoded, label);
+  const baseDirectory = new URL(".", base);
+  const resolved = new URL(relative, base);
+  if (
+    resolved.origin !== baseDirectory.origin ||
+    !resolved.pathname.startsWith(baseDirectory.pathname)
+  ) {
+    throw new Error(`${label} escapes its remote registry: ${relative}`);
+  }
+  return resolved.toString();
 }
 
 async function readJsonDocument(
@@ -1607,32 +1701,64 @@ async function snapshotPackageState(
   root: string,
   staging: string,
   snapshotInstalledState: boolean,
+  action: ModuleTransaction["action"],
+  modules: ModuleTransaction["modules"],
 ): Promise<PackageSnapshot> {
-  const files = await Promise.all(
-    [
-      "package.json",
-      "npm-shrinkwrap.json",
-      "package-lock.json",
-      "pnpm-lock.yaml",
-      "yarn.lock",
-      ".pnp.cjs",
-      ".pnp.loader.mjs",
-      ".yarn/build-state.yml",
-      ".yarn/install-state.gz",
-    ].map(
-      async (name): Promise<FileSnapshot> => {
-        const target = path.join(root, name);
-        try {
-          const targetStat = await stat(target);
-          return { path: target, contents: await readFile(target), mode: targetStat.mode & 0o777 };
-        } catch (error) {
-          if (hasCode(error, "ENOENT")) return { path: target };
-          throw error;
-        }
-      },
-    ),
-  );
+  const fileNames = [
+    "package.json",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    ".pnp.cjs",
+    ".pnp.loader.mjs",
+    ".yarn/build-state.yml",
+    ".yarn/install-state.gz",
+    MODULE_LOCK_FILE,
+  ] as const;
+  const files: FileSnapshot[] = [];
+  for (const [index, name] of fileNames.entries()) {
+    const target = path.join(root, name);
+    try {
+      const targetStat = await stat(target);
+      const backup = path.join(staging, "package-files", String(index));
+      await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
+      await writeFile(backup, await readFile(target), { mode: 0o600 });
+      files.push({
+        path: target,
+        backup,
+        mode: targetStat.mode & 0o777,
+      });
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) {
+        files.push({ path: target });
+        continue;
+      }
+      throw error;
+    }
+  }
+  const directoryNames = snapshotInstalledState
+    ? ["node_modules", ".yarn/cache", ".yarn/unplugged"] as const
+    : [];
   const directories: DirectorySnapshot[] = [];
+  const directoryStates: ModuleTransaction["directories"][number][] = [];
+  for (const name of directoryNames) {
+    const target = path.join(root, name);
+    directoryStates.push({ name, existed: await pathExists(target) });
+  }
+  await writeJsonAtomic(path.join(staging, MODULE_TRANSACTION_FILE), {
+    schemaVersion: 1,
+    phase: "active",
+    action,
+    modules,
+    files: fileNames.map((name, index) => ({
+      name,
+      existed: files[index]?.backup !== undefined,
+      ...(files[index]?.mode === undefined ? {} : { mode: files[index].mode }),
+    })),
+    directories: directoryStates,
+  } satisfies ModuleTransaction);
+
   if (!snapshotInstalledState) return { files, directories };
   try {
     for (
@@ -1650,7 +1776,9 @@ async function snapshotPackageState(
       const backup = path.join(staging, "package-state", String(index));
       await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
       if (name === ".yarn/cache") {
-        await cp(target, backup, { recursive: true, preserveTimestamps: true });
+        const copyTarget = `${backup}.copy-${randomUUID()}`;
+        await cp(target, copyTarget, { recursive: true, preserveTimestamps: true });
+        await rename(copyTarget, backup);
       } else {
         await rename(target, backup);
       }
@@ -1664,16 +1792,20 @@ async function snapshotPackageState(
 }
 
 async function restoreFileSnapshot(snapshot: FileSnapshot): Promise<void> {
-  if (snapshot.contents === undefined) {
+  if (snapshot.backup === undefined) {
     await rm(snapshot.path, { force: true });
     return;
   }
   // A failed install can delete the parent directory of a nested snapshot such
   // as .yarn/install-state.gz, so recreate it before writing the contents back.
   await mkdir(path.dirname(snapshot.path), { recursive: true, mode: 0o700 });
-  await writeFile(snapshot.path, snapshot.contents, {
+  const temporary = `${snapshot.path}.restore-${process.pid}-${randomUUID()}`;
+  await writeFile(temporary, await readFile(snapshot.backup), {
     mode: snapshot.mode ?? 0o600,
+    flag: "wx",
   });
+  await rename(temporary, snapshot.path);
+  await chmod(snapshot.path, snapshot.mode ?? 0o600);
 }
 
 async function restorePackageSnapshot(
@@ -1731,6 +1863,200 @@ function rollbackError(
   );
 }
 
+async function markModuleTransactionCommitted(staging: string): Promise<void> {
+  const transaction = await readModuleTransaction(staging);
+  await writeJsonAtomic(path.join(staging, MODULE_TRANSACTION_FILE), {
+    ...transaction,
+    phase: "committed",
+  } satisfies ModuleTransaction);
+}
+
+async function recoverModuleTransactions(root: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!MODULE_TRANSACTION_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) {
+      continue;
+    }
+    const staging = path.join(root, entry.name);
+    const stagingStat = await lstat(staging);
+    if (!entry.isDirectory() || stagingStat.isSymbolicLink()) {
+      throw new Error(`Unsafe module transaction path requires operator recovery: ${staging}`);
+    }
+    let transaction: ModuleTransaction;
+    try {
+      transaction = await readModuleTransaction(staging);
+    } catch (error) {
+      if (hasCode(error, "ENOENT")) {
+        // The journal is published before any project state is moved. A stage
+        // without one is therefore an interrupted preparation only.
+        await rm(staging, { recursive: true, force: true });
+        continue;
+      }
+      throw error;
+    }
+    if (transaction.phase === "committed") {
+      await rm(staging, { recursive: true, force: true });
+      continue;
+    }
+    await recoverModuleSourceMutation(root, staging, transaction);
+    await recoverPackageSnapshot(root, staging, transaction);
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function recoverModuleSourceMutation(
+  root: string,
+  staging: string,
+  transaction: ModuleTransaction,
+): Promise<void> {
+  for (const module of [...transaction.modules].reverse()) {
+    const target = path.join(root, MODULE_DIRECTORY, module.name);
+    if (transaction.action === "add") {
+      const backup = path.join(staging, "old", module.name);
+      if (await pathExists(backup)) {
+        await rm(target, { recursive: true, force: true });
+        await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+        await rename(backup, target);
+      } else if (!module.existed) {
+        const staged = path.join(staging, "new", module.name);
+        if (!await pathExists(staged)) {
+          await rm(target, { recursive: true, force: true });
+        }
+      }
+      continue;
+    }
+    if (transaction.action === "remove") {
+      const backup = path.join(staging, module.name);
+      if (await pathExists(backup)) {
+        await rm(target, { recursive: true, force: true });
+        await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+        await rename(backup, target);
+      }
+    }
+  }
+}
+
+async function recoverPackageSnapshot(
+  root: string,
+  staging: string,
+  transaction: ModuleTransaction,
+): Promise<void> {
+  for (const [index, file] of transaction.files.entries()) {
+    await restoreFileSnapshot({
+      path: path.join(root, file.name),
+      ...(file.existed
+        ? { backup: path.join(staging, "package-files", String(index)) }
+        : {}),
+      ...(file.mode === undefined ? {} : { mode: file.mode }),
+    });
+  }
+  for (let index = transaction.directories.length - 1; index >= 0; index -= 1) {
+    const directory = transaction.directories[index]!;
+    const target = path.join(root, directory.name);
+    const backup = path.join(staging, "package-state", String(index));
+    if (await pathExists(backup)) {
+      await restoreDirectorySnapshot({ path: target, backup });
+    } else if (!directory.existed) {
+      await restoreDirectorySnapshot({ path: target });
+    }
+  }
+}
+
+async function readModuleTransaction(staging: string): Promise<ModuleTransaction> {
+  const value = recordValue(
+    JSON.parse(await readFile(path.join(staging, MODULE_TRANSACTION_FILE), "utf8")),
+    "module transaction",
+  );
+  if (
+    value.schemaVersion !== 1 ||
+    !["active", "committed"].includes(String(value.phase)) ||
+    !["add", "remove", "sync"].includes(String(value.action)) ||
+    !Array.isArray(value.modules) ||
+    !Array.isArray(value.files) ||
+    !Array.isArray(value.directories)
+  ) {
+    throw new Error(`Invalid module transaction journal: ${staging}`);
+  }
+  const modules = value.modules.map((entry, index) => {
+    const item = recordValue(entry, `module transaction module ${index}`);
+    if (typeof item.existed !== "boolean") {
+      throw new Error(`Invalid module transaction module ${index}: ${staging}`);
+    }
+    return {
+      name: moduleName(item.name, `module transaction module ${index}`),
+      existed: item.existed,
+    };
+  });
+  const allowedFiles = new Set([
+    "package.json",
+    "npm-shrinkwrap.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    ".pnp.cjs",
+    ".pnp.loader.mjs",
+    ".yarn/build-state.yml",
+    ".yarn/install-state.gz",
+    MODULE_LOCK_FILE,
+  ]);
+  const files = value.files.map((entry, index) => {
+    const item = recordValue(entry, `module transaction file ${index}`);
+    if (
+      typeof item.name !== "string" ||
+      !allowedFiles.has(item.name) ||
+      typeof item.existed !== "boolean" ||
+      (item.mode !== undefined &&
+        (typeof item.mode !== "number" ||
+          !Number.isInteger(item.mode) ||
+          item.mode < 0 ||
+          item.mode > 0o777))
+    ) {
+      throw new Error(`Invalid module transaction file ${index}: ${staging}`);
+    }
+    return {
+      name: item.name,
+      existed: item.existed,
+      ...(item.mode === undefined ? {} : { mode: Number(item.mode) }),
+    };
+  });
+  const allowedDirectories = new Set([
+    "node_modules",
+    ".yarn/cache",
+    ".yarn/unplugged",
+  ]);
+  const directories = value.directories.map((entry, index) => {
+    const item = recordValue(entry, `module transaction directory ${index}`);
+    if (
+      typeof item.name !== "string" ||
+      !allowedDirectories.has(item.name) ||
+      typeof item.existed !== "boolean"
+    ) {
+      throw new Error(`Invalid module transaction directory ${index}: ${staging}`);
+    }
+    return { name: item.name, existed: item.existed };
+  });
+  assertUnique(modules.map(({ name }) => name), "Module transaction contains duplicate module");
+  assertUnique(files.map(({ name }) => name), "Module transaction contains duplicate file");
+  assertUnique(
+    directories.map(({ name }) => name),
+    "Module transaction contains duplicate directory",
+  );
+  return {
+    schemaVersion: 1,
+    phase: value.phase as ModuleTransaction["phase"],
+    action: value.action as ModuleTransaction["action"],
+    modules,
+    files,
+    directories,
+  };
+}
+
 async function pathExists(target: string): Promise<boolean> {
   try {
     await lstat(target);
@@ -1773,11 +2099,19 @@ async function assertSafeModuleProject(
   }
   for (const relative of [
     MODULE_DIRECTORY,
+    ".yarn",
+    ".yarn/cache",
+    ".yarn/unplugged",
     "package.json",
     "npm-shrinkwrap.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
+    ".yarnrc.yml",
+    ".pnp.cjs",
+    ".pnp.loader.mjs",
+    ".yarn/build-state.yml",
+    ".yarn/install-state.gz",
     MODULE_LOCK_FILE,
     MODULE_MUTATION_LOCK_FILE,
   ]) {
@@ -1785,7 +2119,11 @@ async function assertSafeModuleProject(
     try {
       const targetStat = await lstat(target);
       const valid =
-        relative === MODULE_DIRECTORY || relative === MODULE_MUTATION_LOCK_FILE
+        relative === MODULE_DIRECTORY ||
+        relative === ".yarn" ||
+        relative === ".yarn/cache" ||
+        relative === ".yarn/unplugged" ||
+        relative === MODULE_MUTATION_LOCK_FILE
           ? targetStat.isDirectory() && !targetStat.isSymbolicLink()
           : targetStat.isFile() && !targetStat.isSymbolicLink();
       if (!valid) {

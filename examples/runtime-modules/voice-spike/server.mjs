@@ -86,13 +86,18 @@ const bridge = new CodexAppServer({
   stateFile,
 });
 const eventClients = new Map();
+let activeRealtimeSessionId = null;
+let startingRealtimeSessionId = null;
 
 bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
+  if (method === "thread/realtime/closed") activeRealtimeSessionId = null;
   void broadcast(method, params);
 });
 bridge.on("ready", (snapshot) => void broadcast("bridge.ready", snapshot));
 bridge.on("disconnected", (error) => {
+  activeRealtimeSessionId = null;
+  startingRealtimeSessionId = null;
   void broadcast("bridge.disconnected", { message: error.message });
 });
 bridge.on("serverRequestDeclined", ({ method }) => {
@@ -176,11 +181,42 @@ export const server = createServer(async (request, response) => {
 
     if (request.method === "POST" && url.pathname === "/api/session") {
       const body = await readJson(request);
-      const answer = await bridge.startRealtime({
-        sdp: body.sdp,
-        voice: body.voice,
+      const sessionId = assertRealtimeSessionId(body.sessionId);
+      if (activeRealtimeSessionId || startingRealtimeSessionId) {
+        const error = new Error("A voice session is already active");
+        error.statusCode = 409;
+        throw error;
+      }
+      startingRealtimeSessionId = sessionId;
+      response.once("close", () => {
+        if (!response.writableFinished) {
+          void stopOwnedRealtimeSession(sessionId).catch((error) => {
+            process.stderr.write(
+              `Lost voice response cleanup failed: ${error.message}\n`,
+            );
+          });
+        }
       });
-      return sendJson(response, 200, answer);
+      try {
+        const answer = await bridge.startRealtime({
+          sdp: body.sdp,
+          voice: body.voice,
+        });
+        if (startingRealtimeSessionId !== sessionId) {
+          await bridge.stopRealtime().catch(() => {});
+          const error = new Error("Voice session was cancelled during negotiation");
+          error.statusCode = 409;
+          throw error;
+        }
+        startingRealtimeSessionId = null;
+        activeRealtimeSessionId = sessionId;
+        return sendJson(response, 200, { ...answer, sessionId });
+      } catch (error) {
+        if (startingRealtimeSessionId === sessionId) {
+          startingRealtimeSessionId = null;
+        }
+        throw error;
+      }
     }
 
     if (request.method === "POST" && url.pathname === "/api/text") {
@@ -190,11 +226,16 @@ export const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/api/stop") {
-      await bridge.stopRealtime();
-      return sendJson(response, 200, { stopped: true });
+      const body = await readJson(request);
+      const stopped = await stopOwnedRealtimeSession(
+        assertRealtimeSessionId(body.sessionId),
+      );
+      return sendJson(response, 200, { stopped });
     }
 
     if (request.method === "POST" && url.pathname === "/api/reconnect") {
+      activeRealtimeSessionId = null;
+      startingRealtimeSessionId = null;
       const before = bridge.snapshot();
       const after = await bridge.reconnect();
       return sendJson(response, 200, {
@@ -223,6 +264,29 @@ export const server = createServer(async (request, response) => {
     });
   }
 });
+
+function assertRealtimeSessionId(value) {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    const error = new Error("A valid voice session ID is required");
+    error.statusCode = 400;
+    throw error;
+  }
+  return value;
+}
+
+async function stopOwnedRealtimeSession(sessionId) {
+  const ownsSession =
+    activeRealtimeSessionId === sessionId ||
+    startingRealtimeSessionId === sessionId;
+  if (!ownsSession) return false;
+  if (activeRealtimeSessionId === sessionId) activeRealtimeSessionId = null;
+  if (startingRealtimeSessionId === sessionId) startingRealtimeSessionId = null;
+  await bridge.stopRealtime();
+  return true;
+}
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await bridge.start();

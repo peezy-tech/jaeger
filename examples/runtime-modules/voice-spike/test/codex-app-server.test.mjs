@@ -44,11 +44,55 @@ test("reconnect resumes the exact persisted operator thread", async () => {
   assert.equal(processes.length, 2);
   assert.equal(result.threadId, originalThreadId);
   assert.equal(result.generation, 2);
-  assert.equal(processes[1].requests.at(-1).method, "thread/resume");
-  assert.equal(
-    processes[1].requests.at(-1).params.threadId,
-    originalThreadId,
+  const resume = processes[1].requests.find(
+    ({ method }) => method === "thread/resume",
   );
+  assert.equal(resume.params.threadId, originalThreadId);
+  const policyTurn = processes[1].requests.find(
+    ({ method }) => method === "turn/start",
+  );
+  assert.deepEqual(policyTurn.params.sandboxPolicy, {
+    type: "readOnly",
+    access: {
+      type: "restricted",
+      includePlatformDefaults: true,
+      readableRoots: [],
+    },
+  });
+  await bridge.stop();
+});
+
+test("the app-server disables ambient tools before exposing the status tool", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-tools-"));
+  let spawnedArgs;
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: (_bin, args) => {
+      spawnedArgs = args;
+      return createMockProcess();
+    },
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+
+  for (const feature of [
+    "shell_tool",
+    "apps",
+    "plugins",
+    "multi_agent",
+    "goals",
+    "hooks",
+  ]) {
+    const index = spawnedArgs.findIndex(
+      (argument, position) =>
+        argument === feature && spawnedArgs[position - 1] === "--disable",
+    );
+    assert.notEqual(index, -1, feature);
+  }
+  assert.equal(spawnedArgs.includes('web_search="disabled"'), true);
+  assert.equal(spawnedArgs.includes("mcp_servers={}"), true);
   await bridge.stop();
 });
 
@@ -312,12 +356,16 @@ test("a concurrent WebRTC start is rejected before it can share an SDP waiter", 
 
 test("a rejected realtime start cancels its SDP waiter", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-reject-"));
-  const child = createMockProcess();
-  child.rejectRealtimeStart = true;
+  const processes = [];
   const bridge = new CodexAppServer({
     cwd: "/tmp",
     stateFile: join(directory, "operator.json"),
-    spawnProcess: () => child,
+    spawnProcess: () => {
+      const child = createMockProcess();
+      child.rejectRealtimeStart = processes.length === 0;
+      processes.push(child);
+      return child;
+    },
     requestTimeoutMs: 1_000,
   });
 
@@ -329,32 +377,53 @@ test("a rejected realtime start cancels its SDP waiter", async () => {
   assert.equal(bridge.listenerCount("thread/realtime/sdp"), 0);
   assert.equal(bridge.listenerCount("thread/realtime/error"), 0);
   assert.equal(bridge.listenerCount("thread/realtime/closed"), 0);
+  assert.equal(bridge.generation, 2);
+  processes[0].stdout.write(
+    `${JSON.stringify({
+      method: "thread/realtime/sdp",
+      params: {
+        threadId: bridge.threadId,
+        sdp: "v=0\r\nstale-answer",
+      },
+    })}\n`,
+  );
+  const retry = await bridge.startRealtime({
+    sdp: "v=0\r\nretry-offer",
+  });
+  assert.equal(retry.sdp, "v=0\r\nmock-answer");
   await bridge.stop();
 });
 
 test("an app-server disconnect rejects a pending realtime SDP waiter", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-disconnect-"));
-  const child = createMockProcess();
-  child.deferRealtimeSdp = true;
+  const processes = [];
   const bridge = new CodexAppServer({
     cwd: "/tmp",
     stateFile: join(directory, "operator.json"),
-    spawnProcess: () => child,
+    spawnProcess: () => {
+      const child = createMockProcess();
+      child.deferRealtimeSdp = processes.length === 0;
+      processes.push(child);
+      return child;
+    },
     requestTimeoutMs: 1_000,
   });
 
   await bridge.start();
   const realtime = bridge.startRealtime({ sdp: "v=0\r\nmock-offer" });
-  await waitForRequest(child, "thread/realtime/start");
+  await waitForRequest(processes[0], "thread/realtime/start");
   await new Promise((resolve) => setImmediate(resolve));
-  child.exitCode = 1;
-  child.emit("exit", 1, null);
+  processes[0].exitCode = 1;
+  processes[0].emit("exit", 1, null);
 
   await assert.rejects(realtime, /Codex app-server exited \(1\)/);
   assert.equal(bridge.listenerCount("thread/realtime/sdp"), 0);
   assert.equal(bridge.listenerCount("thread/realtime/error"), 0);
   assert.equal(bridge.listenerCount("thread/realtime/closed"), 0);
   assert.equal(bridge.listenerCount("disconnected"), 0);
+  assert.equal(bridge.connected, true);
+  assert.equal(bridge.generation, 2);
+  await bridge.stop();
 });
 
 async function waitForRequest(child, method) {

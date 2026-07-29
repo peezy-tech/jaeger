@@ -35,6 +35,7 @@ const state = {
   inputStream: null,
   peer: null,
   sessionActive: false,
+  sessionId: null,
   transcriptDrafts: new Map(),
 };
 
@@ -144,7 +145,7 @@ elements.typedProbe.addEventListener("submit", async (event) => {
 
 async function startSession() {
   elements.talkButton.disabled = true;
-  let upstreamSessionMayBeActive = false;
+  const requestedSessionId = crypto.randomUUID();
   setSignal("Requesting microphone");
   try {
     state.inputStream = await navigator.mediaDevices.getUserMedia({
@@ -182,13 +183,14 @@ async function startSession() {
     await state.peer.setLocalDescription(offer);
     await waitForIceGathering(state.peer);
     setSignal("Negotiating Codex realtime");
-    upstreamSessionMayBeActive = true;
     const answer = await post("api/session", {
       sdp: state.peer.localDescription.sdp,
       voice: "juniper",
+      sessionId: requestedSessionId,
     });
     await state.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
 
+    state.sessionId = answer.sessionId;
     state.sessionActive = true;
     elements.talkButton.classList.add("active");
     elements.talkLabel.textContent = "End session";
@@ -196,9 +198,7 @@ async function startSession() {
     setSignal("Listening");
     return true;
   } catch (error) {
-    if (upstreamSessionMayBeActive) {
-      await post("api/stop", {}).catch(() => {});
-    }
+    await post("api/stop", { sessionId: requestedSessionId }).catch(() => {});
     closePeer();
     setSignal(error.message, true);
     return false;
@@ -272,7 +272,9 @@ function showCallNotice(message, error = false) {
 async function stopSession() {
   elements.talkButton.disabled = true;
   try {
-    await post("api/stop", {});
+    if (state.sessionId) {
+      await post("api/stop", { sessionId: state.sessionId });
+    }
   } catch {
     // Local teardown still matters if the upstream session already closed.
   }
@@ -300,6 +302,7 @@ function closePeer() {
 
 function resetSessionUi() {
   state.sessionActive = false;
+  state.sessionId = null;
   elements.talkButton.classList.remove("active");
   elements.talkLabel.textContent = "Open microphone";
   elements.muteButton.textContent = "Mute mic";

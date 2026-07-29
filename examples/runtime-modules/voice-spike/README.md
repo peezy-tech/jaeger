@@ -177,7 +177,10 @@ delegation and does not replace the microphone acceptance test.
 
 ## Authority boundary
 
-The Codex thread uses `sandbox: "read-only"` and `approvalPolicy: "never"`.
-Its developer instructions allow only Jaeger status and inspection commands.
-Any server-initiated approval request is declined. This is a compatibility
-guard, not the authority model for the future runtime module.
+The Codex app-server starts with its shell, apps, plugins, subagents, hooks,
+goals, MCP servers, and web search disabled. Every start and resume persists a
+restricted read-only sandbox policy with no project or home-directory roots.
+The only operational tool exposed to the thread is the module-owned,
+zero-argument `jaeger_status` dynamic tool, which invokes the fixed
+`jaeger status --json` command. Approval policy remains `never`, and unknown
+server requests are declined.

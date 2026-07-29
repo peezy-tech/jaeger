@@ -805,7 +805,7 @@ function parseModuleMutationArgs(
     }
     if (option === "--root") {
       const value = argv[++index];
-      if (!value) throw new Error("--root requires a value");
+      if (!value || value.startsWith("-")) throw new Error("--root requires a value");
       root = path.resolve(value);
       continue;
     }
@@ -830,7 +830,7 @@ function parseModuleRootArgs(argv: string[]): {
     const option = argv[index];
     if (option === "--root") {
       const value = argv[++index];
-      if (!value) throw new Error("--root requires a value");
+      if (!value || value.startsWith("-")) throw new Error("--root requires a value");
       root = path.resolve(value);
     } else if (option) {
       remaining.push(option);

@@ -7,6 +7,35 @@ import readline from "node:readline";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_FORCE_STOP_TIMEOUT_MS = 2_000;
+const OPERATOR_SANDBOX_POLICY = {
+  type: "readOnly",
+  access: {
+    type: "restricted",
+    includePlatformDefaults: true,
+    readableRoots: [],
+  },
+};
+const APP_SERVER_ARGS = [
+  "app-server",
+  "--enable",
+  "realtime_conversation",
+  "--disable",
+  "shell_tool",
+  "--disable",
+  "apps",
+  "--disable",
+  "plugins",
+  "--disable",
+  "multi_agent",
+  "--disable",
+  "goals",
+  "--disable",
+  "hooks",
+  "-c",
+  'web_search="disabled"',
+  "-c",
+  "mcp_servers={}",
+];
 
 export const OPERATOR_INSTRUCTIONS = `You are the read-only Jaeger voice operator for a compatibility spike.
 
@@ -65,7 +94,7 @@ export class CodexAppServer extends EventEmitter {
     this.stopping = false;
     const child = this.spawnProcess(
       this.codexBin,
-      ["app-server", "--enable", "realtime_conversation"],
+      APP_SERVER_ARGS,
       {
         cwd: this.cwd,
         env: { ...process.env, ...this.childEnv },
@@ -165,6 +194,19 @@ export class CodexAppServer extends EventEmitter {
 
       const params = await answer.promise;
       return { sdp: params.sdp, threadId: this.threadId };
+    } catch (error) {
+      try {
+        // SDP notifications have no request identity. Replacing the app-server
+        // generation guarantees that a late answer cannot satisfy a later
+        // negotiation on this persistent thread.
+        await this.reconnect();
+      } catch (recoveryError) {
+        throw new AggregateError(
+          [error, recoveryError],
+          "Realtime negotiation failed and app-server recovery was unsuccessful",
+        );
+      }
+      throw error;
     } finally {
       answer.cancel();
       this.realtimeStarting = false;
@@ -253,6 +295,7 @@ export class CodexAppServer extends EventEmitter {
       if (this.threadId !== stored.threadId) {
         throw new Error("Codex resumed an unexpected operator thread");
       }
+      await this.#bootstrapThread("Re-establish the restricted voice-operator policy. Reply with READY only.");
       return;
     }
 
@@ -267,11 +310,13 @@ export class CodexAppServer extends EventEmitter {
     });
     this.threadId = result.thread?.id;
     if (!this.threadId) throw new Error("Codex did not return an operator thread ID");
-    await this.#bootstrapThread();
+    await this.#bootstrapThread(
+      "Initialize this persistent voice-operator thread. Do not inspect Jaeger yet. Reply with READY only.",
+    );
     await writeThreadState(this.stateFile, this.threadId);
   }
 
-  async #bootstrapThread() {
+  async #bootstrapThread(text) {
     const completed = this.#notificationWaiter(
       "turn/completed",
       (params) => params.threadId === this.threadId,
@@ -283,9 +328,11 @@ export class CodexAppServer extends EventEmitter {
         input: [
           {
             type: "text",
-            text: "Initialize this persistent voice-operator thread. Do not inspect Jaeger yet. Reply with READY only.",
+            text,
           },
         ],
+        approvalPolicy: "never",
+        sandboxPolicy: OPERATOR_SANDBOX_POLICY,
       });
       const result = await completed.promise;
       if (result.turn?.status !== "completed") {

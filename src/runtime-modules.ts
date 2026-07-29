@@ -298,8 +298,9 @@ export class RuntimeModuleHost {
           }
           const index =
             this.consumers.filter((consumer) => consumer.module === moduleName).length + 1;
+          const generation = this.config?.digest.slice(0, 16) ?? "unversioned";
           this.consumers.push({
-            id: `${moduleName}-${index}`,
+            id: `${moduleName}-${index}-${generation}`,
             module: moduleName,
             types: normalized,
             handler,
