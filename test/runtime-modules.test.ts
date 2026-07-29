@@ -423,9 +423,9 @@ test("named consumers inherit pending deliveries from positional consumers", asy
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-migration-"));
   const stateDir = path.join(root, "state");
   const eventsDir = path.join(stateDir, ".hooks", "events");
+  const modulesDir = path.join(stateDir, ".modules");
   const legacyDirectory = path.join(
-    stateDir,
-    ".modules",
+    modulesDir,
     "telegram",
     "events",
     "telegram-1",
@@ -441,7 +441,8 @@ test("named consumers inherit pending deliveries from positional consumers", asy
     subject: { status: "completed" },
   };
   await mkdir(eventsDir, { recursive: true });
-  await mkdir(legacyDirectory, { recursive: true });
+  await mkdir(modulesDir, { recursive: true, mode: 0o700 });
+  await mkdir(legacyDirectory, { recursive: true, mode: 0o700 });
   await writeFile(
     path.join(eventsDir, `${eventId}.json`),
     `${JSON.stringify(event)}\n`,
@@ -525,16 +526,17 @@ test("inserting a named consumer does not claim an existing positional ledger", 
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-insert-"));
   const stateDir = path.join(root, "state");
   const eventsDir = path.join(stateDir, ".hooks", "events");
+  const modulesDir = path.join(stateDir, ".modules");
   const legacyDirectory = path.join(
-    stateDir,
-    ".modules",
+    modulesDir,
     "fixture",
     "events",
     "fixture-1",
   );
   const eventId = `evt-${"9".repeat(64)}`;
   await mkdir(eventsDir, { recursive: true });
-  await mkdir(legacyDirectory, { recursive: true });
+  await mkdir(modulesDir, { recursive: true, mode: 0o700 });
+  await mkdir(legacyDirectory, { recursive: true, mode: 0o700 });
   await writeFile(
     path.join(eventsDir, `${eventId}.json`),
     `${JSON.stringify({
