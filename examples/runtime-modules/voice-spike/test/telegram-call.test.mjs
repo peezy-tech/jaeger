@@ -72,6 +72,17 @@ test("call state rejects an existing shared directory without changing its mode"
   assert.equal((await stat(shared)).mode & 0o777, 0o750);
 });
 
+test("reset removes malformed invitation state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-corrupt-state-"));
+  const stateFile = join(directory, "telegram-call.json");
+  const invitations = new TelegramCallInvitations({ stateFile });
+  await writeFile(stateFile, "{malformed", { mode: 0o600 });
+
+  assert.equal(await invitations.reset(), true);
+  await assert.rejects(readFile(stateFile, "utf8"), { code: "ENOENT" });
+  assert.equal(await invitations.reset(), false);
+});
+
 test("a call can be answered exactly once", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-call-answer-"));
   const token = "b".repeat(43);

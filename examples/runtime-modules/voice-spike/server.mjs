@@ -506,10 +506,13 @@ async function deliverBroadcast(frame) {
           client.end();
           return;
         }
-        client.write(frame);
+        if (!client.write(frame)) {
+          eventClients.delete(client);
+          client.destroy();
+        }
       } catch {
         eventClients.delete(client);
-        client.end();
+        client.destroy();
       }
     }),
   );

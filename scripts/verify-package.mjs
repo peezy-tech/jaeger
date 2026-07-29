@@ -251,7 +251,7 @@ export default {
   modules: [{
     name: "package-smoke",
     setup(runtime) {
-      runtime.events.consume("run.terminal", async event => {
+      runtime.events.consume("terminal", "run.terminal", async event => {
         await runtime.storage.set("last-terminal", { runId: event.run.runId })
       })
       runtime.services.run("marker", async signal => {

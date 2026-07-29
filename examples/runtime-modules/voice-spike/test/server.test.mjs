@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer as createHttpServer } from "node:http";
+import {
+  createServer as createHttpServer,
+  get as httpGet,
+} from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -158,6 +161,66 @@ test("state, transcript, and control APIs require the browser capability", async
     await new Promise((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     );
+  }
+});
+
+test("a backpressured event stream is disconnected", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-server-backpressure-"));
+  const capability = "b".repeat(43);
+  const capabilityFile = join(directory, "capability-token");
+  await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
+  process.env.HOME = directory;
+  delete process.env.VOICE_TELEGRAM_ENV_FILE;
+  process.env.VOICE_SPIKE_CAPABILITY_FILE = capabilityFile;
+  process.env.VOICE_SPIKE_STATE_FILE = join(directory, "operator.json");
+  process.env.VOICE_SPIKE_INVITATION_STATE_FILE = join(
+    directory,
+    "telegram-call.json",
+  );
+  process.env.VOICE_SPIKE_PUBLIC_ORIGIN = "https://voice.example";
+
+  const { broadcast, server } = await import(
+    `../server.mjs?backpressure-test=${Date.now()}`,
+  );
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const base = `http://127.0.0.1:${address.port}`;
+  let eventStream;
+  try {
+    eventStream = await new Promise((resolve, reject) => {
+      const request = httpGet(
+        `${base}/api/events`,
+        {
+          headers: {
+            authorization: `Bearer ${capability}`,
+            origin: "https://voice.example",
+          },
+        },
+        resolve,
+      );
+      request.once("error", reject);
+    });
+    eventStream.pause();
+    const closed = new Promise((resolve) => eventStream.once("close", resolve));
+    await broadcast("thread/realtime/transcript.delta", {
+      delta: "x".repeat(1024 * 1024),
+    });
+    await Promise.race([
+      closed,
+      new Promise((_, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("Backpressured event stream was not disconnected")),
+          2_000,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    eventStream?.destroy();
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

@@ -231,7 +231,7 @@ test("runtime config generations receive distinct durable consumer identities", 
   const module: RuntimeModule = {
     name: "fixture",
     setup(runtime) {
-      runtime.events.consume("run.terminal", async () => {});
+      runtime.events.consume("terminal", "run.terminal", async () => {});
     },
   };
   try {
@@ -254,11 +254,120 @@ test("runtime config generations receive distinct durable consumer identities", 
         await readdir(path.join(root, ".modules", "fixture", "events"))
       ).sort(),
       [
-        `fixture-1-${"a".repeat(16)}`,
-        `fixture-1-${"b".repeat(16)}`,
+        `fixture-terminal-${"a".repeat(16)}`,
+        `fixture-terminal-${"b".repeat(16)}`,
       ],
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("consumer delivery state follows names across reordering and insertion", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-consumer-order-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const eventId = `evt-${"e".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  await writeFile(
+    path.join(eventsDir, `${eventId}.json`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      id: eventId,
+      type: "run.terminal",
+      occurredAt: "2026-07-25T00:00:00.000Z",
+      observedAt: "2026-07-25T00:00:00.000Z",
+      run: { runId: "20260725000000-eeeeeeeeee" },
+      subject: { status: "completed" },
+    })}\n`,
+  );
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  const handled: string[] = [];
+  const config = (
+    digest: string,
+    names: readonly string[],
+  ): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        for (const name of names) {
+          runtime.events.consume(name, "run.terminal", async () => {
+            handled.push(name);
+          });
+        }
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64), ["alpha", "beta"]),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => handled.length === 2);
+    await first.stop();
+
+    now = new Date("2026-07-25T00:00:01.000Z");
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64), ["beta", "gamma", "alpha"]),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    second.start();
+    await waitFor(async () => {
+      try {
+        await readFile(
+          path.join(
+            stateDir,
+            ".modules",
+            "fixture",
+            "events",
+            `fixture-gamma-${"b".repeat(16)}`,
+            `${eventId}.json`,
+          ),
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    await second.stop();
+
+    assert.deepEqual(handled.sort(), ["alpha", "beta"]);
+    for (const name of ["alpha", "beta", "gamma"]) {
+      const delivery = JSON.parse(
+        await readFile(
+          path.join(
+            stateDir,
+            ".modules",
+            "fixture",
+            "events",
+            `fixture-${name}-${"b".repeat(16)}`,
+            `${eventId}.json`,
+          ),
+          "utf8",
+        ),
+      ) as Record<string, JsonValue>;
+      assert.equal(
+        delivery.consumer,
+        `fixture-${name}-${"b".repeat(16)}`,
+      );
+      assert.equal(delivery.attempts, name === "gamma" ? 0 : 1);
+    }
+  } finally {
+    await second?.stop();
+    await first.stop();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -290,7 +399,7 @@ test("runtime config changes preserve pending event retries", async () => {
     modules: [{
       name: "fixture",
       setup(runtime) {
-        runtime.events.consume("run.terminal", async () => {
+        runtime.events.consume("terminal", "run.terminal", async () => {
           attempts++;
           if (fail) throw new Error("retry after restart");
         });
@@ -331,7 +440,7 @@ test("runtime config changes preserve pending event retries", async () => {
           ".modules",
           "fixture",
           "events",
-          `fixture-1-${"b".repeat(16)}`,
+          `fixture-terminal-${"b".repeat(16)}`,
           `${eventId}.json`,
         ),
         "utf8",
@@ -377,7 +486,7 @@ test("renewed subscriptions do not migrate retries from before their cutoff", as
     modules: [{
       name: "fixture",
       setup(runtime) {
-        runtime.events.consume(type, async () => {
+        runtime.events.consume("primary", type, async () => {
           if (type !== "run.terminal") return;
           attempts++;
           if (fail) throw new Error("retry before subscription renewal");
@@ -431,7 +540,7 @@ test("renewed subscriptions do not migrate retries from before their cutoff", as
           ".modules",
           "fixture",
           "events",
-          `fixture-1-${"c".repeat(16)}`,
+          `fixture-primary-${"c".repeat(16)}`,
           `${eventId}.json`,
         ),
         "utf8",
@@ -478,7 +587,7 @@ test("runtime config handoff preserves delivered events and claims unscanned eve
     modules: [{
       name: "fixture",
       setup(runtime) {
-        runtime.events.consume("run.terminal", async (event) => {
+        runtime.events.consume("terminal", "run.terminal", async (event) => {
           handled.push(event.id);
         });
       },
@@ -522,7 +631,7 @@ test("runtime config handoff preserves delivered events and claims unscanned eve
             ".modules",
             "fixture",
             "events",
-            `fixture-1-${"b".repeat(16)}`,
+            `fixture-terminal-${"b".repeat(16)}`,
             `${eventId}.json`,
           ),
           "utf8",
@@ -568,7 +677,7 @@ test("runs trusted modules in-process and durably retries lifecycle events", asy
       {
         name: "fixture",
         setup(runtime) {
-          runtime.events.consume("run.terminal", async () => {
+          runtime.events.consume("terminal", "run.terminal", async () => {
             attempts++;
             handlerPid = process.pid;
             if (attempts === 1) throw new Error("retry me");
@@ -630,9 +739,9 @@ export default { version: 1, modules: [module, module] }
   }
 });
 
-async function waitFor(predicate: () => boolean): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
   const deadline = Date.now() + 2_000;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() > deadline) throw new Error("Timed out waiting for runtime module");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }

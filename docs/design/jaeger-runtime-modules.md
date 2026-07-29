@@ -106,7 +106,7 @@ export default {
   modules: [{
     name: "example",
     setup(runtime) {
-      runtime.events.consume("run.terminal", async event => {
+      runtime.events.consume("terminal", "run.terminal", async event => {
         runtime.log.info(`${event.run.runId} finished`);
       });
       runtime.services.run("listener", async signal => {
@@ -135,8 +135,10 @@ the backend starts schedules, hook reconciliation, event delivery, and module
 services. Shutdown aborts services and waits for registered work.
 
 Hooks and modules consume the same normalized post-checkpoint event store.
-Events have stable IDs. Each module consumer has durable delivery state and
-at-least-once retry with capped backoff:
+Events have stable IDs. Each named module consumer has durable delivery state
+and at-least-once retry with capped backoff. Its name is the stable identity
+across configuration generations, so registration order does not reassign
+delivery state:
 
 ```text
 run.accepted

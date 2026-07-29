@@ -320,11 +320,9 @@ export class TelegramCallInvitations {
 
   /** Operator escape hatch: discards the invitation state under the state lock. */
   async reset() {
-    return await this.#exclusive(async () => {
-      const existed = (await this.#read()) !== null;
-      await removeInvitationState(this.stateFile);
-      return existed;
-    });
+    return await this.#exclusive(
+      async () => await removeInvitationState(this.stateFile),
+    );
   }
 
   async current() {
@@ -608,9 +606,13 @@ export async function assertOwnerOnlyFile(path) {
 }
 
 export async function removeInvitationState(path) {
-  await unlink(path).catch((error) => {
-    if (error.code !== "ENOENT") throw error;
-  });
+  try {
+    await unlink(path);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function withStateLock(stateFile, operation) {

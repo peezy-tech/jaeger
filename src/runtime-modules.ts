@@ -24,6 +24,7 @@ import { runtimeModuleProjectDigest } from "./module-registry.js";
 import type { JsonValue } from "./types.js";
 
 const MODULE_NAME = /^[a-z][a-z0-9-]{0,63}$/;
+const CONSUMER_NAME = /^[a-z][a-z0-9-]{0,63}$/;
 const STORAGE_KEY = /^[A-Za-z0-9._-]{1,128}$/;
 const EVENT_FILE = /^evt-[a-f0-9]{64}\.json$/;
 const RETRY_DELAYS_MS = [1_000, 5_000, 30_000, 120_000, 600_000] as const;
@@ -44,6 +45,7 @@ export interface RuntimeModule {
 export interface RuntimeModuleContext {
   readonly events: {
     consume(
+      name: string,
       types: HookEventType | readonly HookEventType[],
       handler: (event: LifecycleHookEvent) => void | Promise<void>,
     ): void;
@@ -306,7 +308,12 @@ export class RuntimeModuleHost {
   private context(moduleName: string): RuntimeModuleContext {
     return {
       events: {
-        consume: (types, handler) => {
+        consume: (name, types, handler) => {
+          if (!CONSUMER_NAME.test(name)) {
+            throw new Error(
+              `Runtime module ${moduleName} event consumer name is invalid: ${name}`,
+            );
+          }
           const normalized = Array.isArray(types) ? [...types] : [types];
           if (normalized.length === 0) {
             throw new Error(`Runtime module ${moduleName} event consumer requires events`);
@@ -316,9 +323,12 @@ export class RuntimeModuleHost {
               throw new Error(`Runtime module ${moduleName} requested unknown event ${type}`);
             }
           }
-          const index =
-            this.consumers.filter((consumer) => consumer.module === moduleName).length + 1;
-          const slot = `${moduleName}-${index}`;
+          const slot = `${moduleName}-${name}`;
+          if (this.consumers.some((consumer) => consumer.slot === slot)) {
+            throw new Error(
+              `Runtime module ${moduleName} event consumer is duplicated: ${name}`,
+            );
+          }
           const generation = this.config?.digest.slice(0, 16) ?? "unversioned";
           this.consumers.push({
             id: `${slot}-${generation}`,

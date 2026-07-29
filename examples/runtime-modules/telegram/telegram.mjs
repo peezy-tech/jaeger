@@ -11,6 +11,7 @@ export function telegramModule(options) {
     setup(context) {
       runtime = context;
       runtime.events.consume(
+        "notifications",
         [
           "session.available",
           "phase.changed",
