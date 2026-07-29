@@ -1,3 +1,9 @@
+import {
+  forgetCallToken,
+  loadAccessTokens,
+  rememberCallToken,
+} from "./call-access.js";
+
 const elements = {
   answerCall: document.querySelector("#answer-call"),
   bridgeDot: document.querySelector("#bridge-dot"),
@@ -38,7 +44,9 @@ const state = {
 
 const apiUrl = (path) => new URL(path.replace(/^\//, ""), window.location.href);
 
-const invitationToken = loadAccessFragment();
+const accessTokens = loadAccessTokens();
+const invitationToken = accessTokens.callToken;
+state.capabilityToken = accessTokens.capabilityToken;
 if (state.capabilityToken) {
   await refreshState();
   connectEvents();
@@ -59,7 +67,8 @@ elements.answerCall.addEventListener("click", async () => {
       token: state.callToken,
     });
     state.capabilityToken = invitationCapability;
-    clearCallInvitation();
+    rememberCallToken(invitationCapability);
+    clearCallInvitation({ preserveAccess: true });
     await refreshState();
     connectEvents();
     const connected = await startSession();
@@ -136,6 +145,7 @@ elements.typedProbe.addEventListener("submit", async (event) => {
 
 async function startSession() {
   elements.talkButton.disabled = true;
+  let upstreamSessionStarted = false;
   setSignal("Requesting microphone");
   try {
     state.inputStream = await navigator.mediaDevices.getUserMedia({
@@ -172,6 +182,7 @@ async function startSession() {
       sdp: state.peer.localDescription.sdp,
       voice: "juniper",
     });
+    upstreamSessionStarted = true;
     await state.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
 
     state.sessionActive = true;
@@ -181,6 +192,9 @@ async function startSession() {
     setSignal("Listening");
     return true;
   } catch (error) {
+    if (upstreamSessionStarted) {
+      await post("api/stop", {}).catch(() => {});
+    }
     closePeer();
     setSignal(error.message, true);
     return false;
@@ -189,26 +203,23 @@ async function startSession() {
   }
 }
 
-function loadAccessFragment() {
-  const params = new URLSearchParams(window.location.hash.slice(1));
-  const token = params.get("call");
-  const capability = params.get("capability");
-  if (capability) state.capabilityToken = capability;
-  if (token || capability) {
-    window.history.replaceState(
-      null,
-      "",
-      `${window.location.pathname}${window.location.search}`,
-    );
-  }
-  return token;
-}
-
 async function loadCallInvitation(token) {
   if (!token) return;
   try {
     const invitation = await post("api/invitations/inspect", { token });
+    if (
+      invitation.status === "answered" &&
+      Date.parse(invitation.accessExpiresAt) > Date.now()
+    ) {
+      state.capabilityToken = token;
+      rememberCallToken(token);
+      await refreshState();
+      connectEvents();
+      showCallNotice("Answered call access restored.");
+      return;
+    }
     if (invitation.status !== "ringing") {
+      forgetCallToken();
       showCallNotice("This Telegram call is no longer available.", true);
       return;
     }
@@ -239,10 +250,11 @@ function updateCallCountdown(expiresAt) {
   elements.callExpiry.textContent = `Expires in ${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function clearCallInvitation() {
+function clearCallInvitation({ preserveAccess = false } = {}) {
   if (state.callCountdown) window.clearInterval(state.callCountdown);
   state.callCountdown = null;
   state.callToken = null;
+  if (!preserveAccess) forgetCallToken();
   elements.callInvite.hidden = true;
   elements.answerCall.textContent = "Answer";
   elements.answerCall.disabled = false;

@@ -211,6 +211,9 @@ async function main(rawArgv: string[]): Promise<void> {
     const localOnlyAction = ["add", "diff", "list", "remove", "sync"].includes(
       argv[1] ?? "",
     );
+    if (localOnlyAction && selection.name === "local") {
+      assertLocalRuntimeSupported("Module project management");
+    }
     if (
       selection.name !== "local" &&
       (selection.explicit || localOnlyAction)

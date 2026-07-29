@@ -258,6 +258,9 @@ function staticAsset(pathname) {
   if (pathname === "/app.js") {
     return { file: "app.js", type: "text/javascript; charset=utf-8" };
   }
+  if (pathname === "/call-access.js") {
+    return { file: "call-access.js", type: "text/javascript; charset=utf-8" };
+  }
   if (pathname === "/styles.css") {
     return { file: "styles.css", type: "text/css; charset=utf-8" };
   }

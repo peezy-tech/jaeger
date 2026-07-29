@@ -15,6 +15,7 @@ import {
   parseEnv,
   sendTelegramCall,
   TelegramCallInvitations,
+  updateTelegramCall,
 } from "../telegram-call.mjs";
 
 test("call invitations persist only a token hash in an owner-only file", async () => {
@@ -171,7 +172,15 @@ test("an answered invitation grants bounded bearer access", async () => {
 
   await invitations.create();
   assert.equal(await invitations.authorize(token), false);
-  await invitations.answer(token);
+  const answered = await invitations.answer(token);
+  assert.equal(
+    answered.invitation.accessExpiresAt,
+    "2026-07-29T03:30:00.000Z",
+  );
+  assert.equal(
+    (await invitations.inspect(token)).accessExpiresAt,
+    "2026-07-29T03:30:00.000Z",
+  );
   assert.equal(await invitations.authorize(token), true);
   now += 30 * 60 * 1_000 + 1;
   assert.equal(await invitations.authorize(token), false);
@@ -271,6 +280,25 @@ test("Telegram delivery uses a loud notification and an HTTPS answer button", as
     body.reply_markup.inline_keyboard[0][0].url,
     /^https:\/\/hq\.peezy\.tech\/jaeger-voice\/#call=/,
   );
+});
+
+test("an idempotent Telegram disposition edit counts as recovered", async () => {
+  await updateTelegramCall({
+    botToken: "secret",
+    chatId: "-100123",
+    messageId: 991,
+    status: "answered",
+    reason: "Review finished.",
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          error_code: 400,
+          description: "Bad Request: message is not modified",
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+  });
 });
 
 test("Telegram invitation public URLs must use HTTPS", () => {

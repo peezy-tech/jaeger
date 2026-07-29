@@ -553,6 +553,8 @@ function publicInvitation(record, status) {
     reason: record.reason,
     createdAt: record.createdAt,
     expiresAt: record.expiresAt,
+    accessExpiresAt:
+      status === "answered" ? record.accessExpiresAt ?? null : null,
   };
 }
 
@@ -562,6 +564,7 @@ function unavailableInvitation() {
     reason: null,
     createdAt: null,
     expiresAt: null,
+    accessExpiresAt: null,
   };
 }
 
@@ -587,6 +590,14 @@ async function telegramRequest({ botToken, method, payload, fetchImpl }) {
     throw new Error(`Telegram ${method} returned an invalid response`);
   }
   if (!response.ok || !value.ok) {
+    const description = String(value.description ?? "");
+    if (
+      method === "editMessageText" &&
+      value.error_code === 400 &&
+      /(?:MESSAGE_NOT_MODIFIED|message is not modified)/i.test(description)
+    ) {
+      return undefined;
+    }
     throw new Error(
       `Telegram ${method} was rejected: ${value.description ?? response.status}`,
     );

@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   loadRuntimeRegistry,
   provisionalSshRuntimeTarget,
@@ -14,6 +17,8 @@ import {
   assertLocalRuntimeSupported,
   supportsLocalRuntime,
 } from "../src/platform.js";
+
+const execFileAsync = promisify(execFile);
 
 test("Windows controllers use APPDATA for runtime targets", () => {
   assert.equal(
@@ -62,4 +67,45 @@ test("Windows is controller-only while Linux retains local runtimes", () => {
     () => assertLocalRuntimeSupported("Backend management", "win32"),
     /Windows installation is an SSH controller/,
   );
+});
+
+test("the Windows controller rejects local module project management", async () => {
+  const cliPath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../src/cli.js",
+  );
+  const appData = await mkdtemp(path.join(os.tmpdir(), "jaeger-windows-modules-"));
+  const script = `
+    Object.defineProperty(process, "platform", { value: "win32" });
+    process.argv = [
+      process.execPath,
+      ${JSON.stringify(cliPath)},
+      "modules",
+      "list",
+      "--root",
+      "C:\\\\runtime"
+    ];
+    await import(${JSON.stringify(pathToFileURL(cliPath).href)});
+  `;
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, ["--input-type=module", "--eval", script], {
+        env: {
+          ...process.env,
+          APPDATA: appData,
+          JAEGER_RUNTIME: "local",
+        },
+      }),
+      (error: unknown) => {
+        if (typeof error !== "object" || error === null) return false;
+        const stderr = "stderr" in error ? String(error.stderr) : "";
+        assert.match(stderr, /Module project management is available only on a Linux/);
+        assert.match(stderr, /Windows installation is an SSH controller/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(appData, { recursive: true, force: true });
+  }
 });

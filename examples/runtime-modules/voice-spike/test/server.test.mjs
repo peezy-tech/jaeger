@@ -37,6 +37,10 @@ test("state, transcript, and control APIs require the browser capability", async
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
   try {
+    const callAccessModule = await fetch(`${base}/call-access.js`);
+    assert.equal(callAccessModule.status, 200);
+    assert.match(await callAccessModule.text(), /export function loadAccessTokens/);
+
     for (const pathname of ["/api/state", "/api/events"]) {
       const response = await fetch(`${base}${pathname}`);
       assert.equal(response.status, 401, pathname);

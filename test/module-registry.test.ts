@@ -313,6 +313,68 @@ test("diff protects local source edits and removal restores operator dependency 
   }
 });
 
+test("forced removal reconciles lock ownership when the module directory is missing", async () => {
+  const fixture = await registryFixture();
+  try {
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+    await rm(path.join(fixture.runtimeRoot, "modules", "alpha"), {
+      recursive: true,
+    });
+
+    await assert.rejects(
+      removeModules({
+        root: fixture.runtimeRoot,
+        names: ["alpha"],
+        install: false,
+      }),
+      /local changes/,
+    );
+    await removeModules({
+      root: fixture.runtimeRoot,
+      names: ["alpha"],
+      install: false,
+      force: true,
+    });
+
+    assert.deepEqual((await listInstalledModules(fixture.runtimeRoot)).modules, []);
+    const packageJson = JSON.parse(
+      await readFile(path.join(fixture.runtimeRoot, "package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    assert.deepEqual(packageJson.dependencies, {});
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('installs and removes the valid module name "constructor"', async () => {
+  const fixture = await registryFixture();
+  try {
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#constructor`],
+      install: false,
+    });
+
+    assert.deepEqual(
+      (await listInstalledModules(fixture.runtimeRoot)).modules.map(({ name }) => name),
+      ["constructor"],
+    );
+    assert.equal((await diffModule(fixture.runtimeRoot, "constructor")).clean, true);
+    await removeModules({
+      root: fixture.runtimeRoot,
+      names: ["constructor"],
+      install: false,
+    });
+    assert.deepEqual((await listInstalledModules(fixture.runtimeRoot)).modules, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("removal refuses a module still referenced by the runtime composition", async () => {
   const fixture = await registryFixture();
   try {
@@ -562,11 +624,16 @@ async function registryFixture(
   await Promise.all([
     mkdir(path.join(sourceRoot, "alpha"), { recursive: true }),
     mkdir(path.join(sourceRoot, "beta"), { recursive: true }),
+    mkdir(path.join(sourceRoot, "constructor"), { recursive: true }),
     mkdir(runtimeRoot, { recursive: true }),
   ]);
   await Promise.all([
     writeFile(path.join(sourceRoot, "alpha", "alpha.mjs"), "export const alpha = true\n"),
     writeFile(path.join(sourceRoot, "beta", "beta.mjs"), "export const beta = true\n"),
+    writeFile(
+      path.join(sourceRoot, "constructor", "constructor.mjs"),
+      "export const constructor = true\n",
+    ),
     writeJson(path.join(sourceRoot, "alpha", "jaeger.module.json"), {
       schemaVersion: 1,
       name: "alpha",
@@ -583,6 +650,12 @@ async function registryFixture(
         "fixture-dependency": "^2.0.0",
       },
     }),
+    writeJson(path.join(sourceRoot, "constructor", "jaeger.module.json"), {
+      schemaVersion: 1,
+      name: "constructor",
+      files: ["constructor.mjs"],
+      dependencies: {},
+    }),
   ]);
   const catalogPath = path.join(sourceRoot, "jaeger.registry.json");
   await writeJson(catalogPath, {
@@ -591,6 +664,10 @@ async function registryFixture(
     items: [
       { name: "alpha", path: "alpha/jaeger.module.json" },
       { name: "beta", path: "beta/jaeger.module.json" },
+      {
+        name: "constructor",
+        path: "constructor/jaeger.module.json",
+      },
     ],
   });
   return { root, runtimeRoot, catalogPath };

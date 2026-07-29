@@ -307,7 +307,7 @@ async function addModulesUnlocked(
   };
   for (const module of prepared) {
     const name = module.resolved.item.name;
-    if (nextModules[name] && !options.overwrite) {
+    if (Object.hasOwn(nextModules, name) && !options.overwrite) {
       throw new Error(
         `Module ${name} is already installed; use --overwrite to replace it`,
       );
@@ -358,7 +358,7 @@ async function addModulesUnlocked(
       const staged = path.join(staging, "new", name);
       let backup: string | undefined;
       if (await pathExists(target)) {
-        if (!options.overwrite && !currentLock.modules[name]) {
+        if (!options.overwrite && !Object.hasOwn(currentLock.modules, name)) {
           throw new Error(
             `Module ${name} exists outside ${MODULE_LOCK_FILE}; use --overwrite to replace it`,
           );
@@ -406,7 +406,9 @@ async function removeModulesUnlocked(
   await assertSafeModuleProject(root, false);
   const currentLock = await readModuleLock(root);
   for (const name of options.names) {
-    if (!currentLock.modules[name]) throw new Error(`Module ${name} is not installed`);
+    if (!Object.hasOwn(currentLock.modules, name)) {
+      throw new Error(`Module ${name} is not installed`);
+    }
     const diff = await diffModule(root, name);
     if (!diff.clean && !options.force) {
       throw new Error(
@@ -451,7 +453,12 @@ async function removeModulesUnlocked(
     for (const name of options.names) {
       const target = path.join(root, MODULE_DIRECTORY, name);
       const backup = path.join(staging, name);
-      await rename(target, backup);
+      try {
+        await rename(target, backup);
+      } catch (error) {
+        if (options.force && hasCode(error, "ENOENT")) continue;
+        throw error;
+      }
       removed.push({ target, backup });
     }
     await writeModuleLock(root, {
@@ -549,8 +556,10 @@ export async function diffModule(rootInput: string, name: string): Promise<Modul
   const root = path.resolve(rootInput);
   await assertSafeModuleProject(root, false);
   const lock = await readModuleLock(root);
-  const installed = lock.modules[name];
-  if (!installed) throw new Error(`Module ${name} is not installed`);
+  if (!Object.hasOwn(lock.modules, name)) {
+    throw new Error(`Module ${name} is not installed`);
+  }
+  const installed = lock.modules[name]!;
   const moduleRoot = path.join(root, MODULE_DIRECTORY, name);
   const modified: string[] = [];
   const missing: string[] = [];
