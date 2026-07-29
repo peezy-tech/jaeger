@@ -263,10 +263,18 @@ test("Yarn Modern installs dependencies with build scripts disabled", async () =
     const calls = path.join(fixture.root, "package-manager-calls.txt");
     await mkdir(bin);
     await writeFile(path.join(fixture.runtimeRoot, ".yarnrc.yml"), "nodeLinker: node-modules\n");
+    await mkdir(path.join(fixture.runtimeRoot, ".yarn/cache"), { recursive: true });
+    await writeFile(
+      path.join(fixture.runtimeRoot, ".yarn/cache/fixture.zip"),
+      "old-cache\n",
+    );
     const yarn = path.join(bin, "yarn");
     await writeFile(
       yarn,
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`,
+      "#!/bin/sh\n" +
+        "test -f .yarn/cache/fixture.zip || exit 18\n" +
+        "printf 'new-cache\\n' > .yarn/cache/new.zip\n" +
+        `printf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`,
     );
     await chmod(yarn, 0o755);
 
@@ -281,6 +289,14 @@ test("Yarn Modern installs dependencies with build scripts disabled", async () =
 
     assert.equal(result.packageManager, "yarn");
     assert.equal((await readFile(calls, "utf8")).trim(), "install --mode=skip-build");
+    assert.equal(
+      await readFile(path.join(fixture.runtimeRoot, ".yarn/cache/fixture.zip"), "utf8"),
+      "old-cache\n",
+    );
+    assert.equal(
+      await readFile(path.join(fixture.runtimeRoot, ".yarn/cache/new.zip"), "utf8"),
+      "new-cache\n",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -542,6 +558,42 @@ test('installs and removes the valid module name "constructor"', async () => {
       install: false,
     });
     assert.deepEqual((await listInstalledModules(fixture.runtimeRoot)).modules, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('preserves the valid dependency name "__proto__"', async () => {
+  const fixture = await registryFixture();
+  try {
+    await writeJson(path.join(fixture.runtimeRoot, "package.json"), {
+      name: "operator-runtime",
+      private: true,
+      type: "module",
+      dependencies: { ["__proto__"]: "^9.0.0" },
+    });
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+
+    const packageJson = JSON.parse(
+      await readFile(path.join(fixture.runtimeRoot, "package.json"), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    assert.equal(Object.hasOwn(packageJson.dependencies, "__proto__"), true);
+    assert.equal(packageJson.dependencies["__proto__"], "^9.0.0");
+
+    await removeModules({
+      root: fixture.runtimeRoot,
+      names: ["alpha"],
+      install: false,
+    });
+    const removedPackageJson = JSON.parse(
+      await readFile(path.join(fixture.runtimeRoot, "package.json"), "utf8"),
+    ) as { dependencies: Record<string, string> };
+    assert.equal(Object.hasOwn(removedPackageJson.dependencies, "__proto__"), true);
+    assert.equal(removedPackageJson.dependencies["__proto__"], "^9.0.0");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

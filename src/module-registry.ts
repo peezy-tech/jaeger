@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
@@ -332,7 +333,7 @@ async function addModulesUnlocked(
         `Module ${name} exists outside ${MODULE_LOCK_FILE}; use --overwrite to replace it`,
       );
     }
-    nextModules[name] = module.record;
+    setRecordValue(nextModules, name, module.record);
   }
   const reconciliation = reconcilePackageProject(project.value, currentLock, nextModules);
   const shouldInstall = options.install !== false;
@@ -661,7 +662,7 @@ function reconcilePackageProject(
         );
       }
       const requesters = requested.get(dependency) ?? {};
-      requesters[moduleName] = range;
+      setRecordValue(requesters, moduleName, range);
       requested.set(dependency, requesters);
     }
   }
@@ -690,16 +691,16 @@ function reconcilePackageProject(
     ];
     if (Object.keys(requestedBy).length === 0) {
       if (operatorRange === undefined) delete nextRootDependencies[dependency];
-      else nextRootDependencies[dependency] = operatorRange;
+      else setRecordValue(nextRootDependencies, dependency, operatorRange);
       continue;
     }
     const appliedRange = intersectDependencyRanges(dependency, ranges);
-    nextRootDependencies[dependency] = appliedRange;
-    dependencies[dependency] = {
+    setRecordValue(nextRootDependencies, dependency, appliedRange);
+    setRecordValue(dependencies, dependency, {
       appliedRange,
       ...(operatorRange ? { operatorRange } : {}),
       requestedBy,
-    };
+    });
   }
   packageJson.dependencies = sortRecord(nextRootDependencies);
   return {
@@ -843,14 +844,14 @@ async function readModuleLock(root: string): Promise<ModuleProjectLock> {
         throw new Error(`Invalid dependency name in ${lockPath}: ${dependency}`);
       }
     }
-    modules[name] = {
+    setRecordValue(modules, name, {
       source: record.source,
       resolvedSource: record.resolvedSource,
       digest: record.digest,
       installedAt: record.installedAt,
       files,
       dependencies: moduleDependencies,
-    };
+    });
   }
   const dependencyValues = recordValue(value.dependencies, `${lockPath} dependencies`);
   const dependencies: Record<string, ManagedDependencyRecord> = {};
@@ -877,13 +878,13 @@ async function readModuleLock(root: string): Promise<ModuleProjectLock> {
     for (const requester of Object.keys(requestedBy)) {
       moduleName(requester, `${lockPath} dependency ${name} requester`);
     }
-    dependencies[name] = {
+    setRecordValue(dependencies, name, {
       appliedRange: record.appliedRange,
       ...(typeof record.operatorRange === "string"
         ? { operatorRange: record.operatorRange }
         : {}),
       requestedBy,
-    };
+    });
   }
   return {
     schemaVersion: 1,
@@ -1449,13 +1450,22 @@ function stringRecord(value: unknown, label: string): Record<string, string> {
     if (typeof entry !== "string" || !entry.trim()) {
       throw new Error(`${label} values must be non-empty strings`);
     }
-    result[key] = entry;
+    setRecordValue(result, key, entry);
   }
   return result;
 }
 
 function sortRecord<T>(value: Readonly<Record<string, T>>): Record<string, T> {
   return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function setRecordValue<T>(record: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(record, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
 }
 
 function assertUnique(values: readonly string[], label: string): void {
@@ -1599,7 +1609,11 @@ async function snapshotPackageState(
       }
       const backup = path.join(staging, "package-state", String(index));
       await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
-      await rename(target, backup);
+      if (name === ".yarn/cache") {
+        await cp(target, backup, { recursive: true, preserveTimestamps: true });
+      } else {
+        await rename(target, backup);
+      }
       directories.push({ path: target, backup });
     }
     return { files, directories };
