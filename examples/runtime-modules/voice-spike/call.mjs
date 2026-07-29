@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   finalizeTelegramDisposition,
+  activateTelegramCall,
   parseHttpsPublicUrl,
   readTelegramConfig,
   sendTelegramCall,
@@ -67,7 +68,16 @@ const recorded = await invitations.recordTelegramDelivery(token, {
   chatId: telegram.chatId,
   messageThreadId: telegram.messageThreadId,
   messageId: delivery.messageId,
+  answerUrl: answerUrl.href,
 });
+await activateTelegramCall({
+  ...telegram,
+  messageId: delivery.messageId,
+  answerUrl: answerUrl.href,
+  reason: invitation.reason,
+  expiresAt: invitation.expiresAt,
+});
+await invitations.markTelegramDeliveryActivated(recorded);
 if (["answered", "declined", "expired"].includes(recorded.invitation.status)) {
   reportDisposition(
     await finalizeTelegramDisposition(invitations, telegram, recorded),

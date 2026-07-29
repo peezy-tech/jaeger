@@ -90,16 +90,21 @@ const bridge = new CodexAppServer({
 const eventClients = new Map();
 let activeRealtimeSessionId = null;
 let startingRealtimeSessionId = null;
+let realtimeExpiryTimer = null;
 
 bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
-  if (method === "thread/realtime/closed") activeRealtimeSessionId = null;
+  if (method === "thread/realtime/closed") {
+    activeRealtimeSessionId = null;
+    if (!startingRealtimeSessionId) clearRealtimeExpiryTimer();
+  }
   void broadcast(method, params);
 });
 bridge.on("ready", (snapshot) => void broadcast("bridge.ready", snapshot));
 bridge.on("disconnected", (error) => {
   activeRealtimeSessionId = null;
   startingRealtimeSessionId = null;
+  clearRealtimeExpiryTimer();
   void broadcast("bridge.disconnected", { message: error.message });
 });
 bridge.on("serverRequestDeclined", ({ method }) => {
@@ -182,6 +187,7 @@ export const server = createServer(async (request, response) => {
     }
 
     if (request.method === "POST" && url.pathname === "/api/session") {
+      const invitationToken = await assertApiCapability(request);
       const body = await readJson(request);
       const sessionId = assertRealtimeSessionId(body.sessionId);
       if (activeRealtimeSessionId || startingRealtimeSessionId) {
@@ -208,6 +214,14 @@ export const server = createServer(async (request, response) => {
           await bridge.stopRealtime().catch(() => {});
           const error = new Error("Voice session was cancelled during negotiation");
           error.statusCode = 409;
+          throw error;
+        }
+        if (
+          invitationToken &&
+          !(await armRealtimeInvitationExpiry(sessionId, invitationToken))
+        ) {
+          const error = new Error("Telegram call access expired");
+          error.statusCode = 410;
           throw error;
         }
         startingRealtimeSessionId = null;
@@ -238,6 +252,7 @@ export const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/reconnect") {
       activeRealtimeSessionId = null;
       startingRealtimeSessionId = null;
+      clearRealtimeExpiryTimer();
       const before = bridge.snapshot();
       const after = await bridge.reconnect();
       return sendJson(response, 200, {
@@ -284,10 +299,50 @@ async function stopOwnedRealtimeSession(sessionId) {
     activeRealtimeSessionId === sessionId ||
     startingRealtimeSessionId === sessionId;
   if (!ownsSession) return false;
-  if (activeRealtimeSessionId === sessionId) activeRealtimeSessionId = null;
-  if (startingRealtimeSessionId === sessionId) startingRealtimeSessionId = null;
+  if (activeRealtimeSessionId === sessionId) {
+    activeRealtimeSessionId = null;
+  }
+  if (startingRealtimeSessionId === sessionId) {
+    startingRealtimeSessionId = null;
+  }
+  clearRealtimeExpiryTimer();
   await bridge.stopRealtime();
   return true;
+}
+
+async function armRealtimeInvitationExpiry(sessionId, invitationToken) {
+  const invitation = await invitations.inspect(invitationToken);
+  const expiresAt = Date.parse(invitation.accessExpiresAt);
+  const remaining = expiresAt - Date.now();
+  if (
+    invitation.status !== "answered" ||
+    !Number.isFinite(expiresAt) ||
+    remaining <= 0 ||
+    !(await invitations.authorize(invitationToken))
+  ) {
+    await stopOwnedRealtimeSession(sessionId).catch(() => {});
+    return false;
+  }
+  clearRealtimeExpiryTimer();
+  realtimeExpiryTimer = setTimeout(() => {
+    if (
+      activeRealtimeSessionId !== sessionId &&
+      startingRealtimeSessionId !== sessionId
+    ) {
+      return;
+    }
+    void stopOwnedRealtimeSession(sessionId).catch((error) => {
+      process.stderr.write(`Expired voice session cleanup failed: ${error.message}\n`);
+    });
+  }, remaining);
+  realtimeExpiryTimer.unref();
+  return true;
+}
+
+function clearRealtimeExpiryTimer() {
+  if (!realtimeExpiryTimer) return;
+  clearTimeout(realtimeExpiryTimer);
+  realtimeExpiryTimer = null;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -322,6 +377,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   const shutdown = async () => {
     clearInterval(expiryTimer);
+    clearRealtimeExpiryTimer();
     server.close();
     await bridge.stop();
     process.exit(0);

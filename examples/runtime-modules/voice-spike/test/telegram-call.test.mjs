@@ -12,6 +12,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ANSWERED_ACCESS_TTL_MS,
+  activateTelegramCall,
   finalizeTelegramDisposition,
   parseHttpsPublicUrl,
   parseEnv,
@@ -354,8 +355,8 @@ test("answered and declined dispositions remain pending until Telegram is update
   }
 });
 
-test("Telegram delivery uses a loud notification and an HTTPS answer button", async () => {
-  let request;
+test("Telegram delivery activates its answer button after recording the message", async () => {
+  const requests = [];
   const result = await sendTelegramCall({
     botToken: "secret",
     chatId: "-100123",
@@ -365,24 +366,84 @@ test("Telegram delivery uses a loud notification and an HTTPS answer button", as
     reason: "Review finished.",
     expiresAt: "2026-07-29T03:10:00Z",
     fetchImpl: async (url, options) => {
-      request = { url, options };
+      requests.push({ url, options });
       return new Response(
-        JSON.stringify({ ok: true, result: { message_id: 991 } }),
+        JSON.stringify({
+          ok: true,
+          result: requests.length === 1 ? { message_id: 991 } : true,
+        }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     },
   });
 
-  const body = JSON.parse(request.options.body);
+  const sendBody = JSON.parse(requests[0].options.body);
   assert.equal(result.messageId, 991);
-  assert.equal(body.chat_id, "-100123");
-  assert.equal(body.message_thread_id, 42);
-  assert.equal(body.disable_notification, false);
-  assert.equal(body.reply_markup.inline_keyboard[0][0].text, "Answer");
+  assert.equal(sendBody.chat_id, "-100123");
+  assert.equal(sendBody.message_thread_id, 42);
+  assert.equal(sendBody.disable_notification, false);
+  assert.equal(sendBody.reply_markup, undefined);
+  await activateTelegramCall({
+    botToken: "secret",
+    chatId: "-100123",
+    messageId: result.messageId,
+    answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=opaque-invitation",
+    reason: "Review finished.",
+    expiresAt: "2026-07-29T03:10:00Z",
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  const activateBody = JSON.parse(requests[1].options.body);
+  assert.equal(activateBody.message_id, 991);
+  assert.equal(activateBody.reply_markup.inline_keyboard[0][0].text, "Answer");
   assert.match(
-    body.reply_markup.inline_keyboard[0][0].url,
+    activateBody.reply_markup.inline_keyboard[0][0].url,
     /^https:\/\/hq\.peezy\.tech\/jaeger-voice\/#call=/,
   );
+});
+
+test("a recorded placeholder recovers its answer button after a crash", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-activation-recovery-"));
+  const token = "q".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => token,
+  });
+
+  await invitations.create({ reason: "Recover this call." });
+  await invitations.recordTelegramDelivery(token, {
+    chatId: "-100123",
+    messageId: 991,
+    answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=recover",
+  });
+  const pending = await invitations.pendingDisposition();
+  let request;
+  const outcome = await finalizeTelegramDisposition(
+    invitations,
+    { botToken: "secret" },
+    pending,
+    {
+      fetchImpl: async (url, options) => {
+        request = { url, options };
+        return new Response(JSON.stringify({ ok: true, result: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    },
+  );
+
+  assert.deepEqual(outcome, { finalized: false, delivered: true, error: null });
+  assert.equal(await invitations.pendingDisposition(), null);
+  const body = JSON.parse(request.options.body);
+  assert.equal(body.message_id, 991);
+  assert.equal(body.reply_markup.inline_keyboard[0][0].text, "Answer");
 });
 
 test("an idempotent Telegram disposition edit counts as recovered", async () => {

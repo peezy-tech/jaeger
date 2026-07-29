@@ -377,7 +377,21 @@ async function consumeEvents(target) {
         cache: "no-store",
         headers: authorizationHeaders(),
       });
-      if (!response.ok) await parseResponse(response);
+      if (!response.ok) {
+        const status = response.status;
+        try {
+          await parseResponse(response);
+        } catch (error) {
+          if (status === 401 || status === 403) {
+            state.capabilityToken = null;
+            closePeer();
+            resetSessionUi();
+            setSignal("Voice access expired or was revoked", true);
+            return;
+          }
+          throw error;
+        }
+      }
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffered = "";

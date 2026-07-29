@@ -137,6 +137,8 @@ export class TelegramCallInvitations {
           ? String(telegram.messageThreadId)
           : null,
         messageId: Number(telegram.messageId),
+        answerUrl: telegram.answerUrl,
+        activationPending: Boolean(telegram.answerUrl),
       };
       delete record.telegramDeliveryUncertain;
       if (status === "expired" && record.status !== "expired") {
@@ -149,6 +151,16 @@ export class TelegramCallInvitations {
         invitationKey: record.tokenHash,
         telegram: record.telegram,
       };
+    });
+  }
+
+  async markTelegramDeliveryActivated(pending) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!dispositionMatches(record, pending) || !record.telegram) return false;
+      delete record.telegram.activationPending;
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return true;
     });
   }
 
@@ -204,7 +216,10 @@ export class TelegramCallInvitations {
       const status = this.#status(record);
       if (
         !["answered", "declined", "expired"].includes(status) &&
-        !(status === "ringing" && record.telegramDeliveryUncertain)
+        !(
+          status === "ringing" &&
+          (record.telegramDeliveryUncertain || record.telegram?.activationPending)
+        )
       ) {
         return null;
       }
@@ -326,17 +341,8 @@ export async function sendTelegramCall({
 }) {
   const payload = {
     chat_id: chatId,
-    text: [
-      "☎️ Jaeger is calling",
-      "",
-      normalizeReason(reason),
-      "",
-      `Answer before ${formatUtc(expiresAt)}.`,
-    ].join("\n"),
+    text: telegramCallText({ reason, expiresAt, active: false }),
     disable_notification: false,
-    reply_markup: {
-      inline_keyboard: [[{ text: "Answer", url: answerUrl }]],
-    },
   };
   if (messageThreadId) payload.message_thread_id = Number(messageThreadId);
 
@@ -347,6 +353,30 @@ export async function sendTelegramCall({
     fetchImpl,
   });
   return { messageId: result.message_id };
+}
+
+export async function activateTelegramCall({
+  botToken,
+  chatId,
+  messageId,
+  answerUrl,
+  reason,
+  expiresAt,
+  fetchImpl = fetch,
+}) {
+  await telegramRequest({
+    botToken,
+    method: "editMessageText",
+    payload: {
+      chat_id: chatId,
+      message_id: Number(messageId),
+      text: telegramCallText({ reason, expiresAt, active: true }),
+      reply_markup: {
+        inline_keyboard: [[{ text: "Answer", url: answerUrl }]],
+      },
+    },
+    fetchImpl,
+  });
 }
 
 export async function updateTelegramCall({
@@ -391,6 +421,24 @@ export async function finalizeTelegramDisposition(
   { fetchImpl = fetch } = {},
 ) {
   const status = pending.invitation.status;
+  if (status === "ringing" && pending.telegram?.activationPending) {
+    if (!telegram) return { finalized: false, delivered: false, error: null };
+    try {
+      await activateTelegramCall({
+        botToken: telegram.botToken,
+        chatId: pending.telegram.chatId,
+        messageId: pending.telegram.messageId,
+        answerUrl: pending.telegram.answerUrl,
+        reason: pending.invitation.reason,
+        expiresAt: pending.invitation.expiresAt,
+        fetchImpl,
+      });
+      await invitations.markTelegramDeliveryActivated(pending);
+      return { finalized: false, delivered: true, error: null };
+    } catch (error) {
+      return { finalized: false, delivered: false, error };
+    }
+  }
   if (!telegram || !pending.telegram) {
     if (status === "ringing") {
       return { finalized: false, delivered: false, error: null };
@@ -656,6 +704,18 @@ function normalizeReason(reason) {
   const value = String(reason ?? "").replace(/\s+/g, " ").trim();
   if (!value) return "Jaeger wants to talk.";
   return value.slice(0, 240);
+}
+
+function telegramCallText({ reason, expiresAt, active }) {
+  return [
+    active ? "☎️ Jaeger is calling" : "☎️ Jaeger is preparing a call",
+    "",
+    normalizeReason(reason),
+    "",
+    active
+      ? `Answer before ${formatUtc(expiresAt)}.`
+      : "The secure Answer button is being prepared.",
+  ].join("\n");
 }
 
 function hashToken(token) {
