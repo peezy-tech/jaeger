@@ -91,6 +91,7 @@ const eventClients = new Map();
 let activeRealtimeSessionId = null;
 let startingRealtimeSessionId = null;
 let realtimeExpiryTimer = null;
+let broadcastQueue = Promise.resolve();
 
 bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
@@ -220,6 +221,8 @@ export const server = createServer(async (request, response) => {
           error.statusCode = 409;
           throw error;
         }
+        startingRealtimeSessionId = null;
+        activeRealtimeSessionId = sessionId;
         if (
           invitationToken &&
           !(await armRealtimeInvitationExpiry(sessionId, invitationToken))
@@ -228,8 +231,6 @@ export const server = createServer(async (request, response) => {
           error.statusCode = 410;
           throw error;
         }
-        startingRealtimeSessionId = null;
-        activeRealtimeSessionId = sessionId;
         return sendJson(response, 200, { ...answer, sessionId });
       } catch (error) {
         if (startingRealtimeSessionId === sessionId) {
@@ -332,7 +333,7 @@ async function armRealtimeInvitationExpiry(sessionId, invitationToken) {
     remaining <= 0 ||
     !(await invitations.authorize(invitationToken))
   ) {
-    await stopOwnedRealtimeSession(sessionId).catch(() => {});
+    await stopOwnedRealtimeSession(sessionId);
     return false;
   }
   clearRealtimeExpiryTimer();
@@ -486,8 +487,14 @@ function sendJson(response, status, value) {
   response.end(`${JSON.stringify(value)}\n`);
 }
 
-export async function broadcast(event, data) {
+export function broadcast(event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const delivery = broadcastQueue.then(() => deliverBroadcast(frame));
+  broadcastQueue = delivery.catch(() => {});
+  return delivery;
+}
+
+async function deliverBroadcast(frame) {
   await Promise.all(
     [...eventClients].map(async ([client, invitationToken]) => {
       try {

@@ -103,6 +103,46 @@ test("state, transcript, and control APIs require the browser capability", async
       /event: bridge\.state/,
     );
 
+    const originalAuthorize = TelegramCallInvitations.prototype.authorize;
+    let authorizeCalls = 0;
+    let releaseFirstAuthorization;
+    let markFirstAuthorizationStarted;
+    const firstAuthorizationStarted = new Promise((resolve) => {
+      markFirstAuthorizationStarted = resolve;
+    });
+    const firstAuthorizationRelease = new Promise((resolve) => {
+      releaseFirstAuthorization = resolve;
+    });
+    TelegramCallInvitations.prototype.authorize = async function (token) {
+      authorizeCalls += 1;
+      if (authorizeCalls === 1) {
+        markFirstAuthorizationStarted();
+        await firstAuthorizationRelease;
+      }
+      return await originalAuthorize.call(this, token);
+    };
+    try {
+      const firstDelivery = broadcast("thread/realtime/transcript.delta", {
+        sequence: 1,
+      });
+      await firstAuthorizationStarted;
+      const secondDelivery = broadcast("thread/realtime/transcript.delta", {
+        sequence: 2,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(authorizeCalls, 1);
+      releaseFirstAuthorization();
+      await Promise.all([firstDelivery, secondDelivery]);
+    } finally {
+      releaseFirstAuthorization();
+      TelegramCallInvitations.prototype.authorize = originalAuthorize;
+    }
+    const orderedEvents = await readStreamUntil(reader, '"sequence":2');
+    assert.ok(
+      orderedEvents.indexOf('"sequence":1') <
+        orderedEvents.indexOf('"sequence":2'),
+    );
+
     const invitationState = JSON.parse(
       await readFile(process.env.VOICE_SPIKE_INVITATION_STATE_FILE, "utf8"),
     );
@@ -126,11 +166,20 @@ test("a closed realtime negotiation is not promoted to the active session", asyn
   const capability = "s".repeat(43);
   const capabilityFile = join(directory, "capability-token");
   const fakeCodex = join(directory, "fake-codex.mjs");
+  const invitationStateFile = join(directory, "invitations.json");
+  const invitationToken = "i".repeat(43);
   const port = await availablePort();
   await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
+  const invitations = new TelegramCallInvitations({
+    stateFile: invitationStateFile,
+    createToken: () => invitationToken,
+  });
+  await invitations.create();
+  await invitations.answer(invitationToken);
   await writeFile(
     fakeCodex,
     `#!/usr/bin/env node
+import { readFileSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const threadId = "thread-realtime-test";
@@ -165,6 +214,17 @@ input.on("line", (line) => {
       break;
     case "thread/realtime/start": {
       realtimeStarts += 1;
+      if (realtimeStarts === 3) {
+        const invitation = JSON.parse(
+          readFileSync(process.env.VOICE_SPIKE_INVITATION_STATE_FILE, "utf8"),
+        );
+        invitation.accessExpiresAt = new Date(Date.now() - 1).toISOString();
+        writeFileSync(
+          process.env.VOICE_SPIKE_INVITATION_STATE_FILE,
+          JSON.stringify(invitation) + "\\n",
+          { mode: 0o600 },
+        );
+      }
       const notifications = [
         reply({}),
         {
@@ -183,8 +243,15 @@ input.on("line", (line) => {
     }
     case "thread/realtime/stop":
       realtimeStops += 1;
-      send(reply({}));
-      if (realtimeStops === 2) {
+      if (realtimeStops === 3) {
+        send({
+          id: message.id,
+          error: { message: "cleanup rejected for test" },
+        });
+      } else {
+        send(reply({}));
+      }
+      if (realtimeStops === 2 || realtimeStops === 4) {
         setTimeout(() => {
           send({
             method: "thread/realtime/closed",
@@ -218,7 +285,7 @@ input.on("line", (line) => {
         VOICE_SPIKE_CAPABILITY_FILE: capabilityFile,
         VOICE_SPIKE_CODEX_BIN: fakeCodex,
         VOICE_SPIKE_HOST: "127.0.0.1",
-        VOICE_SPIKE_INVITATION_STATE_FILE: join(directory, "invitations.json"),
+        VOICE_SPIKE_INVITATION_STATE_FILE: invitationStateFile,
         VOICE_SPIKE_PORT: String(port),
         VOICE_SPIKE_PUBLIC_ORIGIN: "https://voice.example",
         VOICE_SPIKE_STATE_FILE: join(directory, "operator.json"),
@@ -288,7 +355,45 @@ input.on("line", (line) => {
     );
     assert.equal(closed.sessionId, secondSessionId);
 
-    const replacementSessionId = "33333333-3333-4333-8333-333333333333";
+    const expiredSessionId = "33333333-3333-4333-8333-333333333333";
+    const expired = await fetch(`${base}/api/session`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        authorization: `Bearer ${invitationToken}`,
+      },
+      body: JSON.stringify({
+        sessionId: expiredSessionId,
+        sdp: "v=0\r\nexpired-invitation-offer",
+      }),
+    });
+    assert.equal(expired.status, 500);
+    assert.match((await expired.json()).error, /cleanup rejected for test/);
+
+    const replacementSessionId = "44444444-4444-4444-8444-444444444444";
+    const blockedReplacement = await fetch(`${base}/api/session`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        sessionId: replacementSessionId,
+        sdp: "v=0\r\nblocked-replacement-offer",
+      }),
+    });
+    assert.equal(blockedReplacement.status, 409);
+
+    const retriedStop = await fetch(`${base}/api/stop`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ sessionId: expiredSessionId }),
+    });
+    assert.equal(retriedStop.status, 200);
+    assert.deepEqual(await retriedStop.json(), { stopped: true });
+    const retriedClosed = await readServerEvent(
+      eventReader,
+      "thread/realtime/closed",
+    );
+    assert.equal(retriedClosed.sessionId, expiredSessionId);
+
     const replacement = await fetch(`${base}/api/session`, {
       method: "POST",
       headers,
@@ -354,6 +459,24 @@ async function readServerEvent(reader, expectedEvent, timeoutMs = 2_000) {
       if (event === expectedEvent) return JSON.parse(data.join("\n"));
     }
   }
+}
+
+async function readStreamUntil(reader, marker, timeoutMs = 2_000) {
+  const decoder = new TextDecoder();
+  let buffered = "";
+  const timeout = new Promise((_, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`Timed out waiting for ${marker}`)),
+      timeoutMs,
+    );
+    timer.unref();
+  });
+  while (!buffered.includes(marker)) {
+    const { done, value } = await Promise.race([reader.read(), timeout]);
+    if (done) throw new Error(`Event stream ended before ${marker}`);
+    buffered += decoder.decode(value, { stream: true });
+  }
+  return buffered;
 }
 
 function waitForOutput(stream, pattern, timeoutMs = 5_000) {
