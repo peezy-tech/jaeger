@@ -60,6 +60,7 @@ try {
     "dist/vendor/claude-agent-sdk/package.json",
     "dist/vendor/claude-agent-sdk/README.md",
     "dist/vendor/claude-agent-sdk/sdk.mjs",
+    "docs/design/codex-realtime-voice-module.md",
     "docs/design/jaeger-runtime-modules.md",
     "docs/design/jaeger-workflows.md",
     "schemas/jaeger.module.schema.json",

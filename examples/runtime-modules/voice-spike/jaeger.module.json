@@ -19,6 +19,7 @@
     "reset.mjs",
     "server.mjs",
     "telegram-call.mjs",
+    "test/browser-session.test.mjs",
     "test/codex-app-server.test.mjs",
     "test/capability.test.mjs",
     "test/jaeger-readonly-tools.test.mjs",

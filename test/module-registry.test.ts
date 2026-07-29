@@ -396,7 +396,7 @@ test("rolls back an interrupted durable module transaction before the next mutat
     const lockPath = path.join(fixture.runtimeRoot, "modules.lock.json");
     const packageBefore = await readFile(packagePath);
     const lockBefore = await readFile(lockPath);
-    const staging = path.join(fixture.runtimeRoot, ".modules-stage-interrupted");
+    const staging = path.join(fixture.runtimeRoot, ".modules-stage-Ab12Cd");
     const fileNames = [
       "package.json",
       "npm-shrinkwrap.json",
@@ -450,6 +450,35 @@ test("rolls back an interrupted durable module transaction before the next mutat
     assert.deepEqual(await readFile(lockPath), lockBefore);
     await assert.rejects(readFile(path.join(interruptedModule, "beta.mjs")), hasCode("ENOENT"));
     await assert.rejects(readFile(staging), hasCode("ENOENT"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("leaves unrelated transaction-prefixed directories untouched", async () => {
+  const fixture = await registryFixture();
+  try {
+    const unrelated = path.join(fixture.runtimeRoot, ".modules-stage-notes");
+    const unjournaled = path.join(fixture.runtimeRoot, ".modules-remove-Ab12Cd");
+    await Promise.all([
+      mkdir(path.join(unrelated, "archive"), { recursive: true }),
+      mkdir(path.join(unjournaled, "backup"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(path.join(unrelated, "archive", "notes.md"), "operator notes\n"),
+      writeFile(path.join(unjournaled, "backup", "module.mjs"), "preserve me\n"),
+    ]);
+
+    await syncModules({ root: fixture.runtimeRoot, install: false });
+
+    assert.equal(
+      await readFile(path.join(unrelated, "archive", "notes.md"), "utf8"),
+      "operator notes\n",
+    );
+    assert.equal(
+      await readFile(path.join(unjournaled, "backup", "module.mjs"), "utf8"),
+      "preserve me\n",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

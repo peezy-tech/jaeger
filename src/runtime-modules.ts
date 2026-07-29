@@ -108,6 +108,13 @@ interface EventConsumer {
   readonly handler: (event: LifecycleHookEvent) => void | Promise<void>;
 }
 
+interface ModuleConsumerMetadata {
+  readonly version: 1;
+  readonly id: string;
+  readonly createdAt: string;
+  readonly subscriptions?: Readonly<Partial<Record<HookEventType, string>>>;
+}
+
 interface BackgroundService {
   readonly id: string;
   readonly module: string;
@@ -210,12 +217,23 @@ export class RuntimeModuleHost {
         directory,
         `Jaeger runtime module ${consumer.module} event delivery directory`,
       );
-      await publishJsonExclusive(path.join(directory, "consumer.json"), {
-        version: 1,
-        id: consumer.id,
-        createdAt: this.now().toISOString(),
-      });
-      await this.migratePendingDeliveries(consumer);
+      const metadataPath = path.join(directory, "consumer.json");
+      const existingMetadata = await readOptionalJson(metadataPath);
+      if (existingMetadata === undefined) {
+        const createdAt = this.now().toISOString();
+        await publishJsonExclusive(metadataPath, {
+          version: 1,
+          id: consumer.id,
+          createdAt,
+          subscriptions: await this.inheritedConsumerSubscriptions(
+            consumer,
+            createdAt,
+          ),
+        } satisfies ModuleConsumerMetadata);
+      } else {
+        parseModuleConsumerMetadata(existingMetadata, consumer.id);
+      }
+      await this.migrateDeliveries(consumer);
     }
   }
 
@@ -431,17 +449,13 @@ export class RuntimeModuleHost {
       if (Date.parse(delivery.nextAttemptAt) > this.now().getTime()) return;
     }
     if (!existing) {
-      const metadata = record(
+      const metadata = parseModuleConsumerMetadata(
         JSON.parse(await readFile(path.join(directory, "consumer.json"), "utf8")),
-        "runtime module event consumer",
+        consumer.id,
       );
-      if (
-        typeof metadata.createdAt !== "string" ||
-        Number.isNaN(Date.parse(metadata.createdAt))
-      ) {
-        throw new Error(`Runtime module event consumer ${consumer.id} has invalid metadata`);
-      }
-      if (Date.parse(event.occurredAt) < Date.parse(metadata.createdAt)) {
+      const subscribedAt =
+        metadata.subscriptions?.[event.type] ?? metadata.createdAt;
+      if (Date.parse(event.occurredAt) < Date.parse(subscribedAt)) {
         await writeJsonAtomic(target, {
           version: 1,
           consumer: consumer.id,
@@ -493,13 +507,57 @@ export class RuntimeModuleHost {
     }
   }
 
-  private async migratePendingDeliveries(consumer: EventConsumer): Promise<void> {
+  private async inheritedConsumerSubscriptions(
+    consumer: EventConsumer,
+    createdAt: string,
+  ): Promise<Readonly<Partial<Record<HookEventType, string>>>> {
     const eventsRoot = path.join(this.moduleRoot(consumer.module), "events");
     const currentDirectory = this.consumerDirectory(consumer);
-    const escapedSlot = consumer.slot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const consumerDirectoryPattern = new RegExp(
-      `^${escapedSlot}(?:-[a-f0-9]{16})?$`,
-    );
+    const consumerDirectoryPattern = this.consumerDirectoryPattern(consumer);
+    let latest:
+      | {
+          readonly directory: string;
+          readonly metadata: ModuleConsumerMetadata;
+        }
+      | undefined;
+    for (const directoryEntry of await readdir(eventsRoot, { withFileTypes: true })) {
+      if (
+        !directoryEntry.isDirectory() ||
+        directoryEntry.isSymbolicLink() ||
+        !consumerDirectoryPattern.test(directoryEntry.name)
+      ) {
+        continue;
+      }
+      const directory = path.join(eventsRoot, directoryEntry.name);
+      if (directory === currentDirectory) continue;
+      const value = await readOptionalJson(path.join(directory, "consumer.json"));
+      if (value === undefined) continue;
+      const metadata = parseModuleConsumerMetadata(value, directoryEntry.name);
+      if (
+        !latest ||
+        metadata.createdAt > latest.metadata.createdAt ||
+        (
+          metadata.createdAt === latest.metadata.createdAt &&
+          directoryEntry.name > path.basename(latest.directory)
+        )
+      ) {
+        latest = { directory, metadata };
+      }
+    }
+    const subscriptions: Partial<Record<HookEventType, string>> = {};
+    for (const type of consumer.types) {
+      subscriptions[type] =
+        latest?.metadata.subscriptions === undefined
+          ? latest?.metadata.createdAt ?? createdAt
+          : latest.metadata.subscriptions[type] ?? createdAt;
+    }
+    return subscriptions;
+  }
+
+  private async migrateDeliveries(consumer: EventConsumer): Promise<void> {
+    const eventsRoot = path.join(this.moduleRoot(consumer.module), "events");
+    const currentDirectory = this.consumerDirectory(consumer);
+    const consumerDirectoryPattern = this.consumerDirectoryPattern(consumer);
     const candidates = new Map<
       string,
       { readonly delivery: ModuleDelivery; readonly directory: string }
@@ -535,12 +593,17 @@ export class RuntimeModuleHost {
       }
     }
     for (const { delivery, directory } of candidates.values()) {
-      if (directory === currentDirectory || delivery.status !== "retrying") continue;
+      if (directory === currentDirectory) continue;
       await writeJsonAtomic(path.join(currentDirectory, `${delivery.eventId}.json`), {
         ...delivery,
         consumer: consumer.id,
       } satisfies ModuleDelivery);
     }
+  }
+
+  private consumerDirectoryPattern(consumer: EventConsumer): RegExp {
+    const escapedSlot = consumer.slot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`^${escapedSlot}(?:-[a-f0-9]{16})?$`);
   }
 
   private async readStorage(
@@ -647,6 +710,49 @@ function parseModuleDelivery(value: unknown): ModuleDelivery {
     throw new Error("Invalid runtime module event delivery");
   }
   return delivery as unknown as ModuleDelivery;
+}
+
+function parseModuleConsumerMetadata(
+  value: unknown,
+  expectedId: string,
+): ModuleConsumerMetadata {
+  const metadata = record(value, "runtime module event consumer");
+  if (
+    metadata.version !== 1 ||
+    metadata.id !== expectedId ||
+    typeof metadata.createdAt !== "string" ||
+    Number.isNaN(Date.parse(metadata.createdAt))
+  ) {
+    throw new Error(`Runtime module event consumer ${expectedId} has invalid metadata`);
+  }
+  if (metadata.subscriptions === undefined) {
+    return {
+      version: 1,
+      id: expectedId,
+      createdAt: metadata.createdAt,
+    };
+  }
+  const rawSubscriptions = record(
+    metadata.subscriptions,
+    `runtime module event consumer ${expectedId} subscriptions`,
+  );
+  const subscriptions: Partial<Record<HookEventType, string>> = {};
+  for (const [type, subscribedAt] of Object.entries(rawSubscriptions)) {
+    if (
+      !HOOK_EVENT_TYPES.includes(type as HookEventType) ||
+      typeof subscribedAt !== "string" ||
+      Number.isNaN(Date.parse(subscribedAt))
+    ) {
+      throw new Error(`Runtime module event consumer ${expectedId} has invalid metadata`);
+    }
+    subscriptions[type as HookEventType] = subscribedAt;
+  }
+  return {
+    version: 1,
+    id: expectedId,
+    createdAt: metadata.createdAt,
+    subscriptions,
+  };
 }
 
 function moduleDeliveryPrecedes(

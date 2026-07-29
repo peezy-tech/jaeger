@@ -36,6 +36,7 @@ const state = {
   peer: null,
   sessionActive: false,
   sessionId: null,
+  sessionStart: null,
   transcriptDrafts: new Map(),
 };
 
@@ -135,7 +136,10 @@ elements.reconnectButton.addEventListener("click", async () => {
 elements.typedProbe.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    if (!state.sessionActive) await startSession();
+    if (!state.sessionActive) {
+      const connected = await startSession();
+      if (!connected) return;
+    }
     await post("api/text", { text: elements.probeInput.value });
     setSignal("Spoken probe sent");
   } catch (error) {
@@ -144,6 +148,18 @@ elements.typedProbe.addEventListener("submit", async (event) => {
 });
 
 async function startSession() {
+  if (state.sessionActive) return true;
+  if (state.sessionStart) return await state.sessionStart;
+  const pending = startSessionAttempt();
+  state.sessionStart = pending;
+  try {
+    return await pending;
+  } finally {
+    if (state.sessionStart === pending) state.sessionStart = null;
+  }
+}
+
+async function startSessionAttempt() {
   elements.talkButton.disabled = true;
   const requestedSessionId = crypto.randomUUID();
   setSignal("Requesting microphone");

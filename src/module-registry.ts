@@ -30,11 +30,13 @@ const MODULE_MUTATION_LOCK_FILE = ".modules-mutation.lock";
 const MODULE_DIRECTORY = "modules";
 const RUNTIME_CONFIG_FILE = "jaeger.runtime.mjs";
 const MODULE_TRANSACTION_FILE = "transaction.json";
-const MODULE_TRANSACTION_PREFIXES = [
-  ".modules-stage-",
-  ".modules-remove-",
-  ".modules-sync-",
-] as const;
+const MODULE_TRANSACTION_DIRECTORY =
+  /^\.modules-(stage|remove|sync)-[A-Za-z0-9]{6}$/;
+const MODULE_TRANSACTION_ACTIONS = {
+  stage: "add",
+  remove: "remove",
+  sync: "sync",
+} as const;
 const MAX_MODULE_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_MODULE_BYTES = 25 * 1024 * 1024;
 const MODULE_REGISTRY_CODE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
@@ -1898,9 +1900,8 @@ async function recoverModuleTransactions(root: string): Promise<void> {
     throw error;
   }
   for (const entry of entries) {
-    if (!MODULE_TRANSACTION_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) {
-      continue;
-    }
+    const match = MODULE_TRANSACTION_DIRECTORY.exec(entry.name);
+    if (!match) continue;
     const staging = path.join(root, entry.name);
     const stagingStat = await lstat(staging);
     if (!entry.isDirectory() || stagingStat.isSymbolicLink()) {
@@ -1908,15 +1909,25 @@ async function recoverModuleTransactions(root: string): Promise<void> {
     }
     let transaction: ModuleTransaction;
     try {
+      const journalPath = path.join(staging, MODULE_TRANSACTION_FILE);
+      const journalStat = await lstat(journalPath);
+      if (!journalStat.isFile() || journalStat.isSymbolicLink()) {
+        throw new Error(
+          `Unsafe module transaction journal requires operator recovery: ${journalPath}`,
+        );
+      }
       transaction = await readModuleTransaction(staging);
     } catch (error) {
       if (hasCode(error, "ENOENT")) {
-        // The journal is published before any project state is moved. A stage
-        // without one is therefore an interrupted preparation only.
-        await rm(staging, { recursive: true, force: true });
+        // A generated name without Jaeger's regular transaction journal is not
+        // owned recovery state and must remain untouched.
         continue;
       }
       throw error;
+    }
+    const kind = match[1] as keyof typeof MODULE_TRANSACTION_ACTIONS;
+    if (transaction.action !== MODULE_TRANSACTION_ACTIONS[kind]) {
+      throw new Error(`Module transaction action does not match its path: ${staging}`);
     }
     if (transaction.phase === "committed") {
       await rm(staging, { recursive: true, force: true });

@@ -39,6 +39,7 @@
     "THIRD_PARTY_NOTICES.md",
     "dist/",
     "docs/deployment-model.md",
+    "docs/design/codex-realtime-voice-module.md",
     "docs/design/jaeger-runtime-modules.md",
     "docs/design/jaeger-workflows.md",
     "schemas/",

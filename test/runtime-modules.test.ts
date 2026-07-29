@@ -346,6 +346,97 @@ test("runtime config changes preserve pending event retries", async () => {
   }
 });
 
+test("runtime config handoff preserves delivered events and claims unscanned events", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-config-handoff-"));
+  const stateDir = path.join(root, "state");
+  const eventsDir = path.join(stateDir, ".hooks", "events");
+  const deliveredEventId = `evt-${"a".repeat(64)}`;
+  const unscannedEventId = `evt-${"b".repeat(64)}`;
+  await mkdir(eventsDir, { recursive: true });
+  let now = new Date("2026-07-25T00:00:00.000Z");
+  const writeEvent = async (eventId: string): Promise<void> => {
+    await writeFile(
+      path.join(eventsDir, `${eventId}.json`),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        id: eventId,
+        type: "run.terminal",
+        occurredAt: now.toISOString(),
+        observedAt: now.toISOString(),
+        run: { runId: "20260725000000-dddddddddd" },
+        subject: { status: "completed" },
+      })}\n`,
+    );
+  };
+  await writeEvent(deliveredEventId);
+  const handled: string[] = [];
+  const config = (digest: string): RuntimeModuleConfig => ({
+    version: 1,
+    path: path.join(root, "jaeger.runtime.mjs"),
+    digest,
+    modules: [{
+      name: "fixture",
+      setup(runtime) {
+        runtime.events.consume("run.terminal", async (event) => {
+          handled.push(event.id);
+        });
+      },
+    }],
+  });
+  const first = new RuntimeModuleHost({
+    stateDir,
+    config: config("a".repeat(64)),
+    operations,
+    tickIntervalMs: 10,
+    now: () => now,
+  });
+  let second: RuntimeModuleHost | undefined;
+  try {
+    await first.initialize();
+    first.start();
+    await waitFor(() => handled.includes(deliveredEventId));
+    await first.stop();
+
+    now = new Date("2026-07-25T00:00:01.000Z");
+    await writeEvent(unscannedEventId);
+    now = new Date("2026-07-25T00:00:02.000Z");
+    second = new RuntimeModuleHost({
+      stateDir,
+      config: config("b".repeat(64)),
+      operations,
+      tickIntervalMs: 10,
+      now: () => now,
+    });
+    await second.initialize();
+    second.start();
+    await waitFor(() => handled.includes(unscannedEventId));
+    await second.stop();
+
+    assert.deepEqual(handled, [deliveredEventId, unscannedEventId]);
+    for (const eventId of [deliveredEventId, unscannedEventId]) {
+      const delivery = JSON.parse(
+        await readFile(
+          path.join(
+            stateDir,
+            ".modules",
+            "fixture",
+            "events",
+            `fixture-1-${"b".repeat(16)}`,
+            `${eventId}.json`,
+          ),
+          "utf8",
+        ),
+      ) as Record<string, JsonValue>;
+      assert.equal(delivery.status, "delivered");
+      assert.equal(delivery.attempts, 1);
+    }
+  } finally {
+    await second?.stop();
+    await first.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runs trusted modules in-process and durably retries lifecycle events", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-host-"));
   const stateDir = path.join(root, "state");
