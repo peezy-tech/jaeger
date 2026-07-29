@@ -18,6 +18,10 @@ test("jaeger_status invokes the installed CLI with fixed read-only arguments", a
   const calls = [];
   const handlers = createJaegerReadonlyRequestHandlers({
     jaegerBin: "/opt/jaeger",
+    env: {
+      XDG_CONFIG_HOME: "/srv/jaeger-config",
+      JAEGER_SOCKET: "/run/user/1000/private-jaeger.sock",
+    },
     execute: async (...args) => {
       calls.push(args);
       return { stdout: '{"runtime":"local-service"}\n' };
@@ -35,6 +39,12 @@ test("jaeger_status invokes the installed CLI with fixed read-only arguments", a
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], "/opt/jaeger");
   assert.deepEqual(calls[0][1], ["status", "--json"]);
+  assert.equal(calls[0][2].env.XDG_CONFIG_HOME, "/srv/jaeger-config");
+  assert.equal(
+    calls[0][2].env.JAEGER_SOCKET,
+    "/run/user/1000/private-jaeger.sock",
+  );
+  assert.equal(calls[0][2].env.PATH, process.env.PATH);
 });
 
 test("all other dynamic calls fail closed without executing", async () => {

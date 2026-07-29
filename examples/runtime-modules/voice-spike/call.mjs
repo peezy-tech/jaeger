@@ -4,6 +4,7 @@ import {
   parseHttpsPublicUrl,
   readTelegramConfig,
   sendTelegramCall,
+  TelegramDeliveryUncertainError,
   TelegramCallInvitations,
   updateTelegramCall,
 } from "./telegram-call.mjs";
@@ -37,36 +38,45 @@ const { token, invitation } = await invitations.create({ reason });
 const answerUrl = new URL(publicUrl);
 answerUrl.hash = new URLSearchParams({ call: token }).toString();
 
+let delivery;
 try {
-  const delivery = await sendTelegramCall({
+  delivery = await sendTelegramCall({
     ...telegram,
     answerUrl: answerUrl.href,
     reason: invitation.reason,
     expiresAt: invitation.expiresAt,
   });
-  const recorded = await invitations.recordTelegramDelivery(token, {
-    chatId: telegram.chatId,
-    messageThreadId: telegram.messageThreadId,
-    messageId: delivery.messageId,
-  });
-  if (["answered", "declined", "expired"].includes(recorded.invitation.status)) {
-    await updateTelegramCall({
-      ...telegram,
-      ...recorded.telegram,
-      status: recorded.invitation.status,
-      reason: recorded.invitation.reason,
-    });
-    await invitations.markDispositionUpdated(recorded.invitation.status);
-  }
-  process.stdout.write(
-    `${JSON.stringify({
-      delivered: true,
-      status: recorded.invitation.status,
-      messageId: delivery.messageId,
-      expiresAt: invitation.expiresAt,
-    })}\n`,
-  );
 } catch (error) {
-  await invitations.fail(token);
+  if (error instanceof TelegramDeliveryUncertainError) {
+    await invitations.recordTelegramDeliveryUncertain(token, {
+      chatId: telegram.chatId,
+      messageThreadId: telegram.messageThreadId,
+    });
+  } else {
+    await invitations.fail(token);
+  }
   throw error;
 }
+
+const recorded = await invitations.recordTelegramDelivery(token, {
+  chatId: telegram.chatId,
+  messageThreadId: telegram.messageThreadId,
+  messageId: delivery.messageId,
+});
+if (["answered", "declined", "expired"].includes(recorded.invitation.status)) {
+  await updateTelegramCall({
+    ...telegram,
+    ...recorded.telegram,
+    status: recorded.invitation.status,
+    reason: recorded.invitation.reason,
+  });
+  await invitations.markDispositionUpdated(recorded.invitation.status);
+}
+process.stdout.write(
+  `${JSON.stringify({
+    delivered: true,
+    status: recorded.invitation.status,
+    messageId: delivery.messageId,
+    expiresAt: invitation.expiresAt,
+  })}\n`,
+);

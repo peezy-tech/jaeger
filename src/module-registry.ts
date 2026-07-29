@@ -167,6 +167,16 @@ interface FileSnapshot {
   readonly mode?: number;
 }
 
+interface DirectorySnapshot {
+  readonly path: string;
+  readonly backup?: string;
+}
+
+interface PackageSnapshot {
+  readonly files: readonly FileSnapshot[];
+  readonly directories: readonly DirectorySnapshot[];
+}
+
 export function defaultModuleProjectRoot(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
@@ -219,17 +229,19 @@ export async function resolveModuleItem(
 ): Promise<ResolvedModuleItem> {
   if (!reference.trim()) throw new Error("Module source reference must not be empty");
   const github = parseGithubReference(reference);
+  let githubToken: string | undefined;
   let manifest: SourceDocument;
   if (
     /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(reference)
   ) {
     manifest = await resolveCatalogItem(await bundledRegistryPath(), reference);
   } else if (github) {
+    githubToken = env.GITHUB_TOKEN || env.GH_TOKEN || undefined;
     const commit = await resolveGithubCommit(github.owner, github.repository, github.ref, env);
     const catalogUrl =
       `https://raw.githubusercontent.com/${encodeURIComponent(github.owner)}/` +
       `${encodeURIComponent(github.repository)}/${commit}/jaeger.registry.json`;
-    manifest = await resolveCatalogItem(catalogUrl, github.item);
+    manifest = await resolveCatalogItem(catalogUrl, github.item, githubToken);
   } else {
     const { locator, item } = splitCatalogReference(reference);
     const document = await readJsonDocument(normalizeLocator(locator));
@@ -247,7 +259,7 @@ export async function resolveModuleItem(
   let totalBytes = 0;
   for (const relative of item.files) {
     const locator = resolveRelativeLocator(manifest.locator, relative);
-    const contents = await readSourceBytes(locator);
+    const contents = await readSourceBytes(locator, githubToken);
     if (contents.byteLength > MAX_MODULE_FILE_BYTES) {
       throw new Error(`Module file exceeds ${MAX_MODULE_FILE_BYTES} bytes: ${relative}`);
     }
@@ -341,7 +353,7 @@ async function addModulesUnlocked(
   await mkdir(root, { recursive: true, mode: 0o700 });
   await chmod(root, 0o700);
   const staging = await mkdtemp(path.join(root, ".modules-stage-"));
-  const snapshots = await snapshotPackageFiles(root);
+  const snapshots = await snapshotPackageState(root, staging, shouldInstall);
   const promoted: Array<{ readonly target: string; readonly backup?: string }> = [];
   try {
     for (const module of prepared) {
@@ -367,8 +379,8 @@ async function addModulesUnlocked(
         await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
         await rename(target, backup);
       }
-      await rename(staged, target);
       promoted.push({ target, ...(backup ? { backup } : {}) });
+      await rename(staged, target);
     }
     await writeModuleLock(root, {
       schemaVersion: 1,
@@ -380,7 +392,7 @@ async function addModulesUnlocked(
       await rm(entry.target, { recursive: true, force: true });
       if (entry.backup) await rename(entry.backup, entry.target);
     }
-    await restoreSnapshots(snapshots);
+    await restorePackageSnapshot(snapshots);
     throw error;
   } finally {
     await rm(staging, { recursive: true, force: true });
@@ -442,8 +454,8 @@ async function removeModulesUnlocked(
   };
   if (options.dryRun) return result;
 
-  const snapshots = await snapshotPackageFiles(root);
   const staging = await mkdtemp(path.join(root, ".modules-remove-"));
+  const snapshots = await snapshotPackageState(root, staging, shouldInstall);
   const removed: Array<{ readonly target: string; readonly backup: string }> = [];
   try {
     await writeJsonAtomic(path.join(root, "package.json"), reconciliation.packageJson);
@@ -468,7 +480,7 @@ async function removeModulesUnlocked(
     });
   } catch (error) {
     for (const entry of removed.reverse()) await rename(entry.backup, entry.target);
-    await restoreSnapshots(snapshots);
+    await restorePackageSnapshot(snapshots);
     throw error;
   } finally {
     await rm(staging, { recursive: true, force: true });
@@ -513,7 +525,8 @@ async function syncModulesUnlocked(
     dryRun: options.dryRun === true,
   };
   if (options.dryRun) return result;
-  const snapshots = await snapshotPackageFiles(root);
+  const staging = await mkdtemp(path.join(root, ".modules-sync-"));
+  const snapshots = await snapshotPackageState(root, staging, shouldInstall);
   try {
     await writeJsonAtomic(path.join(root, "package.json"), reconciliation.packageJson);
     if (shouldInstall) {
@@ -525,8 +538,10 @@ async function syncModulesUnlocked(
       dependencies: reconciliation.dependencies,
     });
   } catch (error) {
-    await restoreSnapshots(snapshots);
+    await restorePackageSnapshot(snapshots);
     throw error;
+  } finally {
+    await rm(staging, { recursive: true, force: true });
   }
   return result;
 }
@@ -929,18 +944,30 @@ async function usesModernYarn(
   return match ? Number(match[1]) >= 2 : false;
 }
 
-async function resolveCatalogItem(locator: string, item: string): Promise<SourceDocument> {
-  return await resolveCatalogDocumentItem(await readJsonDocument(locator), item);
+async function resolveCatalogItem(
+  locator: string,
+  item: string,
+  githubToken?: string,
+): Promise<SourceDocument> {
+  return await resolveCatalogDocumentItem(
+    await readJsonDocument(locator, githubToken),
+    item,
+    githubToken,
+  );
 }
 
 async function resolveCatalogDocumentItem(
   document: SourceDocument,
   itemName: string,
+  githubToken?: string,
 ): Promise<SourceDocument> {
   const catalog = parseRegistryCatalog(document.value, document.locator);
   const item = catalog.items.find((candidate) => candidate.name === itemName);
   if (!item) throw new Error(`Registry ${catalog.name} does not contain module ${itemName}`);
-  return await readJsonDocument(resolveCatalogRelativeLocator(document.locator, item.path));
+  return await readJsonDocument(
+    resolveCatalogRelativeLocator(document.locator, item.path),
+    githubToken,
+  );
 }
 
 function parseModuleItem(value: unknown, locator: string): ModuleRegistryItem {
@@ -1165,7 +1192,7 @@ function normalizeLocator(locator: string): string {
   if (/^http:\/\//i.test(locator)) {
     throw new Error(`Remote module sources require HTTPS: ${locator}`);
   }
-  if (locator.startsWith("file:")) return path.resolve(new URL(locator).pathname);
+  if (locator.startsWith("file:")) return path.resolve(fileURLToPath(locator));
   return path.resolve(locator);
 }
 
@@ -1181,8 +1208,11 @@ function resolveCatalogRelativeLocator(base: string, relativeInput: string): str
   return path.resolve(path.dirname(base), ...relative.split("/"));
 }
 
-async function readJsonDocument(locator: string): Promise<SourceDocument> {
-  const contents = await readSourceBytes(locator);
+async function readJsonDocument(
+  locator: string,
+  githubToken?: string,
+): Promise<SourceDocument> {
+  const contents = await readSourceBytes(locator, githubToken);
   try {
     return { locator, value: JSON.parse(contents.toString("utf8")) as unknown };
   } catch (error) {
@@ -1190,9 +1220,9 @@ async function readJsonDocument(locator: string): Promise<SourceDocument> {
   }
 }
 
-async function readSourceBytes(locator: string): Promise<Buffer> {
+async function readSourceBytes(locator: string, githubToken?: string): Promise<Buffer> {
   if (/^https:\/\//i.test(locator)) {
-    const response = await fetchHttps(locator);
+    const response = await fetchHttps(locator, githubToken);
     if (!response.ok) throw new Error(`Unable to fetch module source ${locator}: HTTP ${response.status}`);
     const length = Number(response.headers.get("content-length") ?? "0");
     if (length > MAX_MODULE_FILE_BYTES) throw new Error(`Remote module source is too large: ${locator}`);
@@ -1244,14 +1274,19 @@ async function assertNoSymlinkComponents(locator: string): Promise<void> {
   }
 }
 
-async function fetchHttps(locator: string): Promise<Response> {
+async function fetchHttps(locator: string, githubToken?: string): Promise<Response> {
   let current = new URL(locator);
   for (let redirects = 0; redirects <= 10; redirects += 1) {
     if (current.protocol !== "https:") {
       throw new Error(`Remote module sources require HTTPS: ${current.toString()}`);
     }
     const response = await fetch(current, {
-      headers: { "User-Agent": "jaeger-module-registry" },
+      headers: {
+        "User-Agent": "jaeger-module-registry",
+        ...(githubToken && current.hostname === "raw.githubusercontent.com"
+          ? { Authorization: `Bearer ${githubToken}` }
+          : {}),
+      },
       redirect: "manual",
       signal: AbortSignal.timeout(30_000),
     });
@@ -1481,9 +1516,22 @@ async function withModuleMutationLock<T>(
   }
 }
 
-async function snapshotPackageFiles(root: string): Promise<FileSnapshot[]> {
-  return await Promise.all(
-    ["package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"].map(
+async function snapshotPackageState(
+  root: string,
+  staging: string,
+  snapshotInstalledState: boolean,
+): Promise<PackageSnapshot> {
+  const files = await Promise.all(
+    [
+      "package.json",
+      "package-lock.json",
+      "pnpm-lock.yaml",
+      "yarn.lock",
+      ".pnp.cjs",
+      ".pnp.loader.mjs",
+      ".yarn/build-state.yml",
+      ".yarn/install-state.gz",
+    ].map(
       async (name): Promise<FileSnapshot> => {
         const target = path.join(root, name);
         try {
@@ -1496,6 +1544,25 @@ async function snapshotPackageFiles(root: string): Promise<FileSnapshot[]> {
       },
     ),
   );
+  const directories: DirectorySnapshot[] = [];
+  if (!snapshotInstalledState) return { files, directories };
+  try {
+    for (const [index, name] of ["node_modules", ".yarn/unplugged"].entries()) {
+      const target = path.join(root, name);
+      if (!await pathExists(target)) {
+        directories.push({ path: target });
+        continue;
+      }
+      const backup = path.join(staging, "package-state", String(index));
+      await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
+      await rename(target, backup);
+      directories.push({ path: target, backup });
+    }
+    return { files, directories };
+  } catch (error) {
+    await restoreDirectorySnapshots(directories);
+    throw error;
+  }
 }
 
 async function restoreSnapshots(snapshots: readonly FileSnapshot[]): Promise<void> {
@@ -1506,6 +1573,23 @@ async function restoreSnapshots(snapshots: readonly FileSnapshot[]): Promise<voi
       await writeFile(snapshot.path, snapshot.contents, {
         mode: snapshot.mode ?? 0o600,
       });
+    }
+  }
+}
+
+async function restorePackageSnapshot(snapshot: PackageSnapshot): Promise<void> {
+  await restoreSnapshots(snapshot.files);
+  await restoreDirectorySnapshots(snapshot.directories);
+}
+
+async function restoreDirectorySnapshots(
+  snapshots: readonly DirectorySnapshot[],
+): Promise<void> {
+  for (const snapshot of [...snapshots].reverse()) {
+    await rm(snapshot.path, { recursive: true, force: true });
+    if (snapshot.backup) {
+      await mkdir(path.dirname(snapshot.path), { recursive: true, mode: 0o700 });
+      await rename(snapshot.backup, snapshot.path);
     }
   }
 }

@@ -14,6 +14,7 @@ import {
   parseHttpsPublicUrl,
   parseEnv,
   sendTelegramCall,
+  TelegramDeliveryUncertainError,
   TelegramCallInvitations,
   updateTelegramCall,
 } from "../telegram-call.mjs";
@@ -84,6 +85,43 @@ test("a fast answer survives Telegram delivery recording and later failure handl
   assert.equal((await invitations.fail(token)).status, "answered");
   assert.equal((await invitations.current()).status, "answered");
   assert.equal(await invitations.authorize(token), true);
+});
+
+test("an ambiguous Telegram send preserves the invitation and blocks replacement", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-uncertain-send-"));
+  const token = "u".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  await assert.rejects(
+    sendTelegramCall({
+      botToken: "secret",
+      chatId: "-100123",
+      answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=opaque",
+      reason: "Review finished.",
+      expiresAt: "2026-07-29T03:10:00Z",
+      fetchImpl: async () => {
+        throw new Error("response was lost");
+      },
+    }),
+    TelegramDeliveryUncertainError,
+  );
+  await invitations.recordTelegramDeliveryUncertain(token, {
+    chatId: "-100123",
+    messageThreadId: "42",
+  });
+
+  assert.equal((await invitations.answer(token)).invitation.status, "answered");
+  assert.equal(await invitations.authorize(token), true);
+  await assert.rejects(() => invitations.create(), {
+    message:
+      "The Telegram call has an uncertain delivery and must be resolved before creating another",
+    statusCode: 409,
+  });
 });
 
 test("parallel answer and decline requests produce exactly one transition", async () => {

@@ -61,21 +61,23 @@ const telegram = await readTelegramConfig(telegramEnvFile, {
 const invitations = new TelegramCallInvitations({
   stateFile: invitationStateFile,
 });
+const jaegerEnv = {
+  ...(process.env.VOICE_SPIKE_JAEGER_CONFIG_HOME
+    ? { XDG_CONFIG_HOME: process.env.VOICE_SPIKE_JAEGER_CONFIG_HOME }
+    : {}),
+  ...(process.env.VOICE_SPIKE_JAEGER_SOCKET
+    ? { JAEGER_SOCKET: process.env.VOICE_SPIKE_JAEGER_SOCKET }
+    : {}),
+};
 
 const bridge = new CodexAppServer({
   codexBin: process.env.VOICE_SPIKE_CODEX_BIN ?? "codex",
   cwd: process.env.VOICE_SPIKE_CWD ?? "/home/peezy/repos/jaeger",
-  childEnv: {
-    ...(process.env.VOICE_SPIKE_JAEGER_CONFIG_HOME
-      ? { XDG_CONFIG_HOME: process.env.VOICE_SPIKE_JAEGER_CONFIG_HOME }
-      : {}),
-    ...(process.env.VOICE_SPIKE_JAEGER_SOCKET
-      ? { JAEGER_SOCKET: process.env.VOICE_SPIKE_JAEGER_SOCKET }
-      : {}),
-  },
+  childEnv: jaegerEnv,
   dynamicTools: JAEGER_READONLY_TOOLS,
   requestHandlers: createJaegerReadonlyRequestHandlers({
     jaegerBin: process.env.VOICE_SPIKE_JAEGER_BIN ?? "jaeger",
+    env: jaegerEnv,
   }),
   stateFile,
 });

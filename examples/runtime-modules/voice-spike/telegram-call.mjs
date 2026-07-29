@@ -18,6 +18,13 @@ const STATE_LOCK_WAIT_MS = 5_000;
 const INVALID_STATE_LOCK_STALE_MS = 30_000;
 const STATE_LOCK_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
 
+export class TelegramDeliveryUncertainError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "TelegramDeliveryUncertainError";
+  }
+}
+
 export class TelegramCallInvitations {
   constructor({
     stateFile,
@@ -37,6 +44,12 @@ export class TelegramCallInvitations {
     return await this.#exclusive(async () => {
       const current = await this.#read();
       const currentStatus = this.#status(current);
+      if (current?.telegramDeliveryUncertain) {
+        throw httpError(
+          "The Telegram call has an uncertain delivery and must be resolved before creating another",
+          409,
+        );
+      }
       if (currentStatus === "ringing") {
         throw httpError("A Telegram call is already ringing", 409);
       }
@@ -120,6 +133,32 @@ export class TelegramCallInvitations {
         invitation: publicInvitation(record, status),
         telegram: record.telegram,
       };
+    });
+  }
+
+  async recordTelegramDeliveryUncertain(token, telegram) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      const status = this.#status(record);
+      if (
+        !tokenMatches(record, token) ||
+        !["ringing", "answered", "declined", "expired"].includes(status)
+      ) {
+        throw httpError("Telegram call is no longer available", 410);
+      }
+      record.telegramDeliveryUncertain = {
+        chatId: String(telegram.chatId),
+        messageThreadId: telegram.messageThreadId
+          ? String(telegram.messageThreadId)
+          : null,
+        recordedAt: new Date(this.now()).toISOString(),
+      };
+      if (status === "expired" && record.status !== "expired") {
+        record.status = "expired";
+        record.expiredAt = new Date(this.now()).toISOString();
+      }
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return publicInvitation(record, status);
     });
   }
 
@@ -581,12 +620,23 @@ async function telegramRequest({ botToken, method, payload, fetchImpl }) {
       },
     );
   } catch (error) {
+    if (method === "sendMessage") {
+      throw new TelegramDeliveryUncertainError(
+        `Telegram ${method} delivery is uncertain: ${error.message}`,
+        { cause: error },
+      );
+    }
     throw new Error(`Telegram ${method} failed: ${error.message}`);
   }
   let value;
   try {
     value = await response.json();
   } catch {
+    if (method === "sendMessage") {
+      throw new TelegramDeliveryUncertainError(
+        `Telegram ${method} delivery is uncertain because its response was invalid`,
+      );
+    }
     throw new Error(`Telegram ${method} returned an invalid response`);
   }
   if (!response.ok || !value.ok) {

@@ -11,6 +11,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { satisfies } from "semver";
 import {
   addModules,
@@ -111,6 +112,138 @@ test("a multi-module add invokes the shared package manager exactly once", async
     assert.deepEqual(invocations, [
       "install --ignore-scripts --no-audit --no-fund",
     ]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("failed dependency installs restore manifests and the installed dependency tree", async () => {
+  for (const action of ["add", "remove", "sync"] as const) {
+    const fixture = await registryFixture();
+    try {
+      await writeJson(path.join(fixture.runtimeRoot, "package.json"), {
+        name: "operator-runtime",
+        private: true,
+        type: "module",
+        dependencies: { "operator-only": "^9.0.0" },
+      });
+      if (action !== "add") {
+        await addModules({
+          root: fixture.runtimeRoot,
+          references: [`${fixture.catalogPath}#alpha`],
+          install: false,
+        });
+      }
+      if (action === "sync") {
+        const packagePath = path.join(fixture.runtimeRoot, "package.json");
+        const packageJson = JSON.parse(await readFile(packagePath, "utf8")) as {
+          dependencies: Record<string, string>;
+        };
+        packageJson.dependencies["fixture-dependency"] = ">=2 <5";
+        await writeJson(packagePath, packageJson);
+      }
+
+      const packagePath = path.join(fixture.runtimeRoot, "package.json");
+      const packageLockPath = path.join(fixture.runtimeRoot, "package-lock.json");
+      const treeMarker = path.join(fixture.runtimeRoot, "node_modules", "graph.txt");
+      await mkdir(path.dirname(treeMarker), { recursive: true });
+      await writeFile(treeMarker, `old-${action}-tree\n`);
+      await writeFile(packageLockPath, `old-${action}-lock\n`);
+      const packageBefore = await readFile(packagePath);
+
+      const bin = path.join(fixture.root, "bin");
+      await mkdir(bin);
+      const npm = path.join(bin, "npm");
+      await writeFile(
+        npm,
+        "#!/bin/sh\n" +
+          "/bin/mkdir -p node_modules\n" +
+          `printf '%s\\n' ${JSON.stringify(`new-${action}-tree`)} > node_modules/graph.txt\n` +
+          `printf '%s\\n' ${JSON.stringify(`new-${action}-lock`)} > package-lock.json\n` +
+          "exit 17\n",
+      );
+      await chmod(npm, 0o755);
+      const env = { ...process.env, PATH: bin };
+
+      const operation =
+        action === "add"
+          ? addModules({
+              root: fixture.runtimeRoot,
+              references: [`${fixture.catalogPath}#alpha`],
+              env,
+            })
+          : action === "remove"
+            ? removeModules({
+                root: fixture.runtimeRoot,
+                names: ["alpha"],
+                env,
+              })
+            : syncModules({ root: fixture.runtimeRoot, env });
+      await assert.rejects(operation, /dependency installation failed/);
+
+      assert.deepEqual(await readFile(packagePath), packageBefore);
+      assert.equal(await readFile(packageLockPath, "utf8"), `old-${action}-lock\n`);
+      assert.equal(await readFile(treeMarker, "utf8"), `old-${action}-tree\n`);
+      const installedNames = (await listInstalledModules(fixture.runtimeRoot)).modules.map(
+        ({ name }) => name,
+      );
+      assert.deepEqual(installedNames, action === "add" ? [] : ["alpha"]);
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("failed Yarn installs restore Plug'n'Play and unplugged package state", async () => {
+  const fixture = await registryFixture();
+  try {
+    const yarnState = new Map([
+      [".pnp.cjs", "old-pnp\n"],
+      [".pnp.loader.mjs", "old-loader\n"],
+      [".yarn/build-state.yml", "old-build-state\n"],
+      [".yarn/install-state.gz", "old-install-state\n"],
+      [".yarn/unplugged/fixture/index.js", "old-unplugged\n"],
+    ]);
+    await writeFile(
+      path.join(fixture.runtimeRoot, ".yarnrc.yml"),
+      "nodeLinker: pnp\n",
+    );
+    for (const [relative, contents] of yarnState) {
+      const target = path.join(fixture.runtimeRoot, relative);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, contents);
+    }
+
+    const bin = path.join(fixture.root, "bin");
+    await mkdir(bin);
+    const yarn = path.join(bin, "yarn");
+    await writeFile(
+      yarn,
+      "#!/bin/sh\n" +
+        "/bin/mkdir -p .yarn/unplugged/fixture\n" +
+        "printf 'new-pnp\\n' > .pnp.cjs\n" +
+        "printf 'new-loader\\n' > .pnp.loader.mjs\n" +
+        "printf 'new-build-state\\n' > .yarn/build-state.yml\n" +
+        "printf 'new-install-state\\n' > .yarn/install-state.gz\n" +
+        "printf 'new-unplugged\\n' > .yarn/unplugged/fixture/index.js\n" +
+        "exit 17\n",
+    );
+    await chmod(yarn, 0o755);
+
+    await assert.rejects(
+      addModules({
+        root: fixture.runtimeRoot,
+        references: [`${fixture.catalogPath}#alpha`],
+        env: { ...process.env, PATH: bin },
+      }),
+      /dependency installation failed/,
+    );
+    for (const [relative, contents] of yarnState) {
+      assert.equal(
+        await readFile(path.join(fixture.runtimeRoot, relative), "utf8"),
+        contents,
+      );
+    }
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -431,6 +564,79 @@ test("GitHub shorthand falls back from an empty GITHUB_TOKEN to GH_TOKEN", async
     assert.equal(authorization, "Bearer fallback-token");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("GitHub shorthand authenticates the pinned catalog and module files", async () => {
+  const originalFetch = globalThis.fetch;
+  const commit = "a".repeat(40);
+  const authorizations: Array<string | null> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    authorizations.push(new Headers(init?.headers).get("authorization"));
+    if (url === "https://api.github.com/repos/owner/repository/commits/main") {
+      return Response.json({ sha: commit });
+    }
+    if (
+      url ===
+      `https://raw.githubusercontent.com/owner/repository/${commit}/jaeger.registry.json`
+    ) {
+      return Response.json({
+        schemaVersion: 1,
+        name: "private-fixture",
+        items: [{ name: "alpha", path: "alpha/jaeger.module.json" }],
+      });
+    }
+    if (
+      url ===
+      `https://raw.githubusercontent.com/owner/repository/${commit}/alpha/jaeger.module.json`
+    ) {
+      return Response.json({
+        schemaVersion: 1,
+        name: "alpha",
+        files: ["alpha.mjs"],
+        dependencies: {},
+      });
+    }
+    if (
+      url ===
+      `https://raw.githubusercontent.com/owner/repository/${commit}/alpha/alpha.mjs`
+    ) {
+      return new Response("export const alpha = true\n");
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  }) as typeof fetch;
+  try {
+    const resolved = await resolveModuleItem("owner/repository/alpha#main", {
+      GITHUB_TOKEN: "private-token",
+    });
+    assert.equal(resolved.item.name, "alpha");
+    assert.deepEqual(authorizations, [
+      "Bearer private-token",
+      "Bearer private-token",
+      "Bearer private-token",
+      "Bearer private-token",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("file URL locators decode escaped path characters", async () => {
+  const fixture = await registryFixture();
+  try {
+    const locator = pathToFileURL(fixture.catalogPath).href.replace(
+      "jaeger.registry.json",
+      "%6Aaeger.registry.json",
+    );
+    const resolved = await resolveModuleItem(`${locator}#alpha`);
+    assert.equal(resolved.item.name, "alpha");
+    assert.equal(
+      resolved.files.get("alpha.mjs")?.toString("utf8"),
+      "export const alpha = true\n",
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
 

@@ -20,6 +20,7 @@ export const JAEGER_READONLY_TOOLS = [
 export function createJaegerReadonlyRequestHandlers({
   jaegerBin = "jaeger",
   execute = execFileAsync,
+  env = {},
 } = {}) {
   return {
     "item/tool/call": async (params) => {
@@ -47,6 +48,7 @@ export function createJaegerReadonlyRequestHandlers({
             encoding: "utf8",
             timeout: 15_000,
             maxBuffer: 1_000_000,
+            env: { ...process.env, ...env },
           },
         );
         const status = JSON.parse(stdout);
