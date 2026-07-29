@@ -299,6 +299,7 @@ async function stopOwnedRealtimeSession(sessionId) {
     activeRealtimeSessionId === sessionId ||
     startingRealtimeSessionId === sessionId;
   if (!ownsSession) return false;
+  await bridge.stopRealtime();
   if (activeRealtimeSessionId === sessionId) {
     activeRealtimeSessionId = null;
   }
@@ -306,7 +307,6 @@ async function stopOwnedRealtimeSession(sessionId) {
     startingRealtimeSessionId = null;
   }
   clearRealtimeExpiryTimer();
-  await bridge.stopRealtime();
   return true;
 }
 
