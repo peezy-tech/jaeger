@@ -81,6 +81,7 @@ export class CodexAppServer extends EventEmitter {
     this.ready = false;
     this.stopping = false;
     this.realtimeStarting = false;
+    this.reconnecting = null;
     this.stdoutReaders = new WeakMap();
   }
 
@@ -159,7 +160,22 @@ export class CodexAppServer extends EventEmitter {
     throw new Error("Codex app-server did not exit after SIGKILL");
   }
 
-  async reconnect() {
+  reconnect() {
+    if (this.reconnecting) return this.reconnecting;
+    const reconnecting = this.#reconnect();
+    this.reconnecting = reconnecting;
+    void reconnecting.then(
+      () => {
+        if (this.reconnecting === reconnecting) this.reconnecting = null;
+      },
+      () => {
+        if (this.reconnecting === reconnecting) this.reconnecting = null;
+      },
+    );
+    return reconnecting;
+  }
+
+  async #reconnect() {
     const expectedThreadId = this.threadId;
     if (!expectedThreadId) throw new Error("No operator thread exists");
     await this.stop();

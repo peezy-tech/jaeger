@@ -247,6 +247,8 @@ test("a replacement stays unavailable until initialize and resume complete", asy
 
   await bridge.start();
   const reconnecting = bridge.reconnect();
+  const concurrentReconnect = bridge.reconnect();
+  assert.equal(concurrentReconnect, reconnecting);
   await waitForProcess(processes, 1);
   await waitForRequest(processes[1], "initialize");
   assert.equal(bridge.connected, false);
