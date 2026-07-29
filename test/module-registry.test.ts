@@ -5,6 +5,7 @@ import {
   mkdir,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -117,6 +118,33 @@ test("a multi-module add invokes the shared package manager exactly once", async
   }
 });
 
+test("rejects a filesystem root and preserves existing project directory permissions", async () => {
+  const fixture = await registryFixture();
+  try {
+    await assert.rejects(
+      addModules({
+        root: path.parse(fixture.root).root,
+        references: [`${fixture.catalogPath}#alpha`],
+        dryRun: true,
+      }),
+      /must not be a filesystem root/,
+    );
+
+    await chmod(fixture.runtimeRoot, 0o755);
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+    assert.equal((await stat(fixture.runtimeRoot)).mode & 0o777, 0o755);
+
+    await syncModules({ root: fixture.runtimeRoot, install: false });
+    assert.equal((await stat(fixture.runtimeRoot)).mode & 0o777, 0o755);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("failed dependency installs restore manifests and the installed dependency tree", async () => {
   for (const action of ["add", "remove", "sync"] as const) {
     const fixture = await registryFixture();
@@ -144,10 +172,12 @@ test("failed dependency installs restore manifests and the installed dependency 
       }
 
       const packagePath = path.join(fixture.runtimeRoot, "package.json");
+      const shrinkwrapPath = path.join(fixture.runtimeRoot, "npm-shrinkwrap.json");
       const packageLockPath = path.join(fixture.runtimeRoot, "package-lock.json");
       const treeMarker = path.join(fixture.runtimeRoot, "node_modules", "graph.txt");
       await mkdir(path.dirname(treeMarker), { recursive: true });
       await writeFile(treeMarker, `old-${action}-tree\n`);
+      await writeFile(shrinkwrapPath, `old-${action}-shrinkwrap\n`);
       await writeFile(packageLockPath, `old-${action}-lock\n`);
       const packageBefore = await readFile(packagePath);
 
@@ -159,6 +189,7 @@ test("failed dependency installs restore manifests and the installed dependency 
         "#!/bin/sh\n" +
           "/bin/mkdir -p node_modules\n" +
           `printf '%s\\n' ${JSON.stringify(`new-${action}-tree`)} > node_modules/graph.txt\n` +
+          `printf '%s\\n' ${JSON.stringify(`new-${action}-shrinkwrap`)} > npm-shrinkwrap.json\n` +
           `printf '%s\\n' ${JSON.stringify(`new-${action}-lock`)} > package-lock.json\n` +
           "exit 17\n",
       );
@@ -182,6 +213,10 @@ test("failed dependency installs restore manifests and the installed dependency 
       await assert.rejects(operation, /dependency installation failed/);
 
       assert.deepEqual(await readFile(packagePath), packageBefore);
+      assert.equal(
+        await readFile(shrinkwrapPath, "utf8"),
+        `old-${action}-shrinkwrap\n`,
+      );
       assert.equal(await readFile(packageLockPath, "utf8"), `old-${action}-lock\n`);
       assert.equal(await readFile(treeMarker, "utf8"), `old-${action}-tree\n`);
       const installedNames = (await listInstalledModules(fixture.runtimeRoot)).modules.map(
@@ -358,6 +393,38 @@ test("fails closed on conflicting module dependency requirements before writing 
     );
     await assert.rejects(
       readFile(path.join(fixture.runtimeRoot, "modules", "alpha", "alpha.mjs")),
+      hasCode("ENOENT"),
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects module dependencies owned by operator optionalDependencies", async () => {
+  const fixture = await registryFixture();
+  try {
+    const packagePath = path.join(fixture.runtimeRoot, "package.json");
+    await writeJson(packagePath, {
+      name: "operator-runtime",
+      private: true,
+      type: "module",
+      optionalDependencies: {
+        "fixture-dependency": "^5.0.0",
+      },
+    });
+    const packageBefore = await readFile(packagePath);
+
+    await assert.rejects(
+      addModules({
+        root: fixture.runtimeRoot,
+        references: [`${fixture.catalogPath}#alpha`],
+        install: false,
+      }),
+      /operator-owned in optionalDependencies; move it to dependencies/,
+    );
+    assert.deepEqual(await readFile(packagePath), packageBefore);
+    await assert.rejects(
+      readFile(path.join(fixture.runtimeRoot, "modules.lock.json")),
       hasCode("ENOENT"),
     );
   } finally {

@@ -197,6 +197,7 @@ export async function runtimeModuleProjectDigest(
   }
   for (const relative of [
     "package.json",
+    "npm-shrinkwrap.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",
@@ -295,7 +296,6 @@ export async function addModules(
   await assertSafeModuleProject(root, true);
   if (options.dryRun) return await addModulesUnlocked(options);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await chmod(root, 0o700);
   return await withModuleMutationLock(root, async () => await addModulesUnlocked(options));
 }
 
@@ -350,8 +350,6 @@ async function addModulesUnlocked(
   };
   if (options.dryRun) return result;
 
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  await chmod(root, 0o700);
   const staging = await mkdtemp(path.join(root, ".modules-stage-"));
   const snapshots = await snapshotPackageState(root, staging, shouldInstall);
   const promoted: Array<{ readonly target: string; readonly backup?: string }> = [];
@@ -495,7 +493,6 @@ export async function syncModules(
   await assertSafeModuleProject(root, true);
   if (options.dryRun) return await syncModulesUnlocked(options);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await chmod(root, 0o700);
   return await withModuleMutationLock(root, async () => await syncModulesUnlocked(options));
 }
 
@@ -643,12 +640,21 @@ function reconcilePackageProject(
     packageJson.devDependencies,
     "package.json devDependencies",
   );
+  const rootOptionalDependencies = stringRecord(
+    packageJson.optionalDependencies,
+    "package.json optionalDependencies",
+  );
   const requested = new Map<string, Record<string, string>>();
   for (const [moduleName, module] of Object.entries(modules)) {
     for (const [dependency, range] of Object.entries(module.dependencies)) {
       if (rootDevDependencies[dependency] !== undefined && rootDependencies[dependency] === undefined) {
         throw new Error(
           `Runtime dependency ${dependency} is operator-owned in devDependencies; move it to dependencies before installing ${moduleName}`,
+        );
+      }
+      if (rootOptionalDependencies[dependency] !== undefined) {
+        throw new Error(
+          `Runtime dependency ${dependency} is operator-owned in optionalDependencies; move it to dependencies before installing ${moduleName}`,
         );
       }
       const requesters = requested.get(dependency) ?? {};
@@ -1524,6 +1530,7 @@ async function snapshotPackageState(
   const files = await Promise.all(
     [
       "package.json",
+      "npm-shrinkwrap.json",
       "package-lock.json",
       "pnpm-lock.yaml",
       "yarn.lock",
@@ -1608,6 +1615,9 @@ async function assertSafeModuleProject(
   root: string,
   allowMissing: boolean,
 ): Promise<void> {
+  if (path.dirname(root) === root) {
+    throw new Error(`Jaeger module project must not be a filesystem root: ${root}`);
+  }
   let ancestor = root;
   while (true) {
     try {
@@ -1634,6 +1644,7 @@ async function assertSafeModuleProject(
   for (const relative of [
     MODULE_DIRECTORY,
     "package.json",
+    "npm-shrinkwrap.json",
     "package-lock.json",
     "pnpm-lock.yaml",
     "yarn.lock",

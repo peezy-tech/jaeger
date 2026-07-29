@@ -60,7 +60,7 @@ export default { version: 1, modules: [fixture] }
   }
 });
 
-test("registry-managed runtime digest changes with installed module source", async () => {
+test("registry-managed runtime digest changes with module source and npm shrinkwrap", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-digest-"));
   try {
     const moduleRoot = path.join(root, "modules", "fixture");
@@ -78,6 +78,11 @@ test("registry-managed runtime digest changes with installed module source", asy
       path.join(root, "package.json"),
       `${JSON.stringify({ private: true, type: "module", dependencies: {} })}\n`,
     );
+    const shrinkwrapPath = path.join(root, "npm-shrinkwrap.json");
+    await writeFile(
+      shrinkwrapPath,
+      `${JSON.stringify({ lockfileVersion: 3, packages: {} })}\n`,
+    );
     const configPath = path.join(root, "jaeger.runtime.mjs");
     await writeFile(
       configPath,
@@ -93,6 +98,15 @@ export default { version: 1, modules: [fixture] }
     );
     const second = await loadRuntimeModuleConfig(configPath);
     assert.notEqual(first.digest, second.digest);
+    await writeFile(
+      shrinkwrapPath,
+      `${JSON.stringify({
+        lockfileVersion: 3,
+        packages: { "node_modules/fixture": { version: "1.0.0" } },
+      })}\n`,
+    );
+    const third = await loadRuntimeModuleConfig(configPath);
+    assert.notEqual(second.digest, third.digest);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
