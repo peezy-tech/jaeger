@@ -1,0 +1,56 @@
+{
+  "$schema": "../../../schemas/jaeger.module.schema.json",
+  "schemaVersion": 1,
+  "name": "voice-spike",
+  "title": "Codex realtime voice compatibility spike",
+  "description": "Private WebRTC voice surface and outbound Telegram call invitation proof.",
+  "files": [
+    "README.md",
+    "call.mjs",
+    "codex-app-server.mjs",
+    "jaeger-readonly-tools.mjs",
+    "probe.mjs",
+    "public/app.js",
+    "public/favicon.svg",
+    "public/index.html",
+    "public/styles.css",
+    "server.mjs",
+    "telegram-call.mjs",
+    "test/codex-app-server.test.mjs",
+    "test/jaeger-readonly-tools.test.mjs",
+    "test/telegram-call.test.mjs"
+  ],
+  "dependencies": {},
+  "requires": {
+    "jaeger": ">=0.1.4",
+    "node": ">=22.13.0",
+    "codex": "realtime_conversation"
+  },
+  "configuration": [
+    {
+      "name": "VOICE_SPIKE_PUBLIC_ORIGIN",
+      "required": true
+    },
+    {
+      "name": "VOICE_TELEGRAM_ENV_FILE",
+      "required": false,
+      "secret": true
+    }
+  ],
+  "declaredAccess": {
+    "network": [
+      "api.telegram.org",
+      "configured HTTPS origin"
+    ],
+    "process": [
+      "codex app-server",
+      "jaeger status"
+    ]
+  },
+  "commands": {
+    "start": "node modules/voice-spike/server.mjs",
+    "call": "node modules/voice-spike/call.mjs",
+    "probe": "node modules/voice-spike/probe.mjs",
+    "test": "node --test modules/voice-spike/test/*.test.mjs"
+  }
+}

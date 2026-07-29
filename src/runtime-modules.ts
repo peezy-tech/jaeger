@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   mkdir,
   open,
@@ -19,6 +19,7 @@ import {
   type LifecycleHookEvent,
 } from "./hooks.js";
 import { ensurePrivateDirectory } from "./paths.js";
+import { runtimeModuleProjectDigest } from "./module-registry.js";
 import type { JsonValue } from "./types.js";
 
 const MODULE_NAME = /^[a-z][a-z0-9-]{0,63}$/;
@@ -524,7 +525,7 @@ export async function loadRuntimeModuleConfig(
 ): Promise<RuntimeModuleConfig> {
   const resolved = await realpath(path.resolve(configPath));
   const source = await readFile(resolved, "utf8");
-  const digest = createHash("sha256").update(source).digest("hex");
+  const digest = await runtimeModuleProjectDigest(resolved, source);
   const imported = (await import(`${pathToFileURL(resolved).href}?digest=${digest}`)) as {
     readonly default?: unknown;
   };

@@ -44,6 +44,7 @@ try {
     "dist/index.js",
     "dist/launchers.js",
     "dist/local-runtime-service.js",
+    "dist/module-registry.js",
     "dist/paths.js",
     "dist/path-trust.js",
     "dist/process-lease.js",
@@ -61,11 +62,19 @@ try {
     "dist/vendor/claude-agent-sdk/sdk.mjs",
     "docs/design/jaeger-runtime-modules.md",
     "docs/design/jaeger-workflows.md",
+    "schemas/jaeger.module.schema.json",
+    "schemas/jaeger.registry.schema.json",
+    "jaeger.registry.json",
     "examples/runtime-modules/telegram/README.md",
+    "examples/runtime-modules/telegram/jaeger.module.json",
     "examples/runtime-modules/telegram/jaeger.runtime.mjs",
     "examples/runtime-modules/telegram/package-lock.json",
     "examples/runtime-modules/telegram/package.json",
     "examples/runtime-modules/telegram/telegram.mjs",
+    "examples/runtime-modules/voice-spike/README.md",
+    "examples/runtime-modules/voice-spike/jaeger.module.json",
+    "examples/runtime-modules/voice-spike/server.mjs",
+    "examples/runtime-modules/voice-spike/public/app.js",
     "examples/mixed-review.js",
     "examples/backend-smoke.schedule.toml",
     "skills/jaeger-workflows/SKILL.md",
@@ -158,10 +167,42 @@ try {
   assert.match(help.stdout, /jaeger schedule apply/)
   assert.match(help.stdout, /jaeger hooks validate/)
   assert.match(help.stdout, /jaeger modules validate/)
+  assert.match(help.stdout, /jaeger modules add/)
   assert.match(help.stdout, /jaeger session query/)
   assert.match(help.stdout, /On Linux,[\s\S]*persistent local backend by default/)
   assert.match(help.stdout, /--harness-config/)
   assert.doesNotMatch(help.stdout, /jaeger session send/)
+
+  const moduleView = JSON.parse(
+    (await run(binary, ["modules", "view", "telegram", "--json"], installDir)).stdout,
+  )
+  assert.equal(moduleView.item?.name, "telegram")
+  assert.equal(moduleView.item?.dependencies?.grammy, "^1.38.3")
+  const moduleProject = path.join(installDir, "module-project")
+  const moduleAdd = JSON.parse(
+    (await run(
+      binary,
+      [
+        "modules",
+        "add",
+        "telegram",
+        "voice-spike",
+        "--root",
+        moduleProject,
+        "--no-install",
+        "--json",
+      ],
+      installDir,
+    )).stdout,
+  )
+  assert.deepEqual(moduleAdd.modules, ["telegram", "voice-spike"])
+  assert.equal(moduleAdd.dependenciesInstalled, false)
+  const modulePackage = JSON.parse(
+    await readFile(path.join(moduleProject, "package.json"), "utf8"),
+  )
+  assert.deepEqual(modulePackage.dependencies, { grammy: "^1.38.3" })
+  await access(path.join(moduleProject, "modules", "telegram", "telegram.mjs"))
+  await access(path.join(moduleProject, "modules", "voice-spike", "server.mjs"))
 
   const environmentRoot = path.join(installDir, "environments")
   await mkdir(path.join(environmentRoot, "package-smoke", "snippets"), { recursive: true })
@@ -453,7 +494,7 @@ timezone = "UTC"
       "inspect after backend restart",
       "schedule validate/apply/trigger/history/disable/remove",
       "hooks validate/status/history and direct delivery",
-      "modules validate/status and in-process event delivery",
+      "modules registry add, validate/status, and in-process event delivery",
     ],
     autoInstalledSkill: false,
   }, null, 2)}\n`)

@@ -45,6 +45,15 @@ import { loadScheduleApplication } from "./schedules.js";
 import { collectStatus, renderStatus } from "./status.js";
 import { loadHookConfig } from "./hook-config.js";
 import { loadRuntimeModuleConfig } from "./runtime-modules.js";
+import {
+  addModules,
+  defaultModuleProjectRoot,
+  diffModule,
+  listInstalledModules,
+  removeModules,
+  resolveModuleItem,
+  syncModules,
+} from "./module-registry.js";
 import { runStdioBridge } from "./stdio-bridge.js";
 import { SshRuntimeClient } from "./ssh-runtime-client.js";
 import {
@@ -111,6 +120,14 @@ Usage:
   jaeger hooks status [--json]
   jaeger hooks history [--hook NAME] [--event ID] [--limit N] [--json]
   jaeger modules validate <jaeger.runtime.mjs> [--json]
+  jaeger modules view <name|source> [--json]
+  jaeger modules add <name|source>... [--root DIR] [--dry-run] [--no-install]
+                     [--overwrite] [--json]
+  jaeger modules list [--root DIR] [--json]
+  jaeger modules diff <name> [--root DIR] [--json]
+  jaeger modules remove <name>... [--root DIR] [--dry-run] [--no-install]
+                        [--force] [--json]
+  jaeger modules sync [--root DIR] [--dry-run] [--no-install] [--json]
   jaeger modules status [--json]
   jaeger env list [--config-root DIR] [--json]
   jaeger env inspect <name> [--file FILE] [--config-root DIR] [--state-root DIR] [--json]
@@ -187,8 +204,22 @@ async function main(rawArgv: string[]): Promise<void> {
     await envCommand(argv.slice(1));
     return;
   }
-  if (command === "modules" && argv[1] === "validate") {
-    await modulesValidateCommand(argv.slice(2));
+  if (
+    command === "modules" &&
+    argv[1] !== "status"
+  ) {
+    const localOnlyAction = ["add", "diff", "list", "remove", "sync"].includes(
+      argv[1] ?? "",
+    );
+    if (
+      selection.name !== "local" &&
+      (selection.explicit || localOnlyAction)
+    ) {
+      throw new Error(
+        "Module project management is host-local; run it through an interactive SSH shell on the target host",
+      );
+    }
+    await modulesLocalCommand(argv.slice(1));
     return;
   }
   const routed = routeQualifiedRuntime(argv, selection);
@@ -632,12 +663,177 @@ async function modulesValidateCommand(argv: string[]): Promise<void> {
   });
 }
 
+async function modulesLocalCommand(argv: string[]): Promise<void> {
+  const action = argv[0];
+  if (action === "validate") {
+    await modulesValidateCommand(argv.slice(1));
+    return;
+  }
+  if (action === "view") {
+    const source = argv[1];
+    if (!source || source.startsWith("-")) throw new Error("modules view requires a source");
+    if (argv.slice(2).some((option) => option !== "--json")) {
+      throw new Error(`Unknown modules view option: ${String(argv[2])}`);
+    }
+    const resolved = await resolveModuleItem(source);
+    writeJson({
+      schemaVersion: 1,
+      source: resolved.reference,
+      resolvedSource: resolved.resolvedSource,
+      digest: resolved.digest,
+      item: resolved.item,
+      files: [...resolved.files.entries()].map(([file, contents]) => ({
+        file,
+        bytes: contents.byteLength,
+      })),
+    });
+    return;
+  }
+  if (action === "add") {
+    const parsed = parseModuleMutationArgs("add", argv.slice(1));
+    writeJson(
+      await addModules({
+        root: parsed.root,
+        references: parsed.values,
+        dryRun: parsed.dryRun,
+        install: parsed.install,
+        overwrite: parsed.overwrite,
+      }),
+    );
+    return;
+  }
+  if (action === "remove") {
+    const parsed = parseModuleMutationArgs("remove", argv.slice(1));
+    writeJson(
+      await removeModules({
+        root: parsed.root,
+        names: parsed.values,
+        dryRun: parsed.dryRun,
+        install: parsed.install,
+        force: parsed.force,
+      }),
+    );
+    return;
+  }
+  if (action === "sync") {
+    const parsed = parseModuleMutationArgs("sync", argv.slice(1));
+    if (parsed.values.length > 0) throw new Error("modules sync does not accept module names");
+    writeJson(
+      await syncModules({
+        root: parsed.root,
+        dryRun: parsed.dryRun,
+        install: parsed.install,
+      }),
+    );
+    return;
+  }
+  if (action === "list") {
+    const { root, remaining } = parseModuleRootArgs(argv.slice(1));
+    if (remaining.some((option) => option !== "--json")) {
+      throw new Error(`Unknown modules list option: ${String(remaining[0])}`);
+    }
+    writeJson(await listInstalledModules(root));
+    return;
+  }
+  if (action === "diff") {
+    const name = argv[1];
+    if (!name || name.startsWith("-")) throw new Error("modules diff requires a module name");
+    const { root, remaining } = parseModuleRootArgs(argv.slice(2));
+    if (remaining.some((option) => option !== "--json")) {
+      throw new Error(`Unknown modules diff option: ${String(remaining[0])}`);
+    }
+    writeJson(await diffModule(root, name));
+    return;
+  }
+  throw new Error(
+    "modules requires add, diff, list, remove, status, sync, validate, or view",
+  );
+}
+
 async function modulesCommand(client: RuntimeClient, argv: string[]): Promise<void> {
-  if (argv[0] !== "status") throw new Error("modules requires validate or status");
+  if (argv[0] !== "status") {
+    throw new Error(
+      "modules requires add, diff, list, remove, status, sync, validate, or view",
+    );
+  }
   if (argv.slice(1).some((option) => option !== "--json")) {
     throw new Error(`Unknown modules status option: ${String(argv[1])}`);
   }
   writeJson(await client.call("modules.status"));
+}
+
+interface ModuleMutationArgs {
+  readonly root: string;
+  readonly values: readonly string[];
+  readonly dryRun: boolean;
+  readonly install: boolean;
+  readonly overwrite: boolean;
+  readonly force: boolean;
+}
+
+function parseModuleMutationArgs(
+  action: "add" | "remove" | "sync",
+  argv: string[],
+): ModuleMutationArgs {
+  let root = defaultModuleProjectRoot();
+  let dryRun = false;
+  let install = true;
+  let overwrite = false;
+  let force = false;
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const option = argv[index];
+    if (option === "--json") continue;
+    if (option === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+    if (option === "--no-install") {
+      install = false;
+      continue;
+    }
+    if (option === "--overwrite" && action === "add") {
+      overwrite = true;
+      continue;
+    }
+    if (option === "--force" && action === "remove") {
+      force = true;
+      continue;
+    }
+    if (option === "--root") {
+      const value = argv[++index];
+      if (!value) throw new Error("--root requires a value");
+      root = path.resolve(value);
+      continue;
+    }
+    if (!option || option.startsWith("-")) {
+      throw new Error(`Unknown modules ${action} option: ${String(option)}`);
+    }
+    values.push(option);
+  }
+  if (action !== "sync" && values.length === 0) {
+    throw new Error(`modules ${action} requires ${action === "add" ? "a source" : "a module name"}`);
+  }
+  return { root, values, dryRun, install, overwrite, force };
+}
+
+function parseModuleRootArgs(argv: string[]): {
+  readonly root: string;
+  readonly remaining: readonly string[];
+} {
+  let root = defaultModuleProjectRoot();
+  const remaining: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const option = argv[index];
+    if (option === "--root") {
+      const value = argv[++index];
+      if (!value) throw new Error("--root requires a value");
+      root = path.resolve(value);
+    } else if (option) {
+      remaining.push(option);
+    }
+  }
+  return { root, remaining };
 }
 
 interface EnvironmentArgs {

@@ -25,8 +25,9 @@ with normal package resolution.
 - Later handler or service failures degrade the module but do not rewrite
   workflow state.
 - Configuration changes take effect on backend restart; there is no hot reload.
-- Package installation remains the responsibility of an ordinary JavaScript
-  package manager.
+- Registry items contribute source files and dependency requirements to the
+  operator's one package project. Jaeger delegates the resulting single
+  dependency installation to an ordinary JavaScript package manager.
 
 This is not a second provider-plugin system. Codex, Claude, and Pi continue to own
 their native skills, hooks, MCP servers, and plugins.
@@ -38,9 +39,64 @@ The default convention is:
 ```text
 ~/.config/jaeger/runtime/
 ├── package.json
+├── package-lock.json
 ├── node_modules/
+├── modules.lock.json
+├── modules/
+│   ├── telegram/
+│   └── voice-spike/
 └── jaeger.runtime.mjs
 ```
+
+## Source registry
+
+Jaeger modules use a source-distribution model. A `jaeger.module.json` item
+declares inspectable files, dependency requirements, compatibility metadata,
+configuration requirements, declared access, and optional commands. A
+`jaeger.registry.json` catalog maps short item names to manifests. An item may
+be loaded from a local file, an HTTPS URL, a catalog reference such as
+`jaeger.registry.json#telegram`, or the GitHub shorthand
+`OWNER/REPOSITORY/ITEM#REF`. Items in Jaeger's bundled catalog can be selected
+by bare name.
+
+`modules add` copies every item beneath `modules/NAME`. Item directories are
+source ownership units, not package projects: every dependency requirement is
+reconciled into the runtime root's one `package.json`, one package-manager
+lockfile, and one `node_modules`. Adding several modules performs at most one
+dependency installation:
+
+```bash
+jaeger modules add \
+  peezy-tech/jaeger/telegram#0123456789abcdef0123456789abcdef01234567 \
+  peezy-tech/jaeger/voice-spike#0123456789abcdef0123456789abcdef01234567
+```
+
+`modules.lock.json` records the resolved manifest, source digest, per-file
+hashes, each module's dependency requirements, and any operator-owned range
+that was present before Jaeger began managing a dependency. Conflicting ranges
+fail before source is installed. Removing a module restores or retains an
+operator-owned dependency and removes a registry-introduced dependency only
+when no installed module still requires it.
+
+Registry installation never imports module code, changes secrets, edits
+`jaeger.runtime.mjs`, or activates the backend. Package lifecycle scripts are
+disabled. The explicit trust boundary remains:
+
+```bash
+jaeger modules diff telegram
+jaeger modules validate ~/.config/jaeger/runtime/jaeger.runtime.mjs
+jaeger backend install \
+  --runtime-config ~/.config/jaeger/runtime/jaeger.runtime.mjs
+```
+
+The access declaration is review metadata, not an enforced permission model.
+Installed source still has the full authority of the backend once the operator
+imports and activates it.
+
+When `modules.lock.json` is present, the backend's reported runtime-module
+digest covers the root package metadata and lockfile plus the complete installed
+module source tree, not only `jaeger.runtime.mjs`. Local source edits remain
+allowed, but they produce a new loaded digest.
 
 The configuration has one version and uniquely named modules:
 

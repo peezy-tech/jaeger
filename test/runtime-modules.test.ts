@@ -60,6 +60,44 @@ export default { version: 1, modules: [fixture] }
   }
 });
 
+test("registry-managed runtime digest changes with installed module source", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-digest-"));
+  try {
+    const moduleRoot = path.join(root, "modules", "fixture");
+    await mkdir(moduleRoot, { recursive: true });
+    const modulePath = path.join(moduleRoot, "fixture.mjs");
+    await writeFile(
+      modulePath,
+      `export const fixture = { name: "fixture", setup() {} }\n`,
+    );
+    await writeFile(
+      path.join(root, "modules.lock.json"),
+      `${JSON.stringify({ schemaVersion: 1, modules: {}, dependencies: {} })}\n`,
+    );
+    await writeFile(
+      path.join(root, "package.json"),
+      `${JSON.stringify({ private: true, type: "module", dependencies: {} })}\n`,
+    );
+    const configPath = path.join(root, "jaeger.runtime.mjs");
+    await writeFile(
+      configPath,
+      `import { fixture } from "./modules/fixture/fixture.mjs"
+export default { version: 1, modules: [fixture] }
+`,
+    );
+
+    const first = await loadRuntimeModuleConfig(configPath);
+    await writeFile(
+      modulePath,
+      `export const fixture = { name: "fixture", setup() {} }\n// operator patch\n`,
+    );
+    const second = await loadRuntimeModuleConfig(configPath);
+    assert.notEqual(first.digest, second.digest);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("runs trusted modules in-process and durably retries lifecycle events", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-modules-host-"));
   const stateDir = path.join(root, "state");

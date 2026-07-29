@@ -3,7 +3,18 @@
 This is the Stage 1 proof for
 [`docs/design/codex-realtime-voice-module.md`](../../../docs/design/codex-realtime-voice-module.md).
 It is intentionally not a Jaeger runtime module and is not included in the
-published package.
+backend composition. It is distributed as an inspectable source-registry item
+and is included in the published package so the proven compatibility tool can
+be mounted into the same shared runtime project:
+
+```bash
+jaeger modules add voice-spike
+node ~/.config/jaeger/runtime/modules/voice-spike/server.mjs
+```
+
+The item contributes no package dependency of its own. If it is installed
+together with Telegram or future modules, Jaeger still performs one dependency
+installation for the complete runtime project.
 
 The spike proves:
 
