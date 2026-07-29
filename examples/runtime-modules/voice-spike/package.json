@@ -5,6 +5,7 @@
   "scripts": {
     "call": "node call.mjs",
     "probe": "node probe.mjs",
+    "reset": "node reset.mjs",
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs"
   },

@@ -16,6 +16,7 @@
     "public/favicon.svg",
     "public/index.html",
     "public/styles.css",
+    "reset.mjs",
     "server.mjs",
     "telegram-call.mjs",
     "test/codex-app-server.test.mjs",
@@ -70,6 +71,7 @@
     "start": "node modules/voice-spike/server.mjs",
     "call": "node modules/voice-spike/call.mjs",
     "probe": "node modules/voice-spike/probe.mjs",
+    "reset": "node modules/voice-spike/reset.mjs",
     "test": "node --test modules/voice-spike/test/*.test.mjs"
   }
 }

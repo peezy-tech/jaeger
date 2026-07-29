@@ -14,6 +14,7 @@ import { dirname, join } from "node:path";
 export const DEFAULT_CALL_TTL_MS = 10 * 60 * 1_000;
 export const MAX_CALL_TTL_MS = 30 * 60 * 1_000;
 export const ANSWERED_ACCESS_TTL_MS = 30 * 60 * 1_000;
+export const MAX_DISPOSITION_ATTEMPTS = 5;
 const STATE_LOCK_WAIT_MS = 5_000;
 const INVALID_STATE_LOCK_STALE_MS = 30_000;
 const STATE_LOCK_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
@@ -22,6 +23,14 @@ export class TelegramDeliveryUncertainError extends Error {
   constructor(message, options) {
     super(message, options);
     this.name = "TelegramDeliveryUncertainError";
+  }
+}
+
+/** A Telegram edit that no retry can ever satisfy, such as a deleted message. */
+export class TelegramMessageUnavailableError extends Error {
+  constructor(message, options) {
+    super(message, options);
+    this.name = "TelegramMessageUnavailableError";
   }
 }
 
@@ -204,13 +213,39 @@ export class TelegramCallInvitations {
     });
   }
 
-  async markDispositionUpdated(status) {
+  async markDispositionUpdated(status, { delivered = true } = {}) {
     return await this.#exclusive(async () => {
       const record = await this.#read();
       if (!record || record.status !== status) return false;
       record.dispositionUpdatedAt = new Date(this.now()).toISOString();
+      record.dispositionDelivered = delivered;
       await writeOwnerOnlyJson(this.stateFile, record);
       return true;
+    });
+  }
+
+  /**
+   * Counts one failed disposition update and reports whether the retry budget
+   * is spent, so a Telegram endpoint that never recovers cannot wedge the
+   * invitation state forever.
+   */
+  async recordDispositionAttempt(status) {
+    return await this.#exclusive(async () => {
+      const record = await this.#read();
+      if (!record || record.status !== status) return false;
+      const attempts = (Number(record.dispositionAttempts) || 0) + 1;
+      record.dispositionAttempts = attempts;
+      await writeOwnerOnlyJson(this.stateFile, record);
+      return attempts >= MAX_DISPOSITION_ATTEMPTS;
+    });
+  }
+
+  /** Operator escape hatch: discards the invitation state under the state lock. */
+  async reset() {
+    return await this.#exclusive(async () => {
+      const existed = (await this.#read()) !== null;
+      await removeInvitationState(this.stateFile);
+      return existed;
     });
   }
 
@@ -331,6 +366,44 @@ export async function updateTelegramCall({
     },
     fetchImpl,
   });
+}
+
+/**
+ * Closes out a pending disposition. A missing Telegram message or configuration
+ * leaves nothing to edit, so the disposition is final immediately; a permanent
+ * Telegram rejection or an exhausted retry budget finalizes it without the edit.
+ * Only a transient failure keeps the disposition pending for a later retry.
+ */
+export async function finalizeTelegramDisposition(
+  invitations,
+  telegram,
+  pending,
+  { fetchImpl = fetch } = {},
+) {
+  const status = pending.invitation.status;
+  if (!telegram || !pending.telegram) {
+    await invitations.markDispositionUpdated(status, { delivered: false });
+    return { finalized: true, delivered: false, error: null };
+  }
+  try {
+    await updateTelegramCall({
+      botToken: telegram.botToken,
+      chatId: pending.telegram.chatId,
+      messageId: pending.telegram.messageId,
+      status,
+      reason: pending.invitation.reason,
+      fetchImpl,
+    });
+  } catch (error) {
+    const exhausted = await invitations.recordDispositionAttempt(status);
+    if (!exhausted && !(error instanceof TelegramMessageUnavailableError)) {
+      return { finalized: false, delivered: false, error };
+    }
+    await invitations.markDispositionUpdated(status, { delivered: false });
+    return { finalized: true, delivered: false, error };
+  }
+  await invitations.markDispositionUpdated(status, { delivered: true });
+  return { finalized: true, delivered: true, error: null };
 }
 
 export async function readTelegramConfig(envFile, { optional = false } = {}) {
@@ -652,6 +725,17 @@ async function telegramRequest({ botToken, method, payload, fetchImpl }) {
       /(?:MESSAGE_NOT_MODIFIED|message is not modified)/i.test(description)
     ) {
       return undefined;
+    }
+    // A 400/403 on an edit is Telegram's final answer: the message is gone, the
+    // chat is unreachable, or the bot lost the rights to touch it. Retrying the
+    // same edit can only fail again, so callers must be able to give up on it.
+    if (
+      method === "editMessageText" &&
+      (value.error_code === 400 || value.error_code === 403)
+    ) {
+      throw new TelegramMessageUnavailableError(
+        `Telegram ${method} was rejected permanently: ${value.description ?? response.status}`,
+      );
     }
     throw new Error(
       `Telegram ${method} was rejected: ${value.description ?? response.status}`,

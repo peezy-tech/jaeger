@@ -1,12 +1,12 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
+  finalizeTelegramDisposition,
   parseHttpsPublicUrl,
   readTelegramConfig,
   sendTelegramCall,
   TelegramDeliveryUncertainError,
   TelegramCallInvitations,
-  updateTelegramCall,
 } from "./telegram-call.mjs";
 
 const stateRoot =
@@ -28,14 +28,12 @@ const reason = process.argv.slice(2).join(" ").trim() || "Jaeger wants to talk."
 const invitations = new TelegramCallInvitations({ stateFile });
 const telegram = await readTelegramConfig(envFile);
 const pending = await invitations.pendingDisposition();
-if (pending?.telegram) {
-  await updateTelegramCall({
-    ...telegram,
-    ...pending.telegram,
-    status: pending.invitation.status,
-    reason: pending.invitation.reason,
-  });
-  await invitations.markDispositionUpdated(pending.invitation.status);
+// A rejected close-out must not abort the preflight: create() below reports
+// whether the previous call still blocks this one.
+if (pending) {
+  reportDisposition(
+    await finalizeTelegramDisposition(invitations, telegram, pending),
+  );
 }
 const { token, invitation } = await invitations.create({ reason });
 const answerUrl = new URL(publicUrl);
@@ -67,13 +65,9 @@ const recorded = await invitations.recordTelegramDelivery(token, {
   messageId: delivery.messageId,
 });
 if (["answered", "declined", "expired"].includes(recorded.invitation.status)) {
-  await updateTelegramCall({
-    ...telegram,
-    ...recorded.telegram,
-    status: recorded.invitation.status,
-    reason: recorded.invitation.reason,
-  });
-  await invitations.markDispositionUpdated(recorded.invitation.status);
+  reportDisposition(
+    await finalizeTelegramDisposition(invitations, telegram, recorded),
+  );
 }
 process.stdout.write(
   `${JSON.stringify({
@@ -83,3 +77,12 @@ process.stdout.write(
     expiresAt: invitation.expiresAt,
   })}\n`,
 );
+
+function reportDisposition(outcome) {
+  if (!outcome.error) return;
+  process.stderr.write(
+    `Telegram call disposition update failed${
+      outcome.finalized ? " and was finalized without updating Telegram" : ""
+    }: ${outcome.error.message}\n`,
+  );
+}

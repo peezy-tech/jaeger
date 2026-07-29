@@ -178,6 +178,11 @@ interface PackageSnapshot {
   readonly directories: readonly DirectorySnapshot[];
 }
 
+interface RollbackFailure {
+  readonly target: string;
+  readonly error: unknown;
+}
+
 export function defaultModuleProjectRoot(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
@@ -354,6 +359,7 @@ async function addModulesUnlocked(
   const staging = await mkdtemp(path.join(root, ".modules-stage-"));
   const snapshots = await snapshotPackageState(root, staging, shouldInstall);
   const promoted: Array<{ readonly target: string; readonly backup?: string }> = [];
+  let preserveStaging = false;
   try {
     for (const module of prepared) {
       await stageModule(staging, module.resolved);
@@ -387,14 +393,23 @@ async function addModulesUnlocked(
       dependencies: reconciliation.dependencies,
     });
   } catch (error) {
+    const failures: RollbackFailure[] = [];
     for (const entry of promoted.reverse()) {
-      await rm(entry.target, { recursive: true, force: true });
-      if (entry.backup) await rename(entry.backup, entry.target);
+      await rollbackStep(failures, entry.target, async () => {
+        await rm(entry.target, { recursive: true, force: true });
+        if (entry.backup) await rename(entry.backup, entry.target);
+      });
     }
-    await restorePackageSnapshot(snapshots);
+    await restorePackageSnapshot(snapshots, failures);
+    if (failures.length > 0) {
+      preserveStaging = true;
+      throw rollbackError(error, failures, staging);
+    }
     throw error;
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    if (!preserveStaging) {
+      await rm(staging, { recursive: true, force: true });
+    }
   }
   return result;
 }
@@ -456,6 +471,7 @@ async function removeModulesUnlocked(
   const staging = await mkdtemp(path.join(root, ".modules-remove-"));
   const snapshots = await snapshotPackageState(root, staging, shouldInstall);
   const removed: Array<{ readonly target: string; readonly backup: string }> = [];
+  let preserveStaging = false;
   try {
     await writeJsonAtomic(path.join(root, "package.json"), reconciliation.packageJson);
     if (shouldInstall) {
@@ -478,11 +494,24 @@ async function removeModulesUnlocked(
       dependencies: reconciliation.dependencies,
     });
   } catch (error) {
-    for (const entry of removed.reverse()) await rename(entry.backup, entry.target);
-    await restorePackageSnapshot(snapshots);
+    const failures: RollbackFailure[] = [];
+    for (const entry of removed.reverse()) {
+      await rollbackStep(
+        failures,
+        entry.target,
+        async () => await rename(entry.backup, entry.target),
+      );
+    }
+    await restorePackageSnapshot(snapshots, failures);
+    if (failures.length > 0) {
+      preserveStaging = true;
+      throw rollbackError(error, failures, staging);
+    }
     throw error;
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    if (!preserveStaging) {
+      await rm(staging, { recursive: true, force: true });
+    }
   }
   return result;
 }
@@ -525,6 +554,7 @@ async function syncModulesUnlocked(
   if (options.dryRun) return result;
   const staging = await mkdtemp(path.join(root, ".modules-sync-"));
   const snapshots = await snapshotPackageState(root, staging, shouldInstall);
+  let preserveStaging = false;
   try {
     await writeJsonAtomic(path.join(root, "package.json"), reconciliation.packageJson);
     if (shouldInstall) {
@@ -536,10 +566,17 @@ async function syncModulesUnlocked(
       dependencies: reconciliation.dependencies,
     });
   } catch (error) {
-    await restorePackageSnapshot(snapshots);
+    const failures: RollbackFailure[] = [];
+    await restorePackageSnapshot(snapshots, failures);
+    if (failures.length > 0) {
+      preserveStaging = true;
+      throw rollbackError(error, failures, staging);
+    }
     throw error;
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    if (!preserveStaging) {
+      await rm(staging, { recursive: true, force: true });
+    }
   }
   return result;
 }
@@ -1623,33 +1660,72 @@ async function snapshotPackageState(
   }
 }
 
-async function restoreSnapshots(snapshots: readonly FileSnapshot[]): Promise<void> {
-  for (const snapshot of snapshots) {
-    if (snapshot.contents === undefined) {
-      await rm(snapshot.path, { force: true });
-    } else {
-      await writeFile(snapshot.path, snapshot.contents, {
-        mode: snapshot.mode ?? 0o600,
-      });
-    }
+async function restoreFileSnapshot(snapshot: FileSnapshot): Promise<void> {
+  if (snapshot.contents === undefined) {
+    await rm(snapshot.path, { force: true });
+    return;
+  }
+  // A failed install can delete the parent directory of a nested snapshot such
+  // as .yarn/install-state.gz, so recreate it before writing the contents back.
+  await mkdir(path.dirname(snapshot.path), { recursive: true, mode: 0o700 });
+  await writeFile(snapshot.path, snapshot.contents, {
+    mode: snapshot.mode ?? 0o600,
+  });
+}
+
+async function restorePackageSnapshot(
+  snapshot: PackageSnapshot,
+  failures: RollbackFailure[],
+): Promise<void> {
+  for (const file of snapshot.files) {
+    await rollbackStep(failures, file.path, async () => await restoreFileSnapshot(file));
+  }
+  for (const directory of [...snapshot.directories].reverse()) {
+    await rollbackStep(
+      failures,
+      directory.path,
+      async () => await restoreDirectorySnapshot(directory),
+    );
   }
 }
 
-async function restorePackageSnapshot(snapshot: PackageSnapshot): Promise<void> {
-  await restoreSnapshots(snapshot.files);
-  await restoreDirectorySnapshots(snapshot.directories);
+async function restoreDirectorySnapshot(snapshot: DirectorySnapshot): Promise<void> {
+  await rm(snapshot.path, { recursive: true, force: true });
+  if (!snapshot.backup) return;
+  await mkdir(path.dirname(snapshot.path), { recursive: true, mode: 0o700 });
+  await rename(snapshot.backup, snapshot.path);
 }
 
 async function restoreDirectorySnapshots(
   snapshots: readonly DirectorySnapshot[],
 ): Promise<void> {
   for (const snapshot of [...snapshots].reverse()) {
-    await rm(snapshot.path, { recursive: true, force: true });
-    if (snapshot.backup) {
-      await mkdir(path.dirname(snapshot.path), { recursive: true, mode: 0o700 });
-      await rename(snapshot.backup, snapshot.path);
-    }
+    await restoreDirectorySnapshot(snapshot);
   }
+}
+
+async function rollbackStep(
+  failures: RollbackFailure[],
+  target: string,
+  action: () => Promise<void>,
+): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    failures.push({ target, error });
+  }
+}
+
+function rollbackError(
+  originalError: unknown,
+  failures: readonly RollbackFailure[],
+  staging: string,
+): AggregateError {
+  const targets = failures.map(({ target }) => target).join(", ");
+  return new AggregateError(
+    [originalError, ...failures.map(({ error }) => error)],
+    `Module mutation failed and rollback was incomplete for ${targets}; recovery data was preserved at ${staging}`,
+  );
 }
 
 async function pathExists(target: string): Promise<boolean> {

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ANSWERED_ACCESS_TTL_MS,
+  finalizeTelegramDisposition,
   parseHttpsPublicUrl,
   parseEnv,
   sendTelegramCall,
@@ -361,6 +362,71 @@ test("an idempotent Telegram disposition edit counts as recovered", async () => 
         { status: 400, headers: { "content-type": "application/json" } },
       ),
   });
+});
+
+test("a permanently unavailable Telegram message is finalized locally", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-unavailable-message-"));
+  const token = "p".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => Date.parse("2026-07-29T03:00:00Z"),
+    createToken: () => token,
+  });
+
+  await invitations.create();
+  await invitations.recordTelegramDelivery(token, {
+    chatId: "-100123",
+    messageId: 991,
+  });
+  await invitations.answer(token);
+  const outcome = await finalizeTelegramDisposition(
+    invitations,
+    { botToken: "secret" },
+    await invitations.pendingDisposition(),
+    {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: message to edit not found",
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        ),
+    },
+  );
+
+  assert.equal(outcome.finalized, true);
+  assert.equal(outcome.delivered, false);
+  assert.match(outcome.error.message, /rejected permanently/);
+  assert.equal(await invitations.pendingDisposition(), null);
+});
+
+test("a disposition without a Telegram message is finalized once", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-no-message-"));
+  let now = Date.parse("2026-07-29T03:00:00Z");
+  const token = "n".repeat(43);
+  const invitations = new TelegramCallInvitations({
+    stateFile: join(directory, "telegram-call.json"),
+    now: () => now,
+    createToken: () => token,
+  });
+
+  await invitations.create({ ttlMs: 60_000 });
+  await invitations.recordTelegramDeliveryUncertain(token, {
+    chatId: "-100123",
+  });
+  now += 60_001;
+  const pending = await invitations.expireCurrent();
+  assert.equal(pending.telegram, null);
+
+  const outcome = await finalizeTelegramDisposition(invitations, null, pending);
+  assert.deepEqual(outcome, {
+    finalized: true,
+    delivered: false,
+    error: null,
+  });
+  assert.equal(await invitations.pendingDisposition(), null);
 });
 
 test("Telegram invitation public URLs must use HTTPS", () => {

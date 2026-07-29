@@ -14,9 +14,9 @@ import {
   JAEGER_READONLY_TOOLS,
 } from "./jaeger-readonly-tools.mjs";
 import {
+  finalizeTelegramDisposition,
   readTelegramConfig,
   TelegramCallInvitations,
-  updateTelegramCall,
 } from "./telegram-call.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -155,7 +155,7 @@ export const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const result = await invitations.answer(body.token);
       void broadcast("telegram.call.answered", result.invitation);
-      void updateDisposition(result, "answered");
+      void updateDisposition(result);
       return sendJson(response, 200, result.invitation);
     }
 
@@ -166,7 +166,7 @@ export const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const result = await invitations.decline(body.token);
       void broadcast("telegram.call.declined", result.invitation);
-      void updateDisposition(result, "declined");
+      void updateDisposition(result);
       return sendJson(response, 200, result.invitation);
     }
 
@@ -226,14 +226,21 @@ export const server = createServer(async (request, response) => {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await bridge.start();
+  let expiryBroadcastFor = null;
   const expiryTimer = setInterval(async () => {
     try {
       const result = await invitations.pendingDisposition();
       if (!result) return;
-      if (result.invitation.status === "expired") {
+      // A disposition can stay pending across ticks while Telegram is retried;
+      // announce each expiry once instead of on every tick.
+      if (
+        result.invitation.status === "expired" &&
+        expiryBroadcastFor !== result.invitation.createdAt
+      ) {
+        expiryBroadcastFor = result.invitation.createdAt;
         void broadcast("telegram.call.expired", result.invitation);
       }
-      await updateDisposition(result, result.invitation.status);
+      await updateDisposition(result);
     } catch (error) {
       process.stderr.write(
         `Telegram call disposition recovery failed: ${error.message}\n`,
@@ -376,17 +383,19 @@ async function callSnapshot() {
   };
 }
 
-async function updateDisposition(result, status) {
-  if (!telegram || !result.telegram) return;
+async function updateDisposition(result) {
   try {
-    await updateTelegramCall({
-      botToken: telegram.botToken,
-      chatId: result.telegram.chatId,
-      messageId: result.telegram.messageId,
-      status,
-      reason: result.invitation.reason,
-    });
-    await invitations.markDispositionUpdated(status);
+    const outcome = await finalizeTelegramDisposition(
+      invitations,
+      telegram,
+      result,
+    );
+    if (!outcome.error) return;
+    process.stderr.write(
+      `Telegram call disposition update failed${
+        outcome.finalized ? " and was finalized without updating Telegram" : ""
+      }: ${outcome.error.message}\n`,
+    );
   } catch (error) {
     process.stderr.write(
       `Telegram call disposition update failed: ${error.message}\n`,

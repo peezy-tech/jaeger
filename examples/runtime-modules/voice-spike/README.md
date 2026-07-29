@@ -131,6 +131,12 @@ The managed service reads the same Telegram configuration so it can replace the
 Answer button with an answered, declined, or missed disposition. Telegram
 delivery failures fail closed and do not expose the invitation URL on stdout.
 
+A disposition that Telegram rejects permanently — the message was deleted, the
+bot lost the chat, or the message is too old to edit — is finalized locally
+instead of blocking the next call. Transient failures are retried, and the
+invitation is finalized after five failed attempts. `npm run reset` discards the
+invitation state outright if an operator needs to clear it by hand.
+
 Codex's read-only Linux sandbox maps root-owned ancestors to uid `65534`, which
 causes Jaeger's authority-path validation to reject direct CLI startup. For
 this compatibility spike only, the app-server thread receives one
