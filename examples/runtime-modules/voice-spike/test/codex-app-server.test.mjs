@@ -332,6 +332,31 @@ test("a rejected realtime start cancels its SDP waiter", async () => {
   await bridge.stop();
 });
 
+test("an app-server disconnect rejects a pending realtime SDP waiter", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-disconnect-"));
+  const child = createMockProcess();
+  child.deferRealtimeSdp = true;
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+  const realtime = bridge.startRealtime({ sdp: "v=0\r\nmock-offer" });
+  await waitForRequest(child, "thread/realtime/start");
+  await new Promise((resolve) => setImmediate(resolve));
+  child.exitCode = 1;
+  child.emit("exit", 1, null);
+
+  await assert.rejects(realtime, /Codex app-server exited \(1\)/);
+  assert.equal(bridge.listenerCount("thread/realtime/sdp"), 0);
+  assert.equal(bridge.listenerCount("thread/realtime/error"), 0);
+  assert.equal(bridge.listenerCount("thread/realtime/closed"), 0);
+  assert.equal(bridge.listenerCount("disconnected"), 0);
+});
+
 async function waitForRequest(child, method) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (child.requests.some((request) => request.method === method)) return;

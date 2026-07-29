@@ -152,16 +152,21 @@ async function startSession() {
     });
     installAnalyser(state.inputStream);
 
-    state.peer = new RTCPeerConnection();
-    state.channel = state.peer.createDataChannel("oai-events");
+    const peer = new RTCPeerConnection();
+    state.peer = peer;
+    state.channel = peer.createDataChannel("oai-events");
     state.channel.addEventListener("message", handleDataChannelEvent);
-    state.peer.addEventListener("connectionstatechange", () => {
-      setSignal(`WebRTC ${state.peer.connectionState}`);
-      if (["failed", "closed"].includes(state.peer.connectionState)) {
-        resetSessionUi();
+    peer.addEventListener("connectionstatechange", () => {
+      const connectionState = peer.connectionState;
+      setSignal(`WebRTC ${connectionState}`);
+      if (
+        state.peer === peer &&
+        ["failed", "closed"].includes(connectionState)
+      ) {
+        void stopSession();
       }
     });
-    state.peer.addEventListener("track", async (event) => {
+    peer.addEventListener("track", async (event) => {
       elements.remoteAudio.srcObject = event.streams[0];
       await elements.remoteAudio.play().catch(() => {});
     });
@@ -274,15 +279,19 @@ async function stopSession() {
 }
 
 function closePeer() {
-  state.channel?.close();
-  state.peer?.close();
-  for (const track of state.inputStream?.getTracks() ?? []) track.stop();
-  state.audioContext?.close().catch(() => {});
+  const channel = state.channel;
+  const peer = state.peer;
+  const inputStream = state.inputStream;
+  const audioContext = state.audioContext;
   state.channel = null;
   state.peer = null;
   state.inputStream = null;
   state.audioContext = null;
   state.analyser = null;
+  channel?.close();
+  peer?.close();
+  for (const track of inputStream?.getTracks() ?? []) track.stop();
+  audioContext?.close().catch(() => {});
 }
 
 function resetSessionUi() {

@@ -347,6 +347,7 @@ export class CodexAppServer extends EventEmitter {
       this.off("thread/realtime/sdp", onSdp);
       this.off("thread/realtime/error", onError);
       this.off("thread/realtime/closed", onClosed);
+      this.off("disconnected", onDisconnected);
     };
     const cancel = () => {
       if (settled) return;
@@ -373,6 +374,16 @@ export class CodexAppServer extends EventEmitter {
         new Error(params.reason ?? "Realtime transport closed during setup"),
       );
     };
+    const onDisconnected = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(
+        error instanceof Error
+          ? error
+          : new Error("Codex app-server disconnected during setup"),
+      );
+    };
     timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -382,6 +393,7 @@ export class CodexAppServer extends EventEmitter {
     this.on("thread/realtime/sdp", onSdp);
     this.on("thread/realtime/error", onError);
     this.on("thread/realtime/closed", onClosed);
+    this.on("disconnected", onDisconnected);
     return { promise, cancel };
   }
 
