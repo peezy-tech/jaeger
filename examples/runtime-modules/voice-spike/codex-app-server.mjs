@@ -44,6 +44,8 @@ export class CodexAppServer extends EventEmitter {
     this.nextRequestId = 1;
     this.pending = new Map();
     this.stopping = false;
+    this.realtimeStarting = false;
+    this.stdoutReaders = new WeakMap();
   }
 
   get connected() {
@@ -66,7 +68,8 @@ export class CodexAppServer extends EventEmitter {
     this.generation += 1;
 
     const stdout = readline.createInterface({ input: child.stdout });
-    stdout.on("line", (line) => this.#handleLine(line));
+    this.stdoutReaders.set(child, stdout);
+    stdout.on("line", (line) => this.#handleLine(child, line));
     child.stderr.on("data", (chunk) => {
       this.emit("diagnostic", String(chunk).trim());
     });
@@ -101,6 +104,8 @@ export class CodexAppServer extends EventEmitter {
     this.stopping = true;
     const child = this.child;
     this.child = null;
+    this.stdoutReaders.get(child)?.close();
+    this.stdoutReaders.delete(child);
     this.#rejectPending(new Error("Codex app-server stopped"));
     child.stdin.end();
     if (child.exitCode === null) child.kill("SIGTERM");
@@ -127,6 +132,10 @@ export class CodexAppServer extends EventEmitter {
     if (typeof sdp !== "string" || !sdp.startsWith("v=0")) {
       throw new Error("A valid WebRTC SDP offer is required");
     }
+    if (this.realtimeStarting) {
+      throw new Error("Realtime negotiation is already in progress");
+    }
+    this.realtimeStarting = true;
 
     const answer = this.#realtimeSdpWaiter();
     try {
@@ -143,6 +152,7 @@ export class CodexAppServer extends EventEmitter {
       return { sdp: params.sdp, threadId: this.threadId };
     } finally {
       answer.cancel();
+      this.realtimeStarting = false;
     }
   }
 
@@ -367,7 +377,8 @@ export class CodexAppServer extends EventEmitter {
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
-  #handleLine(line) {
+  #handleLine(child, line) {
+    if (child !== this.child) return;
     let message;
     try {
       message = JSON.parse(line);
@@ -394,7 +405,7 @@ export class CodexAppServer extends EventEmitter {
     }
 
     if (message.id !== undefined && message.method) {
-      void this.#handleServerRequest(message);
+      void this.#handleServerRequest(child, message);
       return;
     }
 
@@ -404,19 +415,25 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
-  async #handleServerRequest(message) {
+  async #handleServerRequest(child, message) {
+    if (child !== this.child) return;
     const handler = this.requestHandlers[message.method];
     if (!handler) {
       // This spike has no mutation authority. Fail closed on unknown requests.
-      this.#write({ id: message.id, result: { decision: "decline" } });
+      this.#writeToChild(child, {
+        id: message.id,
+        result: { decision: "decline" },
+      });
       this.emit("serverRequestDeclined", { method: message.method });
       return;
     }
     try {
       const result = await handler(message.params ?? {});
-      this.#write({ id: message.id, result });
+      if (child !== this.child) return;
+      this.#writeToChild(child, { id: message.id, result });
     } catch (error) {
-      this.#write({
+      if (child !== this.child) return;
+      this.#writeToChild(child, {
         id: message.id,
         error: {
           code: -32_000,
@@ -424,6 +441,13 @@ export class CodexAppServer extends EventEmitter {
         },
       });
     }
+  }
+
+  #writeToChild(child, message) {
+    if (child !== this.child || !child.stdin.writable) {
+      throw new Error("Codex app-server input is unavailable");
+    }
+    child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   #handleExit(child, error) {

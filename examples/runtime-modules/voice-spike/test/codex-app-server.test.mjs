@@ -82,6 +82,71 @@ test("a late exit from a stopped child does not disconnect its replacement", asy
   await bridge.stop();
 });
 
+test("late output and server responses stay bound to their child generation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-late-output-"));
+  const processes = [];
+  let releaseHandler;
+  let handlerStarted;
+  const started = new Promise((resolve) => {
+    handlerStarted = resolve;
+  });
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => {
+      const child = createMockProcess({
+        exitOnKill: processes.length !== 0,
+      });
+      processes.push(child);
+      return child;
+    },
+    requestHandlers: {
+      "test/slow": async () => {
+        handlerStarted();
+        await new Promise((resolve) => {
+          releaseHandler = resolve;
+        });
+        return { accepted: true };
+      },
+    },
+    requestTimeoutMs: 1_000,
+  });
+  let staleNotifications = 0;
+  bridge.on("test/stale", () => {
+    staleNotifications += 1;
+  });
+
+  await bridge.start();
+  processes[0].stdout.write(
+    `${JSON.stringify({ id: 700, method: "test/slow", params: {} })}\n`,
+  );
+  await started;
+
+  const stopping = bridge.stop();
+  await bridge.start();
+  processes[0].stdout.write(
+    `${JSON.stringify({ method: "test/stale", params: {} })}\n`,
+  );
+  processes[0].stdout.write(
+    `${JSON.stringify({ id: 701, method: "test/slow", params: {} })}\n`,
+  );
+  releaseHandler();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(staleNotifications, 0);
+  assert.equal(
+    processes[1].requests.some(
+      ({ id, method }) => (id === 700 || id === 701) && method === undefined,
+    ),
+    false,
+  );
+  processes[0].exitCode = 0;
+  processes[0].emit("exit", 0, null);
+  await stopping;
+  assert.equal(bridge.connected, true);
+  await bridge.stop();
+});
+
 test("WebRTC start forwards the SDP offer and returns the matching answer", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-"));
   const child = createMockProcess();
@@ -106,6 +171,43 @@ test("WebRTC start forwards the SDP offer and returns the matching answer", asyn
   assert.equal(request.params.version, "v3");
   assert.equal(request.params.outputModality, "audio");
   assert.equal(answer.sdp, "v=0\r\nmock-answer");
+  await bridge.stop();
+});
+
+test("a concurrent WebRTC start is rejected before it can share an SDP waiter", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-webrtc-concurrent-"));
+  const child = createMockProcess();
+  child.deferRealtimeSdp = true;
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+  const first = bridge.startRealtime({ sdp: "v=0\r\nfirst-offer" });
+  await assert.rejects(
+    bridge.startRealtime({ sdp: "v=0\r\nsecond-offer" }),
+    /Realtime negotiation is already in progress/,
+  );
+  child.stdout.write(
+    `${JSON.stringify({
+      method: "thread/realtime/sdp",
+      params: {
+        threadId: bridge.threadId,
+        sdp: "v=0\r\nfirst-answer",
+      },
+    })}\n`,
+  );
+
+  assert.equal((await first).sdp, "v=0\r\nfirst-answer");
+  assert.equal(
+    child.requests.filter(
+      ({ method }) => method === "thread/realtime/start",
+    ).length,
+    1,
+  );
   await bridge.stop();
 });
 
@@ -139,6 +241,7 @@ function createMockProcess({ exitOnKill = true } = {}) {
   child.exitCode = null;
   child.requests = [];
   child.rejectRealtimeStart = false;
+  child.deferRealtimeSdp = false;
   child.stdin.on("data", (chunk) => {
     for (const line of String(chunk).trim().split("\n")) {
       if (!line) continue;
@@ -183,7 +286,8 @@ function createMockProcess({ exitOnKill = true } = {}) {
         }
         if (
           request.method === "thread/realtime/start" &&
-          !child.rejectRealtimeStart
+          !child.rejectRealtimeStart &&
+          !child.deferRealtimeSdp
         ) {
           child.stdout.write(
             `${JSON.stringify({

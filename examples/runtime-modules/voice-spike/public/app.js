@@ -1,8 +1,4 @@
-import {
-  forgetCallToken,
-  loadAccessTokens,
-  rememberCallToken,
-} from "./call-access.js";
+import { loadAccessTokens } from "./call-access.js";
 
 const elements = {
   answerCall: document.querySelector("#answer-call"),
@@ -67,8 +63,7 @@ elements.answerCall.addEventListener("click", async () => {
       token: state.callToken,
     });
     state.capabilityToken = invitationCapability;
-    rememberCallToken(invitationCapability);
-    clearCallInvitation({ preserveAccess: true });
+    clearCallInvitation();
     await refreshState();
     connectEvents();
     const connected = await startSession();
@@ -212,14 +207,12 @@ async function loadCallInvitation(token) {
       Date.parse(invitation.accessExpiresAt) > Date.now()
     ) {
       state.capabilityToken = token;
-      rememberCallToken(token);
       await refreshState();
       connectEvents();
       showCallNotice("Answered call access restored.");
       return;
     }
     if (invitation.status !== "ringing") {
-      forgetCallToken();
       showCallNotice("This Telegram call is no longer available.", true);
       return;
     }
@@ -250,11 +243,10 @@ function updateCallCountdown(expiresAt) {
   elements.callExpiry.textContent = `Expires in ${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function clearCallInvitation({ preserveAccess = false } = {}) {
+function clearCallInvitation() {
   if (state.callCountdown) window.clearInterval(state.callCountdown);
   state.callCountdown = null;
   state.callToken = null;
-  if (!preserveAccess) forgetCallToken();
   elements.callInvite.hidden = true;
   elements.answerCall.textContent = "Answer";
   elements.answerCall.disabled = false;
