@@ -5,6 +5,7 @@ import {
   open,
   readFile,
   rename,
+  rm,
   stat,
   unlink,
 } from "node:fs/promises";
@@ -13,6 +14,9 @@ import { dirname, join } from "node:path";
 export const DEFAULT_CALL_TTL_MS = 10 * 60 * 1_000;
 export const MAX_CALL_TTL_MS = 30 * 60 * 1_000;
 export const ANSWERED_ACCESS_TTL_MS = 30 * 60 * 1_000;
+const STATE_LOCK_WAIT_MS = 5_000;
+const INVALID_STATE_LOCK_STALE_MS = 30_000;
+const STATE_LOCK_TOKEN_PATTERN = /^[a-f0-9]{32}$/;
 
 export class TelegramCallInvitations {
   constructor({
@@ -354,27 +358,150 @@ async function withStateLock(stateFile, operation) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
   const lockPath = `${stateFile}.lock`;
-  const deadline = Date.now() + 5_000;
-  let handle;
-  while (!handle) {
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      if (Date.now() >= deadline) {
-        throw new Error(`Another Telegram call operation holds ${lockPath}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-  }
+  const owner = await acquireStateLock(lockPath);
   try {
     return await operation();
   } finally {
-    await handle.close();
-    await unlink(lockPath).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
+    await releaseStateLock(lockPath, owner);
   }
+}
+
+async function acquireStateLock(lockPath) {
+  const owner = {
+    version: 1,
+    pid: process.pid,
+    processStartId: await processStartId(process.pid),
+    token: randomBytes(16).toString("hex"),
+  };
+  const candidate = `${lockPath}.candidate-${owner.token}`;
+  await mkdir(candidate, { mode: 0o700 });
+  await writeOwnerOnlyJson(join(candidate, "owner.json"), owner);
+
+  const deadline = Date.now() + STATE_LOCK_WAIT_MS;
+  let published = false;
+  try {
+    while (true) {
+      try {
+        await rename(candidate, lockPath);
+        published = true;
+        return owner;
+      } catch (error) {
+        if (!isOccupiedLockError(error)) throw error;
+      }
+
+      let current;
+      try {
+        current = await inspectStateLock(lockPath);
+      } catch (error) {
+        if (error.code === "ENOENT") continue;
+        throw error;
+      }
+      if (current.owner && await isStateLockOwnerActive(current.owner)) {
+        if (Date.now() >= deadline) {
+          throw new Error(`Another Telegram call operation holds ${lockPath}`);
+        }
+        await delay(10);
+        continue;
+      }
+      if (
+        !current.owner &&
+        Date.now() - current.stats.mtimeMs < INVALID_STATE_LOCK_STALE_MS
+      ) {
+        if (Date.now() >= deadline) {
+          throw new Error(`Another Telegram call operation holds ${lockPath}`);
+        }
+        await delay(10);
+        continue;
+      }
+
+      const generation = current.owner?.token ??
+        `legacy-${current.stats.dev}-${current.stats.ino}-${Math.trunc(current.stats.mtimeMs)}`;
+      try {
+        await rename(lockPath, `${lockPath}.stale-${generation}`);
+      } catch (error) {
+        if (!isOccupiedLockError(error) && error.code !== "ENOENT") throw error;
+      }
+    }
+  } finally {
+    if (!published) {
+      await rm(candidate, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
+
+async function releaseStateLock(lockPath, expected) {
+  let current;
+  try {
+    current = await inspectStateLock(lockPath);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+  if (current.owner?.token !== expected.token) return false;
+  await rm(lockPath, { recursive: true });
+  return true;
+}
+
+async function inspectStateLock(lockPath) {
+  const stats = await stat(lockPath);
+  let source;
+  try {
+    source = stats.isDirectory()
+      ? await readFile(join(lockPath, "owner.json"), "utf8")
+      : await readFile(lockPath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return { owner: null, stats };
+    throw error;
+  }
+  try {
+    const owner = JSON.parse(source);
+    if (
+      owner?.version !== 1 ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0 ||
+      (owner.processStartId !== undefined &&
+        typeof owner.processStartId !== "string") ||
+      typeof owner.token !== "string" ||
+      !STATE_LOCK_TOKEN_PATTERN.test(owner.token)
+    ) {
+      return { owner: null, stats };
+    }
+    return { owner, stats };
+  } catch {
+    return { owner: null, stats };
+  }
+}
+
+async function isStateLockOwnerActive(owner) {
+  const currentStartId = await processStartId(owner.pid);
+  if (currentStartId !== undefined && owner.processStartId !== undefined) {
+    return currentStartId === owner.processStartId;
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== "ESRCH";
+  }
+}
+
+async function processStartId(pid) {
+  try {
+    const source = await readFile(`/proc/${pid}/stat`, "utf8");
+    const close = source.lastIndexOf(")");
+    if (close < 0) return undefined;
+    return source.slice(close + 2).split(" ")[19] || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isOccupiedLockError(error) {
+  return ["EEXIST", "ENOTEMPTY", "ENOTDIR", "EISDIR"].includes(error.code);
+}
+
+async function delay(milliseconds) {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function normalizeReason(reason) {

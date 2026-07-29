@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -95,6 +102,44 @@ test("parallel answer and decline requests produce exactly one transition", asyn
   const rejected = results.find(({ status }) => status === "rejected");
   assert.equal(rejected.reason.statusCode, 410);
   assert.match((await invitations.current()).status, /^(answered|declined)$/);
+});
+
+test("a call operation recovers a lock whose owner process exited", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-stale-owner-"));
+  const stateFile = join(directory, "telegram-call.json");
+  const lockPath = `${stateFile}.lock`;
+  await mkdir(lockPath);
+  await writeFile(
+    join(lockPath, "owner.json"),
+    `${JSON.stringify({
+      version: 1,
+      pid: 2_147_483_647,
+      token: "a".repeat(32),
+    })}\n`,
+  );
+  const invitations = new TelegramCallInvitations({
+    stateFile,
+    createToken: () => "s".repeat(43),
+  });
+
+  assert.equal((await invitations.create()).invitation.status, "ringing");
+  await assert.rejects(readFile(lockPath), { code: "ENOENT" });
+});
+
+test("a call operation recovers a stale legacy lock file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-legacy-lock-"));
+  const stateFile = join(directory, "telegram-call.json");
+  const lockPath = `${stateFile}.lock`;
+  await writeFile(lockPath, "");
+  const staleTime = new Date(Date.now() - 31_000);
+  await utimes(lockPath, staleTime, staleTime);
+  const invitations = new TelegramCallInvitations({
+    stateFile,
+    createToken: () => "l".repeat(43),
+  });
+
+  assert.equal((await invitations.create()).invitation.status, "ringing");
+  await assert.rejects(readFile(lockPath), { code: "ENOENT" });
 });
 
 test("an expired call cannot be answered", async () => {

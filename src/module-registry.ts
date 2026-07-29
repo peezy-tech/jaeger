@@ -306,12 +306,21 @@ async function addModulesUnlocked(
     ...currentLock.modules,
   };
   for (const module of prepared) {
-    if (nextModules[module.resolved.item.name] && !options.overwrite) {
+    const name = module.resolved.item.name;
+    if (nextModules[name] && !options.overwrite) {
       throw new Error(
-        `Module ${module.resolved.item.name} is already installed; use --overwrite to replace it`,
+        `Module ${name} is already installed; use --overwrite to replace it`,
       );
     }
-    nextModules[module.resolved.item.name] = module.record;
+    if (
+      !options.overwrite &&
+      await pathExists(path.join(root, MODULE_DIRECTORY, name))
+    ) {
+      throw new Error(
+        `Module ${name} exists outside ${MODULE_LOCK_FILE}; use --overwrite to replace it`,
+      );
+    }
+    nextModules[name] = module.record;
   }
   const reconciliation = reconcilePackageProject(project.value, currentLock, nextModules);
   const shouldInstall = options.install !== false;
@@ -349,6 +358,11 @@ async function addModulesUnlocked(
       const staged = path.join(staging, "new", name);
       let backup: string | undefined;
       if (await pathExists(target)) {
+        if (!options.overwrite && !currentLock.modules[name]) {
+          throw new Error(
+            `Module ${name} exists outside ${MODULE_LOCK_FILE}; use --overwrite to replace it`,
+          );
+        }
         backup = path.join(staging, "old", name);
         await mkdir(path.dirname(backup), { recursive: true, mode: 0o700 });
         await rename(target, backup);

@@ -232,6 +232,36 @@ test("fails closed on conflicting module dependency requirements before writing 
   }
 });
 
+test("refuses to replace an unmanaged module directory without overwrite", async () => {
+  const fixture = await registryFixture();
+  const moduleRoot = path.join(fixture.runtimeRoot, "modules", "alpha");
+  const operatorFile = path.join(moduleRoot, "operator.mjs");
+  try {
+    await mkdir(moduleRoot, { recursive: true });
+    await writeFile(operatorFile, "export const operator = true\n");
+
+    await assert.rejects(
+      addModules({
+        root: fixture.runtimeRoot,
+        references: [`${fixture.catalogPath}#alpha`],
+        install: false,
+      }),
+      /exists outside modules\.lock\.json; use --overwrite to replace it/,
+    );
+
+    assert.equal(
+      await readFile(operatorFile, "utf8"),
+      "export const operator = true\n",
+    );
+    await assert.rejects(
+      readFile(path.join(fixture.runtimeRoot, "modules.lock.json")),
+      hasCode("ENOENT"),
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("diff protects local source edits and removal restores operator dependency ownership", async () => {
   const fixture = await registryFixture();
   try {
