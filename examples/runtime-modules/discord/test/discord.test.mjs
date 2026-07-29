@@ -17,6 +17,7 @@ const GUILD_ID = "10000000000000001";
 const VOICE_ID = "10000000000000002";
 const USER_ID = "10000000000000003";
 const BOT_ID = "10000000000000004";
+const TEXT_ID = "10000000000000005";
 
 test("configuration is explicit and does not translate removed options", () => {
   assert.throws(
@@ -134,6 +135,22 @@ test("an unexpected participant ends the call without subscribing to media", asy
   await fixture.stop();
 });
 
+test("voice transport errors end only the current call", async () => {
+  const fixture = await createServiceFixture();
+  await fixture.start();
+  await fixture.service.requestAttention("Attention.");
+
+  fixture.connections[0].emit("error", new Error("UDP failed"));
+  await settled();
+
+  assert.equal(fixture.connections[0].destroyCalls, 1);
+  assert.match(
+    fixture.runtime.errors.at(-1).message,
+    /Discord voice transport failed/,
+  );
+  await fixture.stop();
+});
+
 test("attention never starts while the allowlisted user is already present", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -197,6 +214,38 @@ test("ringing, silence, and total-call timeouts disconnect the bot", async () =>
   }
 });
 
+test("maximum timeout and shutdown interrupt stalled media startup", async () => {
+  for (const ending of ["maximum-call timeout", "service shutdown"]) {
+    const clock = new FakeClock();
+    const fixture = await createServiceFixture({
+      clock,
+      bridgeStartPending: true,
+    });
+    await fixture.start();
+    await fixture.service.requestAttention("Attention.");
+    fixture.voiceChannel.members.set(USER_ID, { id: USER_ID });
+    fixture.client.emit(
+      Events.VoiceStateUpdate,
+      { id: USER_ID, channelId: null, guild: { id: GUILD_ID } },
+      { id: USER_ID, channelId: VOICE_ID, guild: { id: GUILD_ID } },
+    );
+    await settled();
+    assert.equal(fixture.bridges[0].startCalls, 1);
+
+    if (ending === "maximum-call timeout") {
+      clock.advance(60_000);
+      await settled();
+    } else {
+      await fixture.stop();
+    }
+
+    assert.equal(fixture.bridges[0].stopCalls, 1, ending);
+    assert.equal(fixture.connections[0].destroyCalls, 1, ending);
+    assert.match(fixture.runtime.infos.at(-1), new RegExp(ending));
+    if (ending === "maximum-call timeout") await fixture.stop();
+  }
+});
+
 test("guild-scoped allowlisted interactions expose runs, attach, and fresh query", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -240,6 +289,23 @@ test("guild-scoped allowlisted interactions expose runs, attach, and fresh query
   await fixture.stop();
 });
 
+test("notification channels must expose a message send operation", async () => {
+  const fixture = await createServiceFixture({
+    options: { notificationChannelId: TEXT_ID },
+    notificationChannel: {
+      id: TEXT_ID,
+      guildId: GUILD_ID,
+      isTextBased: () => true,
+    },
+  });
+
+  await fixture.start();
+  await assert.rejects(
+    fixture.waitForExit(),
+    /Configured Discord notification channel is unavailable/,
+  );
+});
+
 test("lifecycle notifications target only the configured owner destination", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -252,7 +318,12 @@ test("lifecycle notifications target only the configured owner destination", asy
   await fixture.stop();
 });
 
-async function createServiceFixture({ clock, options = {} } = {}) {
+async function createServiceFixture({
+  clock,
+  options = {},
+  notificationChannel = null,
+  bridgeStartPending = false,
+} = {}) {
   const directory = await mkdtemp(join(tmpdir(), "discord-service-"));
   const tokenFile = join(directory, "token");
   await writeFile(tokenFile, "test-token\n", { mode: 0o600 });
@@ -269,7 +340,11 @@ async function createServiceFixture({ clock, options = {} } = {}) {
     guild: { voiceAdapterCreator: {} },
     members: new Map([[BOT_ID, { id: BOT_ID }]]),
   };
-  const client = new FakeClient({ owner, voiceChannel });
+  const client = new FakeClient({
+    owner,
+    voiceChannel,
+    notificationChannel,
+  });
   const connections = [];
   const bridges = [];
   const runtime = fakeRuntime();
@@ -297,7 +372,7 @@ async function createServiceFixture({ clock, options = {} } = {}) {
         return connection;
       },
       bridgeFactory: () => {
-        const bridge = new FakeBridge();
+        const bridge = new FakeBridge({ startPending: bridgeStartPending });
         bridges.push(bridge);
         return bridge;
       },
@@ -322,6 +397,7 @@ async function createServiceFixture({ clock, options = {} } = {}) {
     async start() {
       abort = new AbortController();
       running = service.run(abort.signal);
+      void running.catch(() => {});
       await client.ready;
       await settled();
     },
@@ -329,16 +405,24 @@ async function createServiceFixture({ clock, options = {} } = {}) {
       abort.abort();
       await running;
     },
+    waitForExit() {
+      return running;
+    },
   };
 }
 
 class FakeClient extends EventEmitter {
-  constructor({ owner, voiceChannel }) {
+  constructor({ owner, voiceChannel, notificationChannel }) {
     super();
     this.user = { id: BOT_ID };
     this.guilds = { fetch: async () => ({ id: GUILD_ID }) };
     this.channels = {
-      fetch: async (id) => (id === VOICE_ID ? voiceChannel : null),
+      fetch: async (id) =>
+        id === VOICE_ID
+          ? voiceChannel
+          : id === TEXT_ID
+            ? notificationChannel
+            : null,
     };
     this.users = { fetch: async (id) => (id === USER_ID ? owner : null) };
     this.application = {
@@ -385,8 +469,14 @@ class FakeBridge extends EventEmitter {
   startCalls = 0;
   stopCalls = 0;
 
+  constructor({ startPending = false } = {}) {
+    super();
+    this.startPending = startPending;
+  }
+
   async start() {
     this.startCalls += 1;
+    if (this.startPending) await new Promise(() => {});
   }
 
   async stop() {
@@ -399,6 +489,7 @@ function fakeRuntime() {
   const runtime = {
     queries: [],
     infos: [],
+    errors: [],
     runs: {
       list: async () => [{ runId: "run-1", status: "running" }],
     },
@@ -417,7 +508,9 @@ function fakeRuntime() {
       info(message) {
         runtime.infos.push(message);
       },
-      error() {},
+      error(message, error) {
+        runtime.errors.push({ message, error });
+      },
     },
   };
   return runtime;

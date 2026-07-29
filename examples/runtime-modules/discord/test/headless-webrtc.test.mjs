@@ -55,11 +55,29 @@ test("invalid PCM and connection failures fail closed", async () => {
   await fixture.bridge.stop();
 });
 
-function createFixture() {
+test("failed realtime negotiation does not leave a timeout rejection", async () => {
+  const fixture = createFixture({
+    async startRealtime() {
+      throw new Error("negotiation failed");
+    },
+    connectionTimeoutMs: 20,
+  });
+
+  await assert.rejects(fixture.bridge.start(), /negotiation failed/);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(fixture.peer.closed, true);
+});
+
+function createFixture({
+  startRealtime,
+  connectionTimeoutMs = 1_000,
+} = {}) {
   const webrtc = createFakeWebRtc();
   const codex = {
     offer: null,
-    async startRealtime({ sdp }) {
+    async startRealtime(input) {
+      if (startRealtime) return await startRealtime(input);
+      const { sdp } = input;
       this.offer = sdp;
       queueMicrotask(() => {
         webrtc.peer.connectionState = "connected";
@@ -72,7 +90,7 @@ function createFixture() {
   const bridge = new HeadlessRealtimePeer({
     codex,
     webrtc,
-    connectionTimeoutMs: 1_000,
+    connectionTimeoutMs,
   });
   return {
     bridge,

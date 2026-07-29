@@ -162,6 +162,7 @@ export class DiscordService {
     this.ringingTimer = null;
     this.silenceTimer = null;
     this.maximumCallTimer = null;
+    this.endingCall = null;
     this.operation = Promise.resolve();
     this.onInteraction = (interaction) => {
       void this.#handleInteraction(interaction).catch((error) => {
@@ -239,7 +240,8 @@ export class DiscordService {
       );
       if (
         !this.notificationChannel?.isTextBased?.() ||
-        this.notificationChannel.guildId !== this.config.guildId
+        this.notificationChannel.guildId !== this.config.guildId ||
+        typeof this.notificationChannel.send !== "function"
       ) {
         throw new Error("Configured Discord notification channel is unavailable");
       }
@@ -271,20 +273,27 @@ export class DiscordService {
     });
     this.connection = connection;
     this.phase = "ringing";
+    connection.on?.("error", (error) => {
+      this.runtime.log.error("Discord voice transport failed", error);
+      if (this.connection === connection) {
+        this.#requestCallEnd(
+          "Discord voice transport failed",
+          "Discord voice transport cleanup failed",
+        );
+      }
+    });
     connection.on?.("stateChange", (_oldState, newState) => {
       if (
-        this.phase !== "idle" &&
-        this.phase !== "stopping" &&
+        this.connection === connection &&
         [
           this.voice.VoiceConnectionStatus.Disconnected,
           this.voice.VoiceConnectionStatus.Destroyed,
         ].includes(newState.status)
       ) {
-        void this.#enqueue(() =>
-          this.#endCall("Discord voice disconnected"),
-        ).catch((error) => {
-          this.runtime.log.error("Discord disconnect cleanup failed", error);
-        });
+        this.#requestCallEnd(
+          "Discord voice disconnected",
+          "Discord disconnect cleanup failed",
+        );
       }
     });
 
@@ -294,7 +303,13 @@ export class DiscordService {
         this.voice.VoiceConnectionStatus.Ready,
         20_000,
       );
+      if (this.connection !== connection || this.phase !== "ringing") {
+        return { status: this.phase, coalesced: false };
+      }
       await this.#refreshVoiceChannel();
+      if (this.connection !== connection || this.phase !== "ringing") {
+        return { status: this.phase, coalesced: false };
+      }
       this.#assertExpectedParticipants();
       const user = await this.client.users.fetch(this.config.allowUserId);
       await user.send({
@@ -304,8 +319,14 @@ export class DiscordService {
         ].join("\n"),
         allowedMentions: { parse: [] },
       });
+      if (this.connection !== connection || this.phase !== "ringing") {
+        return { status: this.phase, coalesced: false };
+      }
       this.ringingTimer = this.clock.setTimeout(() => {
-        void this.#enqueue(() => this.#endCall("ringing timeout"));
+        this.#requestCallEnd(
+          "ringing timeout",
+          "Discord ringing timeout cleanup failed",
+        );
       }, this.config.ringingTimeoutMs);
       this.ringingTimer.unref?.();
       if (this.#allowedUserPresent()) await this.#startMedia();
@@ -360,14 +381,19 @@ export class DiscordService {
 
   async #startMedia() {
     if (this.phase !== "ringing") return;
+    const connection = this.connection;
     this.clock.clearTimeout(this.ringingTimer);
     this.ringingTimer = null;
     await this.#refreshVoiceChannel();
+    if (this.connection !== connection || this.phase !== "ringing") return;
     this.#assertExpectedParticipants();
     if (!this.#allowedUserPresent()) return;
     this.phase = "starting";
     this.maximumCallTimer = this.clock.setTimeout(() => {
-      void this.#enqueue(() => this.#endCall("maximum-call timeout"));
+      this.#requestCallEnd(
+        "maximum-call timeout",
+        "Discord maximum-call cleanup failed",
+      );
     }, this.config.maximumCallTimeoutMs);
     this.maximumCallTimer.unref?.();
 
@@ -380,11 +406,55 @@ export class DiscordService {
     bridge.on("activity", () => this.#resetSilenceTimer());
     bridge.on("error", (error) => {
       this.runtime.log.error("Discord media bridge failed", error);
-      void this.#enqueue(() => this.#endCall("media bridge failed"));
+      if (this.bridge === bridge) {
+        this.#requestCallEnd(
+          "media bridge failed",
+          "Discord media bridge cleanup failed",
+        );
+      }
     });
+    void Promise.resolve()
+      .then(() => bridge.start())
+      .then(
+        () =>
+          this.#enqueue(() =>
+            this.#completeMediaStartup(connection, bridge),
+          ),
+        (error) =>
+          this.#enqueue(async () => {
+            if (
+              this.connection !== connection ||
+              this.bridge !== bridge ||
+              this.phase !== "starting"
+            ) {
+              return;
+            }
+            await this.#endCall("media startup failed");
+            throw error;
+          }),
+      )
+      .catch((error) => {
+        this.runtime.log.error("Discord media startup failed", error);
+      });
+  }
+
+  async #completeMediaStartup(connection, bridge) {
+    if (
+      this.connection !== connection ||
+      this.bridge !== bridge ||
+      this.phase !== "starting"
+    ) {
+      return;
+    }
     try {
-      await bridge.start();
       await this.#refreshVoiceChannel();
+      if (
+        this.connection !== connection ||
+        this.bridge !== bridge ||
+        this.phase !== "starting"
+      ) {
+        return;
+      }
       this.#assertExpectedParticipants();
       if (!this.#allowedUserPresent()) {
         await this.#endCall("allowlisted user left during startup");
@@ -398,8 +468,10 @@ export class DiscordService {
     }
   }
 
-  async #endCall(reason) {
-    if (this.phase === "idle") return;
+  #endCall(reason) {
+    if (this.endingCall) return this.endingCall;
+    if (this.phase === "idle") return Promise.resolve();
+    this.endingCall = Promise.resolve();
     this.phase = "stopping";
     this.clock.clearTimeout(this.ringingTimer);
     this.clock.clearTimeout(this.silenceTimer);
@@ -411,19 +483,42 @@ export class DiscordService {
     const connection = this.connection;
     this.bridge = null;
     this.connection = null;
-    await bridge?.stop().catch((error) => {
-      this.runtime.log.error("Discord media shutdown failed", error);
+    try {
+      connection?.destroy?.();
+    } catch (error) {
+      this.runtime.log.error("Discord voice disconnect failed", error);
+    }
+    let ending;
+    ending = Promise.resolve()
+      .then(() => bridge?.stop())
+      .catch((error) => {
+        this.runtime.log.error("Discord media shutdown failed", error);
+      })
+      .then(() => {
+        this.phase = "idle";
+        this.runtime.log.info(`Discord voice disconnected: ${reason}`);
+      })
+      .finally(() => {
+        if (this.endingCall === ending) this.endingCall = null;
+      });
+    this.endingCall = ending;
+    return ending;
+  }
+
+  #requestCallEnd(reason, failureMessage) {
+    void this.#endCall(reason).catch((error) => {
+      this.runtime.log.error(failureMessage, error);
     });
-    connection?.destroy?.();
-    this.phase = "idle";
-    this.runtime.log.info(`Discord voice disconnected: ${reason}`);
   }
 
   #resetSilenceTimer() {
     this.clock.clearTimeout(this.silenceTimer);
     if (this.phase !== "active" && this.phase !== "starting") return;
     this.silenceTimer = this.clock.setTimeout(() => {
-      void this.#enqueue(() => this.#endCall("silence timeout"));
+      this.#requestCallEnd(
+        "silence timeout",
+        "Discord silence timeout cleanup failed",
+      );
     }, this.config.silenceTimeoutMs);
     this.silenceTimer.unref?.();
   }

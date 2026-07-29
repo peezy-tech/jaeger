@@ -64,7 +64,6 @@ export class HeadlessRealtimePeer extends EventEmitter {
       ) {
         throw new Error("Headless WebRTC did not produce an Opus SDP offer");
       }
-      const connected = this.#waitForConnected();
       const answer = await this.codex.startRealtime({ sdp: localSdp });
       if (
         typeof answer.sdp !== "string" ||
@@ -73,8 +72,10 @@ export class HeadlessRealtimePeer extends EventEmitter {
       ) {
         throw new Error("Codex realtime did not return an Opus SDP answer");
       }
-      await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
-      await connected;
+      await Promise.all([
+        peer.setRemoteDescription({ type: "answer", sdp: answer.sdp }),
+        this.#waitForConnected(),
+      ]);
       const prime = Buffer.alloc(PRIME_FRAME_BYTES);
       await inputTrack.writeSample(prime, 5);
       prime.fill(0);
