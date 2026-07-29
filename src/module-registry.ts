@@ -1648,12 +1648,19 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
     }
     // A runtime config can construct the module path from separate path
     // segments, so the complete `modules/<name>/` string need not occur in
-    // the source. Keep removal conservative when both path components are
-    // present as source tokens.
-    return (
-      sourceTokenPattern(source, MODULE_DIRECTORY) &&
-      sourceTokenPattern(source, name)
-    );
+    // the source. Only treat the module name as a reference when it occurs in
+    // a path-construction call alongside the quoted module directory.
+    const pathCallPattern = /(?:\bpath\.(?:join|resolve)|\bnew\s+URL)\s*\(([\s\S]*?)\)/g;
+    for (const match of source.matchAll(pathCallPattern)) {
+      const argumentsSource = match[1] ?? "";
+      if (
+        sourceStringLiteralPattern(argumentsSource, MODULE_DIRECTORY) &&
+        sourceTokenPattern(argumentsSource, name)
+      ) {
+        return true;
+      }
+    }
+    return false;
   } catch (error) {
     if (hasCode(error, "ENOENT")) return false;
     throw error;
@@ -1663,6 +1670,10 @@ async function runtimeConfigReferencesModule(root: string, name: string): Promis
 function sourceTokenPattern(source: string, value: string): boolean {
   const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?:^|[^A-Za-z0-9_-])${escaped}(?:$|[^A-Za-z0-9_-])`).test(source);
+}
+
+function sourceStringLiteralPattern(source: string, value: string): boolean {
+  return source.includes(`"${value}"`) || source.includes(`'${value}'`);
 }
 
 async function listRelativeFiles(root: string): Promise<string[]> {
