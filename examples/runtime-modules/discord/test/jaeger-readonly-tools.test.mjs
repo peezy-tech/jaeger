@@ -5,7 +5,7 @@ import {
   JAEGER_READONLY_TOOLS,
 } from "../jaeger-readonly-tools.mjs";
 
-test("the spike exposes only a zero-argument status tool", () => {
+test("the Discord operator exposes only a zero-argument status tool", () => {
   assert.deepEqual(
     JAEGER_READONLY_TOOLS.map(({ name }) => name),
     ["jaeger_status"],

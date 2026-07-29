@@ -7,7 +7,7 @@ Status: implemented
 Jaeger is a durable robot around native coding-agent harnesses. Its continuing
 backend supplies the journal, leases, provider sessions, scheduling, lifecycle
 events, and inspection. A machine may need additional coordination behavior
-that is too local and fluid to belong in every installation: Telegram, Discord,
+that is too local and fluid to belong in every installation: Discord,
 home-command-center projection, lab control, or another operator channel.
 
 Runtime modules are the machine-level composition seam for that behavior. They
@@ -43,8 +43,7 @@ The default convention is:
 ├── node_modules/
 ├── modules.lock.json
 ├── modules/
-│   ├── telegram/
-│   └── voice-spike/
+│   └── discord/
 └── jaeger.runtime.mjs
 ```
 
@@ -55,7 +54,7 @@ declares inspectable files, dependency requirements, compatibility metadata,
 configuration requirements, declared access, and optional commands. A
 `jaeger.registry.json` catalog maps short item names to manifests. An item may
 be loaded from a local file, an HTTPS URL, a catalog reference such as
-`jaeger.registry.json#telegram`, or the GitHub shorthand
+`jaeger.registry.json#discord`, or the GitHub shorthand
 `OWNER/REPOSITORY/ITEM#REF`. Items in Jaeger's bundled catalog can be selected
 by bare name.
 
@@ -67,8 +66,7 @@ dependency installation:
 
 ```bash
 jaeger modules add \
-  peezy-tech/jaeger/telegram#0123456789abcdef0123456789abcdef01234567 \
-  peezy-tech/jaeger/voice-spike#0123456789abcdef0123456789abcdef01234567
+  peezy-tech/jaeger/discord#0123456789abcdef0123456789abcdef01234567
 ```
 
 `modules.lock.json` records the resolved manifest, source digest, per-file
@@ -83,7 +81,7 @@ Registry installation never imports module code, changes secrets, edits
 disabled. The explicit trust boundary remains:
 
 ```bash
-jaeger modules diff telegram
+jaeger modules diff discord
 jaeger modules validate ~/.config/jaeger/runtime/jaeger.runtime.mjs
 jaeger backend install \
   --runtime-config ~/.config/jaeger/runtime/jaeger.runtime.mjs
@@ -169,12 +167,17 @@ Each query has an idempotency ID and the states `queued`, `running`, `orphaned`,
 `completed`, or `uncertain`. A claimed worker that disappears without a durable
 result is never replayed automatically.
 
-## Telegram reference
+## Discord reference
 
-The reference module uses long polling, a private token file, explicit user and
-chat allowlists, topic-scoped bindings, durable binding state, and a
-configurable small default model. Plain Telegram messages submit fresh session
-forks. `/model` changes the topic default without changing the workflow model.
+The reference module uses an official Discord bot in one configured private
+guild and voice channel, a private token file, one exact user allowlist, and
+guild-scoped interactions. `/runs` lists recent workflows, `/attach` stores a
+private binding, and `/ask` submits a fresh read-only session fork without
+mutating the workflow-owned provider thread.
 
-The first version excludes steering, interruption, stopping, resuming, or other
-workflow mutation.
+On an attention event, the bot joins the configured voice channel and sends the
+allowlisted user a direct channel link. Codex realtime starts only after that
+user joins. The bridge accepts only that user's audio, disconnects on an
+unexpected participant, and has no HTTP, browser, or alternate media surface.
+Its dedicated Codex operator exposes only the fixed zero-argument read-only
+Jaeger status operation.

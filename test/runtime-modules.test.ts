@@ -426,9 +426,9 @@ test("named consumers inherit pending deliveries from positional consumers", asy
   const modulesDir = path.join(stateDir, ".modules");
   const legacyDirectory = path.join(
     modulesDir,
-    "telegram",
+    "notifications",
     "events",
-    "telegram-1",
+    "notifications-1",
   );
   const eventId = `evt-${"f".repeat(64)}`;
   const event = {
@@ -451,7 +451,7 @@ test("named consumers inherit pending deliveries from positional consumers", asy
     path.join(legacyDirectory, "consumer.json"),
     `${JSON.stringify({
       version: 1,
-      id: "telegram-1",
+      id: "notifications-1",
       createdAt: "2026-07-24T00:00:00.000Z",
     })}\n`,
   );
@@ -459,7 +459,7 @@ test("named consumers inherit pending deliveries from positional consumers", asy
     path.join(legacyDirectory, `${eventId}.json`),
     `${JSON.stringify({
       version: 1,
-      consumer: "telegram-1",
+      consumer: "notifications-1",
       eventId,
       eventType: "run.terminal",
       attempts: 1,
@@ -477,7 +477,7 @@ test("named consumers inherit pending deliveries from positional consumers", asy
       path: path.join(root, "jaeger.runtime.mjs"),
       digest: "b".repeat(64),
       modules: [{
-        name: "telegram",
+        name: "notifications",
         setup(runtime) {
           runtime.events.consume("notifications", "run.terminal", async () => {
             attempts++;
@@ -495,11 +495,11 @@ test("named consumers inherit pending deliveries from positional consumers", asy
     await waitFor(() => attempts === 1);
     await host.stop();
 
-    const currentId = `telegram-notifications-${"b".repeat(16)}`;
+    const currentId = `notifications-notifications-${"b".repeat(16)}`;
     const currentDirectory = path.join(
       stateDir,
       ".modules",
-      "telegram",
+      "notifications",
       "events",
       currentId,
     );

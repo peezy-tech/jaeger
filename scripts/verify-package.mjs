@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { execFile, spawn } from "node:child_process"
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
@@ -66,16 +66,16 @@ try {
     "schemas/jaeger.module.schema.json",
     "schemas/jaeger.registry.schema.json",
     "jaeger.registry.json",
-    "examples/runtime-modules/telegram/README.md",
-    "examples/runtime-modules/telegram/jaeger.module.json",
-    "examples/runtime-modules/telegram/jaeger.runtime.mjs",
-    "examples/runtime-modules/telegram/package-lock.json",
-    "examples/runtime-modules/telegram/package.json",
-    "examples/runtime-modules/telegram/telegram.mjs",
-    "examples/runtime-modules/voice-spike/README.md",
-    "examples/runtime-modules/voice-spike/jaeger.module.json",
-    "examples/runtime-modules/voice-spike/server.mjs",
-    "examples/runtime-modules/voice-spike/public/app.js",
+    "examples/runtime-modules/discord/README.md",
+    "examples/runtime-modules/discord/codex-app-server.mjs",
+    "examples/runtime-modules/discord/discord.mjs",
+    "examples/runtime-modules/discord/headless-webrtc.mjs",
+    "examples/runtime-modules/discord/jaeger-readonly-tools.mjs",
+    "examples/runtime-modules/discord/jaeger.module.json",
+    "examples/runtime-modules/discord/jaeger.runtime.mjs",
+    "examples/runtime-modules/discord/media-bridge.mjs",
+    "examples/runtime-modules/discord/package-lock.json",
+    "examples/runtime-modules/discord/package.json",
     "examples/mixed-review.js",
     "examples/backend-smoke.schedule.toml",
     "skills/jaeger-workflows/SKILL.md",
@@ -96,6 +96,10 @@ try {
   assert(
     !paths.some((entry) => entry.startsWith("node_modules/")),
     "nested node_modules leaked into package",
+  )
+  assert(
+    !paths.some((entry) => entry.includes("/node_modules/")),
+    "runtime-module node_modules leaked into package",
   )
   assert.deepEqual(artifact.bundled, [], "npm dependency bundles leaked into package")
 
@@ -175,35 +179,175 @@ try {
   assert.doesNotMatch(help.stdout, /jaeger session send/)
 
   const moduleView = JSON.parse(
-    (await run(binary, ["modules", "view", "telegram", "--json"], installDir)).stdout,
+    (await run(binary, ["modules", "view", "discord", "--json"], installDir)).stdout,
   )
-  assert.equal(moduleView.item?.name, "telegram")
-  assert.equal(moduleView.item?.dependencies?.grammy, "^1.38.3")
+  assert.equal(moduleView.item?.name, "discord")
+  assert.deepEqual(moduleView.item?.dependencies, {
+    "@discordjs/voice": "^0.19.2",
+    "@node-webrtc-rust/sdk": "^0.6.23",
+    "discord.js": "^14.27.0",
+    opusscript: "^0.0.8",
+  })
   const moduleProject = path.join(installDir, "module-project")
+  const packageManagerBin = path.join(installDir, "module-package-manager-bin")
+  const packageManagerCalls = path.join(installDir, "module-package-manager-calls.txt")
+  const realNpm = (await run("which", ["npm"], installDir)).stdout.trim()
+  await mkdir(packageManagerBin)
+  await writeFile(
+    path.join(packageManagerBin, "npm"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> ${JSON.stringify(packageManagerCalls)}
+exec ${JSON.stringify(realNpm)} "$@"
+`,
+  )
+  await chmod(path.join(packageManagerBin, "npm"), 0o755)
+  const moduleEnv = {
+    ...process.env,
+    PATH: `${packageManagerBin}${path.delimiter}${process.env.PATH ?? ""}`,
+  }
   const moduleAdd = JSON.parse(
     (await run(
       binary,
       [
         "modules",
         "add",
-        "telegram",
-        "voice-spike",
+        "discord",
         "--root",
         moduleProject,
-        "--no-install",
         "--json",
       ],
       installDir,
+      moduleEnv,
     )).stdout,
   )
-  assert.deepEqual(moduleAdd.modules, ["telegram", "voice-spike"])
-  assert.equal(moduleAdd.dependenciesInstalled, false)
+  assert.deepEqual(moduleAdd.modules, ["discord"])
+  assert.equal(moduleAdd.dependenciesInstalled, true)
+  assert.equal(moduleAdd.packageManager, "npm")
+  assert.deepEqual(
+    (await readFile(packageManagerCalls, "utf8")).trim().split("\n"),
+    ["install --ignore-scripts --no-audit --no-fund --workspaces=false"],
+  )
   const modulePackage = JSON.parse(
     await readFile(path.join(moduleProject, "package.json"), "utf8"),
   )
-  assert.deepEqual(modulePackage.dependencies, { grammy: "^1.38.3" })
-  await access(path.join(moduleProject, "modules", "telegram", "telegram.mjs"))
-  await access(path.join(moduleProject, "modules", "voice-spike", "server.mjs"))
+  assert.deepEqual(modulePackage.dependencies, moduleView.item.dependencies)
+  await access(path.join(moduleProject, "package-lock.json"))
+  const installedDiscordPackages = [
+    "@discordjs/voice",
+    "@node-webrtc-rust/sdk",
+    "@node-webrtc-rust/bindings",
+    "@snazzah/davey",
+    "discord.js",
+    "opusscript",
+  ]
+  for (const dependency of installedDiscordPackages) {
+    const dependencyPackage = JSON.parse(
+      await readFile(
+        path.join(moduleProject, "node_modules", dependency, "package.json"),
+        "utf8",
+      ),
+    )
+    for (const hook of ["preinstall", "install", "postinstall"]) {
+      assert(
+        !dependencyPackage.scripts?.[hook],
+        `${dependency} must not require an ${hook} lifecycle script`,
+      )
+    }
+  }
+  await access(path.join(moduleProject, "modules", "discord", "discord.mjs"))
+  await assertMissing(
+    path.join(moduleProject, "modules", "discord", "package.json"),
+    "installed source item became a nested package project",
+  )
+  await assertMissing(
+    path.join(moduleProject, "modules", "discord", "package-lock.json"),
+    "installed source item gained a nested lockfile",
+  )
+  await run("npm", ["ls", "--all", "--json"], moduleProject)
+  await run(
+    "npm",
+    ["audit", "--omit=dev", "--audit-level=low"],
+    moduleProject,
+  )
+
+  const moduleList = JSON.parse(
+    (await run(binary, ["modules", "list", "--root", moduleProject, "--json"], installDir)).stdout,
+  )
+  assert.deepEqual(moduleList.modules.map(({ name }) => name), ["discord"])
+  const moduleDiff = JSON.parse(
+    (await run(binary, ["modules", "diff", "discord", "--root", moduleProject, "--json"], installDir)).stdout,
+  )
+  assert.equal(moduleDiff.clean, true)
+  const moduleSync = JSON.parse(
+    (await run(
+      binary,
+      ["modules", "sync", "--root", moduleProject, "--dry-run", "--json"],
+      installDir,
+      moduleEnv,
+    )).stdout,
+  )
+  assert.equal(moduleSync.dryRun, true)
+  assert.equal(moduleSync.dependenciesInstalled, false)
+
+  const moduleRemove = JSON.parse(
+    (await run(
+      binary,
+      ["modules", "remove", "discord", "--root", moduleProject, "--json"],
+      installDir,
+      moduleEnv,
+    )).stdout,
+  )
+  assert.deepEqual(moduleRemove.modules, ["discord"])
+  await assertMissing(
+    path.join(moduleProject, "modules", "discord"),
+    "removed Discord source remained installed",
+  )
+  const moduleReAdd = JSON.parse(
+    (await run(
+      binary,
+      ["modules", "add", "discord", "--root", moduleProject, "--json"],
+      installDir,
+      moduleEnv,
+    )).stdout,
+  )
+  assert.deepEqual(moduleReAdd.modules, ["discord"])
+  assert.equal(moduleReAdd.dependenciesInstalled, true)
+  assert.deepEqual(
+    (await readFile(packageManagerCalls, "utf8")).trim().split("\n"),
+    [
+      "install --ignore-scripts --no-audit --no-fund --workspaces=false",
+      "install --ignore-scripts --no-audit --no-fund --workspaces=false",
+      "install --ignore-scripts --no-audit --no-fund --workspaces=false",
+    ],
+  )
+  const discordRuntimeConfig = path.join(moduleProject, "jaeger.runtime.mjs")
+  await writeFile(
+    discordRuntimeConfig,
+    `import { discordModule } from "./modules/discord/discord.mjs"
+export default {
+  version: 1,
+  modules: [discordModule({
+    tokenFile: new URL("./secrets/discord-bot-token", import.meta.url),
+    guildId: "10000000000000001",
+    voiceChannelId: "10000000000000002",
+    allowUserId: "10000000000000003",
+    ringingTimeoutMs: 600000,
+    silenceTimeoutMs: 120000,
+    maximumCallTimeoutMs: 1800000,
+    operatorStateFile: new URL("./state/discord-operator.json", import.meta.url),
+  })],
+}
+`,
+  )
+  const discordValidation = JSON.parse(
+    (await run(
+      binary,
+      ["modules", "validate", discordRuntimeConfig, "--json"],
+      installDir,
+    )).stdout,
+  )
+  assert.equal(discordValidation.valid, true)
+  assert.deepEqual(discordValidation.modules, ["discord"])
 
   const environmentRoot = path.join(installDir, "environments")
   await mkdir(path.join(environmentRoot, "package-smoke", "snippets"), { recursive: true })
@@ -495,7 +639,7 @@ timezone = "UTC"
       "inspect after backend restart",
       "schedule validate/apply/trigger/history/disable/remove",
       "hooks validate/status/history and direct delivery",
-      "modules registry add, validate/status, and in-process event delivery",
+      "modules registry view/add/list/diff/sync/remove/re-add/validate/status and in-process event delivery",
     ],
     autoInstalledSkill: false,
   }, null, 2)}\n`)

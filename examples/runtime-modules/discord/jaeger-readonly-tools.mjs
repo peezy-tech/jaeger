@@ -33,7 +33,7 @@ export function createJaegerReadonlyRequestHandlers({
           contentItems: [
             {
               type: "inputText",
-              text: "Rejected: this compatibility spike exposes only jaeger_status with no arguments.",
+              text: "Rejected: this Discord operator exposes only jaeger_status with no arguments.",
             },
           ],
           success: false,

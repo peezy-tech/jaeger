@@ -5,12 +5,8 @@
   "homepage": "https://github.com/peezy-tech/jaeger",
   "items": [
     {
-      "name": "telegram",
-      "path": "examples/runtime-modules/telegram/jaeger.module.json"
-    },
-    {
-      "name": "voice-spike",
-      "path": "examples/runtime-modules/voice-spike/jaeger.module.json"
+      "name": "discord",
+      "path": "examples/runtime-modules/discord/jaeger.module.json"
     }
   ]
 }

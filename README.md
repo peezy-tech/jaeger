@@ -480,12 +480,19 @@ plugin system. A normal ESM project can import arbitrary packages and export a
 small module list:
 
 ```js
-import { telegramModule } from "./telegram.mjs";
+import { discordModule } from "./modules/discord/discord.mjs";
 
 export default {
   version: 1,
-  modules: [telegramModule({
-    tokenFile: new URL("./secrets/telegram-token", import.meta.url),
+  modules: [discordModule({
+    tokenFile: new URL("./secrets/discord-bot-token", import.meta.url),
+    guildId: "123456789012345678",
+    voiceChannelId: "123456789012345679",
+    allowUserId: "123456789012345680",
+    ringingTimeoutMs: 600_000,
+    silenceTimeoutMs: 120_000,
+    maximumCallTimeoutMs: 1_800_000,
+    operatorStateFile: new URL("./state/discord-operator.json", import.meta.url),
   })],
 };
 ```
@@ -505,11 +512,11 @@ module directories are not independent package installations.
 Inspect or install the built-in catalog without executing module code:
 
 ```bash
-jaeger modules view telegram
-jaeger modules add telegram voice-spike --dry-run
-jaeger modules add telegram
+jaeger modules view discord
+jaeger modules add discord --dry-run
+jaeger modules add discord
 jaeger modules list
-jaeger modules diff telegram
+jaeger modules diff discord
 ```
 
 `modules add` accepts a local manifest, HTTPS manifest or catalog reference,

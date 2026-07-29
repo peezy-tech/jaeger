@@ -485,7 +485,7 @@ Jaeger does not provide a sandbox or package marketplace.
 Module configuration is not workflow input and cannot be changed by a workflow.
 Setup failures block a replacement backend generation from becoming ready.
 Later module failures remain separate from workflow correctness. Full details
-and the Telegram reference contract are in
+and the Discord reference contract are in
 `docs/design/jaeger-runtime-modules.md`.
 
 ## Jaeger's distinguishing surface

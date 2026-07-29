@@ -1,43 +1,58 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import readline from "node:readline";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_FORCE_STOP_TIMEOUT_MS = 2_000;
-const OPERATOR_SANDBOX_POLICY = {
-  type: "readOnly",
-  access: {
-    type: "restricted",
-    includePlatformDefaults: true,
-    readableRoots: [],
-  },
-};
+const OPERATOR_PERMISSION_PROFILE = "jaeger_discord_operator";
+const DISABLED_FEATURES = [
+  "apps",
+  "artifact",
+  "auth_elicitation",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "code_mode_host",
+  "computer_use",
+  "enable_mcp_apps",
+  "external_agent_memory_import",
+  "goals",
+  "hooks",
+  "image_generation",
+  "in_app_browser",
+  "memories",
+  "multi_agent",
+  "multi_agent_v2",
+  "plugin_sharing",
+  "plugins",
+  "remote_plugin",
+  "shell_snapshot",
+  "shell_tool",
+  "skill_mcp_dependency_install",
+  "skill_search",
+  "tool_call_mcp_elicitation",
+  "tool_suggest",
+  "workspace_dependencies",
+];
 const APP_SERVER_ARGS = [
   "app-server",
   "--enable",
   "realtime_conversation",
-  "--disable",
-  "shell_tool",
-  "--disable",
-  "apps",
-  "--disable",
-  "plugins",
-  "--disable",
-  "multi_agent",
-  "--disable",
-  "goals",
-  "--disable",
-  "hooks",
+  ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
   "-c",
   'web_search="disabled"',
   "-c",
   "mcp_servers={}",
+  "-c",
+  `default_permissions="${OPERATOR_PERMISSION_PROFILE}"`,
+  "-c",
+  `permissions.${OPERATOR_PERMISSION_PROFILE}={description="Discord voice operator with no local filesystem or network authority.",filesystem={":root"="deny"},network={enabled=false}}`,
 ];
 
-export const OPERATOR_INSTRUCTIONS = `You are the read-only Jaeger voice operator for a compatibility spike.
+export const OPERATOR_INSTRUCTIONS = `You are the read-only Jaeger Discord voice operator.
 
 Your only operational purpose is to inspect Jaeger and report concise spoken
 answers. Use the jaeger_status tool for current Jaeger status. It is a narrow,
@@ -45,7 +60,7 @@ read-only bridge to the installed Jaeger CLI. Do not use shell commands.
 
 Never start, resume, steer, interrupt, stop, or otherwise mutate a Jaeger run or
 session. Never edit files. Never install software. Never retry an uncertain
-operation. If a request would mutate state, explain that this spike is
+operation. If a request would mutate state, explain that this operator is
 read-only. Preserve opaque IDs exactly. Keep spoken answers under 70 words unless
 the operator asks for detail.`;
 
@@ -126,8 +141,8 @@ export class CodexAppServer extends EventEmitter {
     try {
       await this.request("initialize", {
         clientInfo: {
-          name: "jaeger_voice_spike",
-          title: "Jaeger Voice Compatibility Spike",
+          name: "jaeger_discord_voice",
+          title: "Jaeger Discord Voice",
           version: "0.1.0",
         },
         capabilities: { experimentalApi: true },
@@ -187,13 +202,13 @@ export class CodexAppServer extends EventEmitter {
     return this.snapshot();
   }
 
-  async startRealtime({ sdp, voice = "juniper" }) {
+  async startRealtime({ sdp, voice } = {}) {
     this.#assertReady();
     if (typeof sdp !== "string" || !sdp.startsWith("v=0")) {
-      throw new Error("A valid WebRTC SDP offer is required");
+      throw new Error("A valid headless WebRTC SDP offer is required");
     }
     if (this.realtimeStarting) {
-      throw new Error("Realtime negotiation is already in progress");
+      throw new Error("Realtime startup is already in progress");
     }
     this.realtimeStarting = true;
 
@@ -205,17 +220,20 @@ export class CodexAppServer extends EventEmitter {
           outputModality: "audio",
           transport: { type: "webrtc", sdp },
           version: "v3",
-          voice,
+          ...(voice ? { voice } : {}),
           includeStartupContext: true,
+          flushTranscriptTailOnSessionEnd: false,
         }),
         answer.promise,
       ]);
-      return { sdp: params.sdp, threadId: this.threadId };
+      return {
+        threadId: this.threadId,
+        sdp: params.sdp,
+      };
     } catch (error) {
       try {
-        // SDP notifications have no request identity. Replacing the app-server
-        // generation guarantees that a late answer cannot satisfy a later
-        // negotiation on this persistent thread.
+        // Replacing the app-server generation guarantees that a partially
+        // opened transport cannot leak into the next Discord media session.
         await this.reconnect();
       } catch (recoveryError) {
         throw new AggregateError(
@@ -228,18 +246,6 @@ export class CodexAppServer extends EventEmitter {
       answer.cancel();
       this.realtimeStarting = false;
     }
-  }
-
-  async appendText(text) {
-    this.#assertReady();
-    if (typeof text !== "string" || text.trim().length === 0) {
-      throw new Error("Text is required");
-    }
-    await this.request("thread/realtime/appendText", {
-      threadId: this.threadId,
-      role: "user",
-      text: text.trim(),
-    });
   }
 
   async stopRealtime() {
@@ -304,8 +310,9 @@ export class CodexAppServer extends EventEmitter {
       const result = await this.request("thread/resume", {
         threadId: stored.threadId,
         cwd: this.cwd,
+        runtimeWorkspaceRoots: [],
         approvalPolicy: "never",
-        sandbox: "read-only",
+        permissions: OPERATOR_PERMISSION_PROFILE,
         developerInstructions: OPERATOR_INSTRUCTIONS,
       });
       this.threadId = result.thread?.id;
@@ -318,12 +325,15 @@ export class CodexAppServer extends EventEmitter {
 
     const result = await this.request("thread/start", {
       cwd: this.cwd,
+      runtimeWorkspaceRoots: [],
       approvalPolicy: "never",
-      sandbox: "read-only",
+      permissions: OPERATOR_PERMISSION_PROFILE,
       developerInstructions: OPERATOR_INSTRUCTIONS,
       dynamicTools: this.dynamicTools,
+      environments: [],
+      selectedCapabilityRoots: [],
       ephemeral: false,
-      serviceName: "jaeger-voice-spike",
+      serviceName: "jaeger-discord-voice",
     });
     this.threadId = result.thread?.id;
     if (!this.threadId) throw new Error("Codex did not return an operator thread ID");
@@ -349,7 +359,9 @@ export class CodexAppServer extends EventEmitter {
           },
         ],
         approvalPolicy: "never",
-        sandboxPolicy: OPERATOR_SANDBOX_POLICY,
+        permissions: OPERATOR_PERMISSION_PROFILE,
+        runtimeWorkspaceRoots: [],
+        environments: [],
       });
       const result = await completed.promise;
       if (result.turn?.status !== "completed") {
@@ -520,7 +532,7 @@ export class CodexAppServer extends EventEmitter {
     if (child !== this.child) return;
     const handler = this.requestHandlers[message.method];
     if (!handler) {
-      // This spike has no mutation authority. Fail closed on unknown requests.
+      // This operator has no mutation authority. Fail closed on unknown requests.
       this.#writeToChild(child, {
         id: message.id,
         result: { decision: "decline" },
@@ -593,6 +605,7 @@ async function waitForChildExit(child, timeoutMs) {
 
 export async function readThreadState(stateFile) {
   try {
+    await assertOwnerOnlyFile(stateFile, "Discord operator state");
     const value = JSON.parse(await readFile(stateFile, "utf8"));
     if (typeof value.threadId !== "string" || value.threadId.length === 0) {
       throw new Error("Operator state does not contain a thread ID");
@@ -607,11 +620,43 @@ export async function readThreadState(stateFile) {
 export async function writeThreadState(stateFile, threadId) {
   const directory = dirname(stateFile);
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  await assertOwnerOnlyDirectory(directory, "Discord operator state directory");
   const temporary = `${stateFile}.${process.pid}.tmp`;
-  await writeFile(
-    temporary,
-    `${JSON.stringify({ threadId }, null, 2)}\n`,
-    { mode: 0o600 },
-  );
-  await rename(temporary, stateFile);
+  try {
+    await writeFile(
+      temporary,
+      `${JSON.stringify({ threadId }, null, 2)}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    await rename(temporary, stateFile);
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error("Discord operator state temporary file already exists");
+    }
+    throw error;
+  }
+}
+
+async function assertOwnerOnlyFile(path, description) {
+  const metadata = await lstat(path);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.uid !== process.getuid?.() ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    throw new Error(`${description} must be a regular owner-only file`);
+  }
+}
+
+async function assertOwnerOnlyDirectory(path, description) {
+  const metadata = await lstat(path);
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    metadata.uid !== process.getuid?.() ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    throw new Error(`${description} must be an owner-only directory`);
+  }
 }

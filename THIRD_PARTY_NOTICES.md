@@ -21,3 +21,12 @@ their respective licenses and service terms.
 Installed npm dependencies retain their own package metadata and license files.
 Review the lockfile, the installed dependency tree, and the vendored SDK
 metadata for the exact revisions being distributed.
+
+The optional bundled Discord source item declares Apache-2.0 dependencies
+`discord.js` and `@discordjs/voice`, the MIT-licensed
+`@node-webrtc-rust/sdk` headless WebRTC implementation, and the MIT-licensed
+`opusscript` codec. The voice stack transitively includes the MIT-licensed
+`@snazzah/davey` DAVE implementation.
+They are installed only when the operator mounts that item into the private
+runtime project. Discord and OpenAI are independent services governed by their
+respective terms and privacy policies.
