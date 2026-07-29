@@ -544,7 +544,11 @@ export class CodexAppServer extends EventEmitter {
     }
 
     if (message.id !== undefined && message.method) {
-      void this.#handleServerRequest(child, message);
+      void this.#handleServerRequest(child, message).catch((error) => {
+        if (child === this.child && !this.stopping) {
+          this.emit("diagnostic", error);
+        }
+      });
       return;
     }
 
@@ -566,20 +570,21 @@ export class CodexAppServer extends EventEmitter {
       this.emit("serverRequestDeclined", { method: message.method });
       return;
     }
+    let response;
     try {
       const result = await handler(message.params ?? {});
-      if (child !== this.child) return;
-      this.#writeToChild(child, { id: message.id, result });
+      response = { id: message.id, result };
     } catch (error) {
-      if (child !== this.child) return;
-      this.#writeToChild(child, {
+      response = {
         id: message.id,
         error: {
           code: -32_000,
           message: error instanceof Error ? error.message : String(error),
         },
-      });
+      };
     }
+    if (child !== this.child) return;
+    this.#writeToChild(child, response);
   }
 
   #writeToChild(child, message) {

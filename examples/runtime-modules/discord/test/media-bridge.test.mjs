@@ -102,6 +102,35 @@ test("peer and codec failures fail the media bridge closed", async () => {
   await fixture.bridge.stop();
 });
 
+test(
+  "shutdown closes the peer before draining a stalled PCM write",
+  { timeout: 1_000 },
+  async () => {
+    const fixture = createFixture();
+    const sendStarted = deferred();
+    const releaseSend = deferred();
+    fixture.peer.sendPcm = async (pcm) => {
+      fixture.peer.inputFrames.push(Buffer.from(pcm));
+      sendStarted.resolve();
+      await releaseSend.promise;
+    };
+    fixture.peer.stop = async () => {
+      fixture.peer.stopCalls += 1;
+      releaseSend.resolve();
+    };
+    fixture.bridge.on("error", (error) => assert.fail(error));
+    await fixture.bridge.start();
+
+    fixture.speaking.emit("start", "allowed-user");
+    fixture.subscriptions[0].stream.write(Buffer.from([1]));
+    await sendStarted.promise;
+    await fixture.bridge.stop();
+
+    assert.equal(fixture.peer.stopCalls, 1);
+    assert.equal(fixture.peer.inputFrames.length, 1);
+  },
+);
+
 function createFixture() {
   const speaking = new EventEmitter();
   const subscriptions = [];
@@ -224,4 +253,12 @@ function emitOutputFrame(peer, value) {
 async function settled() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
 }

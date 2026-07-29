@@ -68,6 +68,38 @@ test("the installed voice stack reports DAVE support", () => {
   );
 });
 
+test(
+  "service abort interrupts pending Discord startup operations",
+  { timeout: 2_000 },
+  async () => {
+    for (const stage of ["login", "commands"]) {
+      const fixture = await createServiceFixture();
+      const started = deferred();
+      const pending = deferred();
+      if (stage === "login") {
+        fixture.client.login = async () => {
+          started.resolve();
+          return await pending.promise;
+        };
+      } else {
+        fixture.client.application.commands.set = async () => {
+          started.resolve();
+          return await pending.promise;
+        };
+      }
+      const abort = new AbortController();
+      const running = fixture.service.run(abort.signal);
+      await started.promise;
+
+      abort.abort();
+      await running;
+      assert.equal(fixture.client.destroyCalls, 1, stage);
+      assert.equal(fixture.service.ready, false, stage);
+      pending.resolve();
+    }
+  },
+);
+
 test("attention joins and DMs before starting media, then leaves cleanly", async () => {
   const fixture = await createServiceFixture();
   await fixture.start();
@@ -103,6 +135,35 @@ test("attention joins and DMs before starting media, then leaves cleanly", async
   );
   await settled();
   assert.equal(fixture.bridges[0].stopCalls, 1);
+  assert.equal(fixture.connections[0].destroyCalls, 1);
+  await fixture.stop();
+});
+
+test("attention rejects when Discord disconnects during DM delivery", async () => {
+  const fixture = await createServiceFixture();
+  await fixture.start();
+  const sendStarted = deferred();
+  const releaseSend = deferred();
+  fixture.owner.send = async function (message) {
+    this.messages.push(message);
+    sendStarted.resolve();
+    await releaseSend.promise;
+  };
+
+  const attention = fixture.service.requestAttention("Attention.");
+  await sendStarted.promise;
+  fixture.connections[0].emit(
+    "stateChange",
+    { status: "ready" },
+    { status: "disconnected" },
+  );
+  await settled();
+  releaseSend.resolve();
+
+  await assert.rejects(
+    attention,
+    /disconnected during attention delivery/,
+  );
   assert.equal(fixture.connections[0].destroyCalls, 1);
   await fixture.stop();
 });
@@ -358,7 +419,7 @@ test("guild-scoped allowlisted interactions expose runs, attach, and fresh query
   const runs = fakeInteraction({ commandName: "runs" });
   fixture.client.emit(Events.InteractionCreate, runs);
   await runs.done;
-  assert.match(runs.replies[0].content, /run-1  running/);
+  assert.match(runs.edits[0].content, /run-1  running/);
 
   const attach = fakeInteraction({
     commandName: "attach",
@@ -366,7 +427,7 @@ test("guild-scoped allowlisted interactions expose runs, attach, and fresh query
   });
   fixture.client.emit(Events.InteractionCreate, attach);
   await attach.done;
-  assert.match(attach.replies[0].content, /run-1\/session-1/);
+  assert.match(attach.edits[0].content, /run-1\/session-1/);
 
   const ask = fakeInteraction({
     commandName: "ask",
@@ -385,6 +446,54 @@ test("guild-scoped allowlisted interactions expose runs, attach, and fresh query
     },
   ]);
   assert.equal(ask.edits[0].content, "Fresh read-only answer.");
+
+  await fixture.stop();
+});
+
+test("slash commands defer before awaiting Jaeger or storage", async () => {
+  const fixture = await createServiceFixture();
+  await fixture.start();
+
+  const listRuns = deferred();
+  fixture.runtime.runs.list = () => listRuns.promise;
+  const runs = fakeInteraction({ commandName: "runs" });
+  fixture.client.emit(Events.InteractionCreate, runs);
+  await settled();
+  assert.equal(runs.replies.length, 1);
+  assert.equal(runs.edits.length, 0);
+  listRuns.resolve([{ runId: "run-slow", status: "running" }]);
+  await runs.done;
+
+  const inspectSession = deferred();
+  fixture.runtime.sessions.inspect = () => inspectSession.promise;
+  const attach = fakeInteraction({
+    commandName: "attach",
+    values: { run: "run-slow", session: "reviewer" },
+  });
+  fixture.client.emit(Events.InteractionCreate, attach);
+  await settled();
+  assert.equal(attach.replies.length, 1);
+  assert.equal(attach.edits.length, 0);
+  inspectSession.resolve({ id: "session-slow", label: "reviewer" });
+  await attach.done;
+
+  const binding = deferred();
+  fixture.runtime.storage.get = () => binding.promise;
+  const ask = fakeInteraction({
+    commandName: "ask",
+    values: { question: "Status?" },
+  });
+  fixture.client.emit(Events.InteractionCreate, ask);
+  await settled();
+  assert.equal(ask.replies.length, 1);
+  assert.equal(ask.edits.length, 0);
+  binding.resolve({
+    guildId: GUILD_ID,
+    userId: USER_ID,
+    runId: "run-slow",
+    sessionId: "session-slow",
+  });
+  await ask.done;
 
   await fixture.stop();
 });

@@ -30,6 +30,7 @@ const NOTIFICATION_EVENTS = [
   "session.query.completed",
 ];
 const ASK_TIMEOUT_MS = 10 * 60_000;
+const SERVICE_ABORT = Symbol("discord-service-abort");
 const COMMANDS = [
   {
     name: "runs",
@@ -178,27 +179,41 @@ export class DiscordService {
   }
 
   async run(signal) {
+    if (signal.aborted) return;
     assertDaveSupport(this.dependencyReport());
-    let token = await readOwnerOnlySecret(this.config.tokenFile);
-    this.client.on(Events.InteractionCreate, this.onInteraction);
-    this.client.on(Events.VoiceStateUpdate, this.onVoiceState);
-    const ready = once(this.client, Events.ClientReady);
+    let token = "";
+    let readyController = null;
     try {
+      token = await abortable(
+        readOwnerOnlySecret(this.config.tokenFile),
+        signal,
+      );
+      this.client.on(Events.InteractionCreate, this.onInteraction);
+      this.client.on(Events.VoiceStateUpdate, this.onVoiceState);
+      readyController = new AbortController();
+      const ready = once(this.client, Events.ClientReady, {
+        signal: readyController.signal,
+      });
+      void ready.catch(() => {});
       try {
-        await this.client.login(token);
+        await abortable(this.client.login(token), signal);
       } catch (error) {
+        if (error === SERVICE_ABORT) throw error;
         throw sanitizeDiscordError(error, token);
       } finally {
         token = "";
       }
-      await ready;
-      await this.#initializeGuildSurface();
+      await abortable(ready, signal);
+      await this.#initializeGuildSurface(signal);
       this.ready = true;
       this.runtime.log.info("Discord bot connected");
       if (signal.aborted) return;
       await once(signal, "abort");
+    } catch (error) {
+      if (error !== SERVICE_ABORT) throw error;
     } finally {
       token = "";
+      readyController?.abort();
       this.ready = false;
       this.client.off(Events.InteractionCreate, this.onInteraction);
       this.client.off(Events.VoiceStateUpdate, this.onVoiceState);
@@ -225,13 +240,17 @@ export class DiscordService {
     });
   }
 
-  async #initializeGuildSurface() {
-    const guild = await this.client.guilds.fetch(this.config.guildId);
+  async #initializeGuildSurface(signal) {
+    const guild = await abortable(
+      this.client.guilds.fetch(this.config.guildId),
+      signal,
+    );
     if (!guild || guild.id !== this.config.guildId) {
       throw new Error("Configured Discord guild is unavailable");
     }
-    this.voiceChannel = await this.client.channels.fetch(
-      this.config.voiceChannelId,
+    this.voiceChannel = await abortable(
+      this.client.channels.fetch(this.config.voiceChannelId),
+      signal,
     );
     if (
       !this.voiceChannel ||
@@ -241,8 +260,9 @@ export class DiscordService {
       throw new Error("Configured Discord voice channel is unavailable");
     }
     if (this.config.notificationChannelId) {
-      this.notificationChannel = await this.client.channels.fetch(
-        this.config.notificationChannelId,
+      this.notificationChannel = await abortable(
+        this.client.channels.fetch(this.config.notificationChannelId),
+        signal,
       );
       if (
         !this.notificationChannel?.isTextBased?.() ||
@@ -252,7 +272,10 @@ export class DiscordService {
         throw new Error("Configured Discord notification channel is unavailable");
       }
     }
-    await this.client.application.commands.set(COMMANDS, this.config.guildId);
+    await abortable(
+      this.client.application.commands.set(COMMANDS, this.config.guildId),
+      signal,
+    );
   }
 
   async #requestAttention(reason) {
@@ -326,7 +349,7 @@ export class DiscordService {
         allowedMentions: { parse: [] },
       });
       if (this.connection !== connection || this.phase !== "ringing") {
-        return { status: this.phase, coalesced: false };
+        throw new Error("Discord voice disconnected during attention delivery");
       }
       this.ringingTimer = this.clock.setTimeout(() => {
         this.#requestCallEnd(
@@ -554,14 +577,15 @@ export class DiscordService {
       return;
     }
 
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     if (interaction.commandName === "runs") {
       const runs = await this.runtime.runs.list();
       const lines = Array.isArray(runs)
         ? runs.slice(0, 10).map((run) => `${run.runId}  ${run.status}`)
         : [];
-      await interaction.reply({
+      await interaction.editReply({
         content: lines.length > 0 ? lines.join("\n") : "No Jaeger runs found.",
-        flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       });
       return;
@@ -577,11 +601,10 @@ export class DiscordService {
         runId,
         sessionId: session.id,
       });
-      await interaction.reply({
+      await interaction.editReply({
         content: `Attached to ${runId}/${session.id}${
           session.label ? ` (${session.label})` : ""
         }.`,
-        flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       });
       return;
@@ -594,14 +617,12 @@ export class DiscordService {
         binding.guildId !== this.config.guildId ||
         binding.userId !== this.config.allowUserId
       ) {
-        await interaction.reply({
+        await interaction.editReply({
           content: "Attach a Jaeger session first with /attach.",
-          flags: MessageFlags.Ephemeral,
           allowedMentions: { parse: [] },
         });
         return;
       }
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       try {
         const result = await this.runtime.sessions.query(
           binding.runId,
@@ -758,6 +779,21 @@ export function assertDaveSupport(report) {
     )
   ) {
     throw new Error("Discord DAVE support is unavailable");
+  }
+}
+
+async function abortable(operation, signal) {
+  if (signal.aborted) throw SERVICE_ABORT;
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(SERVICE_ABORT);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 

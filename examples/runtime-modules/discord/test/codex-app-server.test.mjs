@@ -207,6 +207,42 @@ test("stopping during realtime startup does not reconnect", async () => {
   assert.equal(bridge.connected, false);
 });
 
+test("server responses racing with shutdown do not reject unhandled", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "discord-server-response-stop-"));
+  const handlerStarted = deferred();
+  const finishHandler = deferred();
+  const child = createMockProcess({ deferExit: true });
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => child,
+    requestHandlers: {
+      "item/tool/call": async () => {
+        handlerStarted.resolve();
+        return await finishHandler.promise;
+      },
+    },
+    requestTimeoutMs: 1_000,
+    stopTimeoutMs: 1_000,
+  });
+  await bridge.start();
+  child.stdout.write(
+    `${JSON.stringify({
+      id: 999,
+      method: "item/tool/call",
+      params: {},
+    })}\n`,
+  );
+  await handlerStarted.promise;
+
+  const stopping = bridge.stop();
+  await new Promise((resolve) => child.stdin.once("finish", resolve));
+  finishHandler.resolve({ decision: "decline" });
+  await new Promise((resolve) => setImmediate(resolve));
+  child.finishExit("SIGTERM");
+  await stopping;
+});
+
 test("unknown app-server requests are declined", async () => {
   const directory = await mkdtemp(join(tmpdir(), "discord-operator-decline-"));
   const child = createMockProcess();
@@ -228,7 +264,10 @@ test("unknown app-server requests are declined", async () => {
   await bridge.stop();
 });
 
-function createMockProcess({ deferRealtimeSdp = false } = {}) {
+function createMockProcess({
+  deferExit = false,
+  deferRealtimeSdp = false,
+} = {}) {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
@@ -296,9 +335,23 @@ function createMockProcess({ deferRealtimeSdp = false } = {}) {
     }
   });
   child.kill = (signal) => {
-    child.signalCode = signal;
-    queueMicrotask(() => child.emit("exit", null, signal));
+    if (!deferExit) {
+      child.signalCode = signal;
+      queueMicrotask(() => child.emit("exit", null, signal));
+    }
     return true;
   };
+  child.finishExit = (signal) => {
+    child.signalCode = signal;
+    child.emit("exit", null, signal);
+  };
   return child;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
 }

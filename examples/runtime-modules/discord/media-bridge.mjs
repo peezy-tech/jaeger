@@ -113,16 +113,17 @@ export class DiscordRealtimeBridge extends EventEmitter {
     this.inputSubscription?.destroy();
     this.inputSubscription = null;
     this.#interruptOutput();
+    const peer = this.peer;
+    this.peer = null;
+    await peer?.stop().catch((error) => {
+      this.emit("diagnostic", error);
+    });
     await this.inputWriteQueue.catch(() => {});
     this.decoder?.delete?.();
     this.encoder?.delete?.();
     this.decoder = null;
     this.encoder = null;
 
-    await this.peer?.stop().catch((error) => {
-      this.emit("diagnostic", error);
-    });
-    this.peer = null;
     if (this.codex) {
       if (wasActive && this.codex.connected && this.codex.threadId) {
         const closed = this.codex.waitForNotification(
