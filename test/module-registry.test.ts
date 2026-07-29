@@ -84,9 +84,15 @@ test("adds several source items to one runtime package and reconciles one depend
   }
 });
 
-test("a multi-module add invokes the shared package manager exactly once", async () => {
+test("a multi-module npm add ignores an ancestor workspace and installs exactly once", async () => {
   const fixture = await registryFixture();
   try {
+    await writeJson(path.join(fixture.root, "package.json"), {
+      name: "operator-workspace",
+      private: true,
+      workspaces: ["runtime"],
+    });
+    await writeFile(path.join(fixture.root, "package-lock.json"), "operator-lock\n");
     const bin = path.join(fixture.root, "bin");
     const calls = path.join(fixture.root, "package-manager-calls.txt");
     await mkdir(bin);
@@ -111,8 +117,12 @@ test("a multi-module add invokes the shared package manager exactly once", async
     assert.equal(result.dependenciesInstalled, true);
     const invocations = (await readFile(calls, "utf8")).trim().split("\n");
     assert.deepEqual(invocations, [
-      "install --ignore-scripts --no-audit --no-fund",
+      "install --ignore-scripts --no-audit --no-fund --workspaces=false",
     ]);
+    assert.equal(
+      await readFile(path.join(fixture.root, "package-lock.json"), "utf8"),
+      "operator-lock\n",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -778,6 +788,33 @@ test('preserves the valid dependency name "__proto__"', async () => {
   }
 });
 
+test('preserves the valid declaredAccess key "__proto__"', async () => {
+  const fixture = await registryFixture({
+    alphaDeclaredAccess: { ["__proto__"]: ["network"] },
+  });
+  try {
+    const resolved = await resolveModuleItem(`${fixture.catalogPath}#alpha`);
+    assert.equal(Object.hasOwn(resolved.item.declaredAccess ?? {}, "__proto__"), true);
+    assert.deepEqual(resolved.item.declaredAccess?.["__proto__"], ["network"]);
+
+    await addModules({
+      root: fixture.runtimeRoot,
+      references: [`${fixture.catalogPath}#alpha`],
+      install: false,
+    });
+    const stagedManifest = JSON.parse(
+      await readFile(
+        path.join(fixture.runtimeRoot, "modules", "alpha", "jaeger.module.json"),
+        "utf8",
+      ),
+    ) as { declaredAccess: Record<string, string[]> };
+    assert.equal(Object.hasOwn(stagedManifest.declaredAccess, "__proto__"), true);
+    assert.deepEqual(stagedManifest.declaredAccess["__proto__"], ["network"]);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("removal requires force while a runtime composition exists", async () => {
   const fixture = await registryFixture();
   const requiresForce =
@@ -1304,6 +1341,7 @@ interface RegistryFixture {
 
 async function registryFixture(
   options: {
+    readonly alphaDeclaredAccess?: Readonly<Record<string, readonly string[]>>;
     readonly betaDependencies?: Readonly<Record<string, string>>;
   } = {},
 ): Promise<RegistryFixture> {
@@ -1330,6 +1368,9 @@ async function registryFixture(
       dependencies: {
         "fixture-dependency": ">=1 <4",
       },
+      ...(options.alphaDeclaredAccess === undefined
+        ? {}
+        : { declaredAccess: options.alphaDeclaredAccess }),
     }),
     writeJson(path.join(sourceRoot, "beta", "jaeger.module.json"), {
       schemaVersion: 1,

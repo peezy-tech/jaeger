@@ -1022,7 +1022,7 @@ async function installProjectDependencies(
         ? modernYarn
           ? ["install", "--mode=skip-build"]
           : ["install", "--ignore-scripts"]
-        : ["install", "--ignore-scripts", "--no-audit", "--no-fund"];
+        : ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--workspaces=false"];
   try {
     await execFileAsync(manager, args, {
       cwd: root,
@@ -1279,7 +1279,7 @@ function stringArrayRecord(value: unknown, locator: string): Record<string, read
     if (!Array.isArray(entry) || entry.some((item) => typeof item !== "string")) {
       throw new Error(`Invalid declaredAccess ${key} in ${locator}`);
     }
-    result[key] = entry as string[];
+    setRecordValue(result, key, entry as string[]);
   }
   return result;
 }
