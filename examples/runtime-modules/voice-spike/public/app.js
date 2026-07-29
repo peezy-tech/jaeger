@@ -38,7 +38,11 @@ const state = {
   transcriptDrafts: new Map(),
 };
 
-const apiUrl = (path) => new URL(path.replace(/^\//, ""), window.location.href);
+const apiBaseUrl = new URL(window.location.href);
+if (!apiBaseUrl.pathname.endsWith("/")) apiBaseUrl.pathname += "/";
+apiBaseUrl.search = "";
+apiBaseUrl.hash = "";
+const apiUrl = (path) => new URL(path.replace(/^\//, ""), apiBaseUrl);
 
 const accessTokens = loadAccessTokens();
 const invitationToken = accessTokens.callToken;
@@ -140,7 +144,7 @@ elements.typedProbe.addEventListener("submit", async (event) => {
 
 async function startSession() {
   elements.talkButton.disabled = true;
-  let upstreamSessionStarted = false;
+  let upstreamSessionMayBeActive = false;
   setSignal("Requesting microphone");
   try {
     state.inputStream = await navigator.mediaDevices.getUserMedia({
@@ -178,11 +182,11 @@ async function startSession() {
     await state.peer.setLocalDescription(offer);
     await waitForIceGathering(state.peer);
     setSignal("Negotiating Codex realtime");
+    upstreamSessionMayBeActive = true;
     const answer = await post("api/session", {
       sdp: state.peer.localDescription.sdp,
       voice: "juniper",
     });
-    upstreamSessionStarted = true;
     await state.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
 
     state.sessionActive = true;
@@ -192,7 +196,7 @@ async function startSession() {
     setSignal("Listening");
     return true;
   } catch (error) {
-    if (upstreamSessionStarted) {
+    if (upstreamSessionMayBeActive) {
       await post("api/stop", {}).catch(() => {});
     }
     closePeer();

@@ -1526,7 +1526,10 @@ function assertOnlyKeys(
 async function runtimeConfigReferencesModule(root: string, name: string): Promise<boolean> {
   try {
     const source = await readFile(path.join(root, RUNTIME_CONFIG_FILE), "utf8");
-    return source.includes(`${MODULE_DIRECTORY}/${name}/`);
+    return (
+      source.includes(`${MODULE_DIRECTORY}/${name}/`) ||
+      source.includes(`${MODULE_DIRECTORY}/\${`)
+    );
   } catch (error) {
     if (hasCode(error, "ENOENT")) return false;
     throw error;
