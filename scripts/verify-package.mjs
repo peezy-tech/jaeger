@@ -215,14 +215,15 @@ try {
   await access(path.join(moduleProject, "modules", "telegram", "telegram.mjs"))
   await access(path.join(moduleProject, "modules", "voice-spike", "server.mjs"))
 
-  const environmentRoot = path.join(installDir, "environments")
-  await mkdir(path.join(environmentRoot, "package-smoke", "snippets"), { recursive: true })
+  const environmentRoot = path.join(installDir, "mdcsp")
+  await mkdir(path.join(environmentRoot, "profiles"), { recursive: true })
+  await mkdir(path.join(environmentRoot, "snippets"), { recursive: true })
   await writeFile(
-    path.join(environmentRoot, "package-smoke", "environment.toml"),
-    `version = 1\nname = "package-smoke"\n[providers.codex]\ninstructions = ["snippets/package.md"]\n`,
+    path.join(environmentRoot, "profiles", "package-smoke.toml"),
+    `version = 1\nname = "package-smoke"\nsnippets = ["package"]\n`,
   )
   await writeFile(
-    path.join(environmentRoot, "package-smoke", "snippets", "package.md"),
+    path.join(environmentRoot, "snippets", "package.md"),
     "# Packaged environment\n",
   )
   const environmentList = await run(
@@ -231,6 +232,43 @@ try {
     installDir,
   )
   assert.deepEqual(JSON.parse(environmentList.stdout), ["package-smoke"])
+  const environmentState = path.join(installDir, "environment-state")
+  const codexHome = path.join(installDir, "codex-home")
+  const environmentEnv = { ...process.env, CODEX_HOME: codexHome }
+  const appliedEnvironment = JSON.parse(
+    (await run(
+      binary,
+      [
+        "env",
+        "apply",
+        "package-smoke",
+        "--config-root",
+        environmentRoot,
+        "--state-root",
+        environmentState,
+        "--json",
+      ],
+      installDir,
+      environmentEnv,
+    )).stdout,
+  )
+  assert.equal(appliedEnvironment.changed, 1)
+  const mdcspBinary = path.join(
+    installDir,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "mdcsp.cmd" : "mdcsp",
+  )
+  const renderedProfile = await run(
+    mdcspBinary,
+    ["render", "package-smoke", "--root", environmentRoot, "--stdout"],
+    installDir,
+    environmentEnv,
+  )
+  assert.equal(
+    await readFile(path.join(codexHome, "AGENTS.md"), "utf8"),
+    renderedProfile.stdout,
+  )
 
   const backendSocket = path.join(tempRoot, "installed-runtime", "backend.sock")
   const backendState = path.join(tempRoot, "installed-state")

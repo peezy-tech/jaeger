@@ -16,7 +16,14 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { commandAvailableOnPath, compose } from "mdcsp";
+import {
+  commandAvailableOnPath,
+  compose,
+  composeFiles,
+  defaultConfigRoot,
+  listProfiles,
+  loadProfile,
+} from "mdcsp";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { syncDirectory } from "./durable-json.js";
 import { ensurePrivateDirectory } from "./paths.js";
@@ -34,6 +41,7 @@ type ResourceCategory = "instructions" | "skill" | "plugin" | "config" | "harnes
 export interface EnvironmentPaths {
   readonly configRoot: string;
   readonly stateRoot: string;
+  readonly jaegerConfigRoot?: string;
 }
 
 export interface EnvironmentResource {
@@ -176,22 +184,14 @@ export function defaultEnvironmentPaths(env: NodeJS.ProcessEnv = process.env): E
   const configBase = env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config");
   const stateBase = env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state");
   return {
-    configRoot: path.join(configBase, "jaeger", "environments"),
+    configRoot: defaultConfigRoot(env),
     stateRoot: path.join(stateBase, "jaeger", "environment"),
+    jaegerConfigRoot: path.join(configBase, "jaeger"),
   };
 }
 
 export async function listEnvironments(configRoot: string): Promise<readonly string[]> {
-  try {
-    const entries = await readdir(configRoot, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isDirectory() && ENVIRONMENT_NAME.test(entry.name))
-      .map((entry) => entry.name)
-      .sort();
-  } catch (error) {
-    if (hasCode(error, "ENOENT")) return [];
-    throw error;
-  }
+  return await listProfiles(configRoot);
 }
 
 export async function loadEnvironmentPlan(
@@ -200,10 +200,41 @@ export async function loadEnvironmentPlan(
   explicitManifest?: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<EnvironmentPlan> {
+  if (explicitManifest) {
+    return await loadJaegerEnvironmentPlan(name, paths, explicitManifest, env, "legacy");
+  }
+
   validateEnvironmentName(name);
-  const manifestPath = path.resolve(
-    explicitManifest ?? path.join(paths.configRoot, name, "environment.toml"),
-  );
+  const profile = await mdcspProfileResource(paths.configRoot, name, "codex", env);
+  const sidecarPath = path.join(paths.configRoot, "jaeger", name, "environment.toml");
+  const sidecar = await regularFileExists(sidecarPath)
+    ? await loadJaegerEnvironmentPlan(name, paths, sidecarPath, env, "sidecar")
+    : undefined;
+  const resources = [profile.resource, ...(sidecar?.resources ?? [])];
+  assertUniqueResourceTargets(resources);
+  return {
+    version: 1,
+    name,
+    manifestPath: profile.profilePath,
+    resources,
+    plugins: sidecar?.plugins ?? [],
+    packages: sidecar?.packages ?? [],
+    snippets: [
+      ...profile.snippets,
+      ...(sidecar?.snippets ?? []),
+    ],
+  };
+}
+
+async function loadJaegerEnvironmentPlan(
+  name: string,
+  paths: EnvironmentPaths,
+  manifestFile: string,
+  env: NodeJS.ProcessEnv,
+  mode: "legacy" | "sidecar",
+): Promise<EnvironmentPlan> {
+  validateEnvironmentName(name);
+  const manifestPath = path.resolve(manifestFile);
   const manifestDirectory = path.dirname(manifestPath);
   let parsed: unknown;
   try {
@@ -222,7 +253,10 @@ export async function loadEnvironmentPlan(
   const snippets: SnippetDecision[] = [];
   if (manifest.harness_config !== undefined) {
     const source = await resolveSource(manifestDirectory, stringValue(manifest.harness_config, "harness_config"));
-    const target = path.join(path.dirname(paths.configRoot), "harnesses.json");
+    const target = path.join(
+      paths.jaegerConfigRoot ?? path.dirname(paths.configRoot),
+      "harnesses.json",
+    );
     resources.push(await sourceResource("jaeger", "harness-config", source, target));
   }
   const providers = objectValue(manifest.providers ?? {}, "providers");
@@ -233,10 +267,32 @@ export async function loadEnvironmentPlan(
     rejectUnknown(
       providerConfig,
       provider === "pi"
-        ? ["instructions", "skills", "packages", "configs"]
-        : ["instructions", "skills", "plugins", "configs"],
+        ? ["profile", "instructions", "skills", "packages", "configs"]
+        : ["profile", "instructions", "skills", "plugins", "configs"],
       `providers.${provider}`,
     );
+    if (
+      mode === "sidecar" &&
+      provider === "codex" &&
+      (providerConfig.profile !== undefined || providerConfig.instructions !== undefined)
+    ) {
+      throw new Error(
+        "providers.codex instructions come from the mdcsp profile matching the environment name",
+      );
+    }
+    if (providerConfig.profile !== undefined && providerConfig.instructions !== undefined) {
+      throw new Error(`providers.${provider} cannot combine profile and instructions`);
+    }
+    if (providerConfig.profile !== undefined) {
+      const profile = await mdcspProfileResource(
+        paths.configRoot,
+        stringValue(providerConfig.profile, `providers.${provider}.profile`),
+        provider,
+        env,
+      );
+      resources.push(profile.resource);
+      snippets.push(...profile.snippets);
+    }
     if (providerConfig.instructions !== undefined) {
       const names = stringArray(providerConfig.instructions, `providers.${provider}.instructions`);
       const sources: string[] = [];
@@ -330,11 +386,7 @@ export async function loadEnvironmentPlan(
       }
     }
   }
-  const targets = new Set<string>();
-  for (const resource of resources) {
-    if (targets.has(resource.target)) throw new Error(`Environment target is declared more than once: ${resource.target}`);
-    targets.add(resource.target);
-  }
+  assertUniqueResourceTargets(resources);
   const pluginKeys = new Set<string>();
   for (const plugin of plugins) {
     const key = `${plugin.provider}:${plugin.selector}`;
@@ -1604,6 +1656,63 @@ async function resolvePiPackageSource(
   }
   validatePiPackageSource(source);
   return source;
+}
+
+async function regularFileExists(target: string): Promise<boolean> {
+  try {
+    return (await lstat(target)).isFile();
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
+async function mdcspProfileResource(
+  configRoot: string,
+  profileName: string,
+  provider: ProviderName,
+  env: NodeJS.ProcessEnv,
+): Promise<{
+  readonly profilePath: string;
+  readonly resource: EnvironmentResource;
+  readonly snippets: readonly SnippetDecision[];
+}> {
+  const profile = await loadProfile(configRoot, profileName);
+  const composition = await composeFiles({
+    paths: profile.snippetPaths,
+    commandAvailable: (command) => commandAvailableOnPath(command, env),
+    header: ({ digest }) =>
+      `<!-- Generated by mdcsp. Edit snippets, not this file.\n` +
+      `     Profile: ${profileName} (${profile.profilePath})\n` +
+      `     Content: sha256:${digest.slice(0, 12)} -->`,
+  });
+  return {
+    profilePath: profile.profilePath,
+    resource: {
+      provider,
+      category: "instructions",
+      target: providerInstructionsTarget(provider, env),
+      kind: "file",
+      digest: hashText(composition.content),
+      content: composition.content,
+    },
+    snippets: composition.decisions.map((decision) => ({
+      path: decision.source,
+      selected: decision.selected,
+      reason: decision.reason,
+      ...(decision.description ? { description: decision.description } : {}),
+    })),
+  };
+}
+
+function assertUniqueResourceTargets(resources: readonly EnvironmentResource[]): void {
+  const targets = new Set<string>();
+  for (const resource of resources) {
+    if (targets.has(resource.target)) {
+      throw new Error(`Environment target is declared more than once: ${resource.target}`);
+    }
+    targets.add(resource.target);
+  }
 }
 
 function hashText(value: string | Buffer): string {

@@ -177,17 +177,50 @@ and exact inspect command.
 
 ## Harness environments
 
-Environment manifests live at
-`$XDG_CONFIG_HOME/jaeger/environments/<name>/environment.toml` (falling back to
-`~/.config/jaeger/environments/<name>/environment.toml`). Sources are relative
-to the manifest and must remain inside its directory. A minimal environment is:
+Jaeger environments use mdcsp's canonical configuration home and profile list:
+`$MDCSP_HOME`, then `$XDG_CONFIG_HOME/mdcsp`, then `~/.config/mdcsp`. A profile
+is an environment's instruction authority, so `mdcsp render workstation` and
+`jaeger env apply workstation` select the same ordered snippets. The minimal
+layout is:
+
+```text
+~/.config/mdcsp/
+├── profiles/
+│   ├── workstation.toml
+│   ├── workstation-claude.toml
+│   └── workstation-pi.toml
+├── snippets/
+│   ├── common.md
+│   ├── codex.md
+│   ├── claude.md
+│   └── pi.md
+└── jaeger/
+    └── workstation/
+        ├── environment.toml
+        ├── harnesses.json
+        ├── skills/
+        └── configs/
+```
+
+`profiles/workstation.toml` is an ordinary mdcsp profile:
 
 ```toml
 version = 1
 name = "workstation"
+snippets = ["common", "codex"]
+```
+
+The `jaeger/<name>/environment.toml` sidecar is optional. It adds native
+provider assets and can map Claude or Pi to other mdcsp profiles without owning
+Markdown composition itself. Sources are relative to the sidecar and must
+remain inside its directory:
+
+```toml
+version = 1
+name = "workstation"
+harness_config = "harnesses.json"
 
 [providers.codex]
-instructions = ["snippets/common.md", "snippets/codex.md"]
 skills = ["skills/jaeger-workflows"]
 plugins = ["github@openai-curated"]
 
@@ -196,10 +229,10 @@ source = "configs/tool.toml"
 target = "$CODEX_HOME/tool.toml"
 
 [providers.claude]
-instructions = ["snippets/common.md", "snippets/claude.md"]
+profile = "workstation-claude"
 
 [providers.pi]
-instructions = ["snippets/common.md", "snippets/pi.md"]
+profile = "workstation-pi"
 skills = ["skills/jaeger-workflows"]
 packages = ["npm:@acme/pi-tools@1.2.3"]
 
@@ -207,6 +240,19 @@ packages = ["npm:@acme/pi-tools@1.2.3"]
 source = "configs/pi-settings.json"
 target = "$PI_CODING_AGENT_DIR/settings.json"
 ```
+
+Without a sidecar, Jaeger manages only Codex instructions from the profile with
+the environment's name. Explicit `--file` paths continue to accept the previous
+standalone Jaeger environment-manifest format for controlled migrations, but
+the default discovery path is exclusively mdcsp `profiles/`.
+
+To migrate an existing Jaeger environment, copy its Markdown snippets into the
+mdcsp `snippets/` directory, express their order in `profiles/<name>.toml`, and
+move only the remaining skills/plugins/packages/config entries into the
+optional sidecar. Keep the old environment directory until both
+`mdcsp explain <name>` and `jaeger env inspect <name>` show the intended plan;
+then `jaeger env apply <name>` safely replaces the previously managed output
+and records the profile as the new manifest authority.
 
 Codex instructions target `$CODEX_HOME/AGENTS.md` (normally
 `~/.codex/AGENTS.md`); Claude instructions target
@@ -238,9 +284,11 @@ excludes = ["some-incompatible-command"]
 Use Jaeger for durable workflow execution.
 ```
 
-The same composition engine is available independently through the `mdcsp`
-library and CLI. Jaeger calls the library directly and does not shell out to the
-`mdcsp` executable.
+Jaeger calls the `mdcsp` library directly and uses its profile loader, snippet
+directory, ordering, conditions, digest, and generated header. It does not
+shell out to the executable or maintain a parallel instruction home. Jaeger's
+private apply/uninstall state and backups remain under
+`$XDG_STATE_HOME/jaeger/environment` because mdcsp owns no lifecycle state.
 
 Inspect and reconcile an environment with:
 
