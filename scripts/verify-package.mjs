@@ -3,6 +3,7 @@ import { execFile, spawn } from "node:child_process"
 import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { satisfies } from "semver"
 import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 
@@ -121,6 +122,7 @@ try {
   assert.equal(installedPackage.version, "0.1.4")
   assert.deepEqual(installedPackage.bin, { jaeger: "dist/cli.js" })
   assert(installedPackage.dependencies?.typescript, "typescript must be a runtime dependency")
+  assert(installedPackage.dependencies?.mdcsp, "mdcsp must be a runtime dependency")
   assert(
     !installedPackage.dependencies?.["@anthropic-ai/claude-agent-sdk"],
     "Claude Agent SDK must not expose its declaration-only peer graph at runtime",
@@ -131,6 +133,14 @@ try {
     "artifact must support Linux runtime hosts and Windows SSH controllers",
   )
   await access(path.join(installDir, "node_modules", "typescript", "package.json"))
+  const installedMdcsp = JSON.parse(
+    await readFile(path.join(installDir, "node_modules", "mdcsp", "package.json"), "utf8"),
+  )
+  assert.equal(installedMdcsp.name, "mdcsp")
+  assert(
+    satisfies(installedMdcsp.version, installedPackage.dependencies.mdcsp),
+    `installed mdcsp@${installedMdcsp.version} must satisfy ${installedPackage.dependencies.mdcsp}`,
+  )
   const vendoredClaudeRoot = path.join(
     installedRoot,
     "dist",

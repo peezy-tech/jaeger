@@ -25,6 +25,10 @@ Jaeger can also reconcile the environment around those native harnesses. This is
 separate from workflow execution: `jaeger env` composes instruction files and
 installs provider-native skills, Codex/Claude plugins, Pi packages, and
 configuration from a declarative, reversible environment.
+Instruction composition is provided by the standalone
+[`mdcsp`](https://github.com/peezy-tech/mdcsp) package and
+consumed through its library API; Jaeger retains ownership of environment
+targets, native assets, state, backups, and reconciliation.
 
 ```js
 export const meta = {
@@ -233,6 +237,10 @@ excludes = ["some-incompatible-command"]
 
 Use Jaeger for durable workflow execution.
 ```
+
+The same composition engine is available independently through the `mdcsp`
+library and CLI. Jaeger calls the library directly and does not shell out to the
+`mdcsp` executable.
 
 Inspect and reconcile an environment with:
 

@@ -21,3 +21,7 @@ their respective licenses and service terms.
 Installed npm dependencies retain their own package metadata and license files.
 Review the lockfile, the installed dependency tree, and the vendored SDK
 metadata for the exact revisions being distributed.
+
+Jaeger uses the MIT-licensed `mdcsp` package for Markdown instruction
+composition. `mdcsp` remains an independently distributed library and CLI; its
+package metadata and license are installed with that dependency.
