@@ -151,6 +151,10 @@ Linux-only debugging and legacy operation. --detach controls whether the CLI
 waits; it does not select the runtime. --state-dir applies only to embedded
 operation. Workflow workers retain full non-interactive technical authority.
 Standing schedules require a persistent backend.
+
+Environment names resolve through mdcsp profiles under $MDCSP_HOME/profiles,
+$XDG_CONFIG_HOME/mdcsp/profiles, or ~/.config/mdcsp/profiles. --config-root
+overrides the mdcsp root; --file accepts a legacy explicit Jaeger manifest.
 `;
 
 async function main(rawArgv: string[]): Promise<void> {
@@ -939,6 +943,7 @@ function parseEnvironmentArgs(action: string, argv: string[]): EnvironmentArgs {
   let file: string | undefined;
   let configRoot = defaults.configRoot;
   let stateRoot = defaults.stateRoot;
+  const jaegerConfigRoot = defaults.jaegerConfigRoot;
   let force = false;
   let json = false;
   for (let index = 0; index < argv.length; index++) {
@@ -974,7 +979,11 @@ function parseEnvironmentArgs(action: string, argv: string[]): EnvironmentArgs {
   return {
     ...(name ? { name } : {}),
     ...(file ? { file } : {}),
-    paths: { configRoot, stateRoot },
+    paths: {
+      configRoot,
+      stateRoot,
+      ...(jaegerConfigRoot ? { jaegerConfigRoot } : {}),
+    },
     force,
     json,
   };
