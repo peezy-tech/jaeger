@@ -70,6 +70,50 @@ requires = ["definitely-not-installed"]
   });
 });
 
+test("environment plans preserve duplicate legacy command conditions", async () => {
+  await withEnvironment(async ({ root, paths, codexHome }) => {
+    const directory = await writeEnvironment(root, "duplicate_conditions", {
+      manifest: `
+version = 1
+name = "duplicate_conditions"
+
+[providers.codex]
+instructions = ["snippets/requires.md", "snippets/excludes.md"]
+`,
+      files: {
+        "snippets/requires.md": `+++
+requires = ["codex", "codex"]
++++
+# Requires Codex
+`,
+        "snippets/excludes.md": `+++
+excludes = ["claude", "claude"]
++++
+# Excludes Claude
+`,
+      },
+    });
+
+    const plan = await loadEnvironmentPlan(
+      "duplicate_conditions",
+      paths,
+      path.join(directory, "environment.toml"),
+      { CODEX_HOME: codexHome, PATH: "" },
+    );
+
+    assert.deepEqual(
+      plan.snippets.map(({ selected, reason }) => ({ selected, reason })),
+      [
+        { selected: false, reason: "missing commands: codex" },
+        { selected: true, reason: "selected" },
+      ],
+    );
+    const instructions = plan.resources.find((resource) => resource.category === "instructions");
+    assert.doesNotMatch(instructions?.content ?? "", /# Requires Codex/);
+    assert.match(instructions?.content ?? "", /# Excludes Claude/);
+  });
+});
+
 test("Pi environments target native instructions, skills, configs, and packages", async () => {
   await withEnvironment(async ({ root, paths, piHome }) => {
     const directory = await writeEnvironment(root, "pi_native", {
