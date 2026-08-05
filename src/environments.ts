@@ -256,6 +256,10 @@ export async function loadEnvironmentPlan(
           `     Manifest: ${manifestPath}\n` +
           `     Content: sha256:${digest.slice(0, 12)} -->`,
       });
+      // Keep pre-mdcsp header-only files byte-stable so their managed digest stays current.
+      const content = composition.body === ""
+        ? `${composition.content}\n\n`
+        : composition.content;
       snippets.push(
         ...composition.decisions.map((decision) => ({
           path: decision.source,
@@ -269,8 +273,8 @@ export async function loadEnvironmentPlan(
         category: "instructions",
         target: providerInstructionsTarget(provider, env),
         kind: "file",
-        digest: hashText(composition.content),
-        content: composition.content,
+        digest: hashText(content),
+        content,
       });
     }
     if (providerConfig.skills !== undefined) {
