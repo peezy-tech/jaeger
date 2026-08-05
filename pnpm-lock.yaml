@@ -18,6 +18,9 @@ importers:
       ajv:
         specifier: ^8.17.1
         version: 8.20.0
+      mdcsp:
+        specifier: ^0.1.0
+        version: 0.1.0
       semver:
         specifier: ^7.7.2
         version: 7.8.5
@@ -472,6 +475,11 @@ packages:
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
+
+  mdcsp@0.1.0:
+    resolution: {integrity: sha512-CkSU5W7fxvkgM8/UykqkJqpsW0R7eET7QWwS7eKzMXw0beQuhJCaiXSMu8+w3sDca+SQKhY8WDUskHpYjYxKnw==}
+    engines: {node: '>=22.13.0'}
+    hasBin: true
 
   media-typer@1.1.1:
     resolution: {integrity: sha512-yz3xRaG20c6/BOzvYoDaGtPmGscs7YivItZEEqe6GbwNfHuxu9YNmvnEkMzKldAGY4/80pRcQRZSEnhquk9XuQ==}
@@ -1023,6 +1031,10 @@ snapshots:
   json-schema-typed@8.0.2: {}
 
   math-intrinsics@1.1.0: {}
+
+  mdcsp@0.1.0:
+    dependencies:
+      smol-toml: 1.7.0
 
   media-typer@1.1.1: {}
 

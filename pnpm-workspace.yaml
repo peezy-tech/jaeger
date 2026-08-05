@@ -1,6 +1,9 @@
 packages:
   - .
 
+minimumReleaseAgeExclude:
+  - mdcsp@0.1.0
+
 overrides:
   fast-uri: 3.1.4
   '@hono/node-server': 2.0.11
