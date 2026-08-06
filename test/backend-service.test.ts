@@ -1016,6 +1016,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: "backend-session" } } })
     return
   }
+  if (message.method === "thread/list") {
+    send({ id: message.id, result: { data: [], nextCursor: null } })
+    return
+  }
+  if (message.method === "thread/read") {
+    send({ id: message.id, result: { thread: { id: "backend-session", isPinned: false, status: { type: "notLoaded" } } } })
+    return
+  }
+  if (message.method === "thread/archive" || message.method === "thread/unarchive") {
+    send({ id: message.id, result: {} })
+    return
+  }
   if (message.method !== "turn/start") return
   send({ id: message.id, result: { turn: { id: "backend-turn" } } })
   setTimeout(() => send({

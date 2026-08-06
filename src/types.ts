@@ -285,6 +285,13 @@ export interface WorkflowSessionRecord {
 }
 
 export interface WorkflowSessionSummary extends WorkflowSessionRecord {
+  readonly threadArchive?: {
+    readonly status: "visible" | "retrying" | "archived" | "retained";
+    readonly updatedAt: string;
+    readonly reason?: string;
+    readonly lastError?: string;
+    readonly nextAttemptAt?: string;
+  };
   readonly resume?: string;
   readonly steer?: string;
   readonly interrupt?: string;

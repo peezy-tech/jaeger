@@ -668,6 +668,16 @@ immediately continues with the steering message in the same persisted session.
 Pi maps steering and interrupt directly to its RPC commands and waits for
 `agent_settled`, after automatic retries, compaction retries, and queued
 continuations have finished.
+
+The persistent backend archives idle Codex threads after a run completes
+successfully, so workflow workers do not accumulate in the default Codex app
+thread list. Failed, interrupted, stopped, uncertain, active, or pinned threads
+remain visible. Jaeger also retains a parent thread when archiving it would
+cascade into a descendant that Jaeger does not own. Session list and inspect
+responses expose the resulting `threadArchive` state. A later Jaeger resume or
+fork transparently unarchives the provider thread first; the durable Jaeger run,
+session record, outputs, and transcripts are never removed.
+
 Under the persistent backend, each `resume` is first recorded as a durable turn
 job and then executed by its own transient systemd worker. The CLI prints the
 turn ID before submission. Use `--detach` to return after worker acceptance,

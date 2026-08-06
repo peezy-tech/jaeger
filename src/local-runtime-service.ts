@@ -65,6 +65,8 @@ import {
   type SchedulePolicy,
 } from "./schedules.js";
 import { compileWorkflowSource } from "./compiler.js";
+import { CodexThreadArchiveManager } from "./codex-thread-lifecycle.js";
+import { readCodexThreadArchiveRecord } from "./codex-thread-state.js";
 import type { HookConfig } from "./hook-config.js";
 import { HookManager } from "./hooks.js";
 import {
@@ -129,6 +131,7 @@ export class LocalRuntimeService {
   private readonly schedules: ScheduleStore;
   private readonly hooks: HookManager;
   private readonly modules: RuntimeModuleHost;
+  private readonly codexThreads: CodexThreadArchiveManager;
   private scheduleTimer: NodeJS.Timeout | undefined;
   private scheduleTick: Promise<void> | undefined;
   private readonly submissions = new Map<
@@ -186,6 +189,10 @@ export class LocalRuntimeService {
         waitSessionQuery: async (runId, queryId) =>
           await this.sessionQueryWait({ runId, queryId }),
       },
+    });
+    this.codexThreads = new CodexThreadArchiveManager({
+      stateDir: this.stateDir,
+      env: this.env,
     });
   }
 
@@ -373,6 +380,9 @@ export class LocalRuntimeService {
     this.startScheduling();
     this.startHooks();
     this.startModules();
+    if (this.backendKind === "local-service" && this.installationCommitted()) {
+      this.codexThreads.start();
+    }
   }
 
   async stopRuntimeServices(): Promise<void> {
@@ -380,6 +390,7 @@ export class LocalRuntimeService {
       this.stopScheduling(),
       this.stopHooks(),
       this.stopModules(),
+      this.codexThreads.stop(),
     ]);
   }
 
@@ -982,8 +993,31 @@ export class LocalRuntimeService {
   private async sessionList(params: Record<string, JsonValue>): Promise<JsonValue> {
     const stateDir = this.requestStateDir(params);
     const journal = await RunJournal.open(stateDir, requiredRunId(params.runId));
-    return (await listWorkflowSessions(journal.runDir, stateDir)).map((session) =>
-      this.publicSession(session, stateDir),
+    return await Promise.all(
+      (await listWorkflowSessions(journal.runDir, stateDir)).map(async (session) => {
+        const archive = session.nativeSessionId
+          ? await readCodexThreadArchiveRecord(journal.runDir, session.nativeSessionId)
+          : undefined;
+        return this.publicSession(
+          {
+            ...session,
+            ...(archive
+              ? {
+                  threadArchive: {
+                    status: archive.status,
+                    updatedAt: archive.updatedAt,
+                    ...(archive.reason ? { reason: archive.reason } : {}),
+                    ...(archive.lastError ? { lastError: archive.lastError } : {}),
+                    ...(archive.nextAttemptAt
+                      ? { nextAttemptAt: archive.nextAttemptAt }
+                      : {}),
+                  },
+                }
+              : {}),
+          },
+          stateDir,
+        );
+      }),
     );
   }
 

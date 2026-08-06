@@ -195,6 +195,14 @@ A resumed session turn after workflow completion does not rewrite the workflow's
 durable result. Steering the original in-flight turn can affect the result that
 the workflow eventually checkpoints.
 
+After a persistent-backend run completes successfully, Jaeger archives its
+eligible idle Codex threads to keep the default Codex app list focused on active
+or actionable work. It retains pinned, active, failed, interrupted, stopped,
+uncertain, and externally forked threads. `session list` and `session inspect`
+report `threadArchive` state when available. A Jaeger session resume or fork
+transparently unarchives a thread first, so archival never removes the durable
+session or prevents later continuation.
+
 Use `wait` when completion is the next decision point. Use `stop` only when the
 user wants execution terminated; stopping an in-flight worker may leave an
 uncertain side-effect boundary.

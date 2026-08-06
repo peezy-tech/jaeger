@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,6 +14,7 @@ import type {
 import { ClaudeHarness } from "../src/harnesses/claude.js";
 import { CodexHarness } from "../src/harnesses/codex.js";
 import { PiHarness } from "../src/harnesses/pi.js";
+import { readCodexThreadArchiveRecord } from "../src/codex-thread-state.js";
 import type {
   AgentRequest,
   JsonSchema,
@@ -93,6 +94,7 @@ test("Codex resumes a persisted native thread and steers the active turn", async
   const root = await mkdtemp(path.join(os.tmpdir(), "jaeger-codex-steer-"));
   const command = path.join(root, "fake-codex");
   await executable(command, codexServerScript({ waitForSteer: true }));
+  await archivedThreadRecord(path.join(root, "run"), "existing-thread");
   const session = new FakeSession("existing-thread", [
     { id: "control-1", kind: "steer", message: "Focus on the race." },
   ]);
@@ -105,10 +107,22 @@ test("Codex resumes a persisted native thread and steers the active turn", async
     .map((line) => JSON.parse(line) as { method?: string; params?: Record<string, unknown> });
   assert.deepEqual(
     requests.map((entry) => entry.method),
-    ["initialize", "initialized", "thread/resume", "turn/start", "turn/steer"],
+    [
+      "initialize",
+      "initialized",
+      "thread/unarchive",
+      "thread/resume",
+      "turn/start",
+      "turn/steer",
+    ],
   );
   assert.equal(requests[2]?.params?.threadId, "existing-thread");
-  assert.equal(requests[4]?.params?.expectedTurnId, "codex-turn");
+  assert.equal(requests[3]?.params?.threadId, "existing-thread");
+  assert.equal(requests[5]?.params?.expectedTurnId, "codex-turn");
+  assert.equal(
+    (await readCodexThreadArchiveRecord(path.join(root, "run"), "existing-thread"))?.status,
+    "visible",
+  );
 });
 
 test("Codex forks a read-only side-query thread without resuming the parent", async () => {
@@ -744,6 +758,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   fs.appendFileSync(requests, JSON.stringify(message) + "\\n")
   if (message.method === "initialize") send({ id: message.id, result: { userAgent: "fake" } })
   if (message.method === "thread/start" || message.method === "thread/resume" || message.method === "thread/fork") send({ id: message.id, result: { thread: { id: message.method === "thread/resume" ? message.params.threadId : message.method === "thread/fork" ? "codex-fork" : "codex-thread" } } })
+  if (message.method === "thread/unarchive") send({ id: message.id, result: { thread: { id: message.params.threadId } } })
   if (message.method === "turn/start") {
     send({ id: message.id, result: { turn: { id: "codex-turn" } } })
     ${options.waitForSteer ? "" : 'setImmediate(() => complete("codex"))'}
@@ -755,6 +770,26 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (message.method === "turn/interrupt") send({ id: message.id, result: {} })
 })
 `;
+}
+
+async function archivedThreadRecord(runDir: string, nativeSessionId: string): Promise<void> {
+  const root = path.join(runDir, "codex-threads");
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  const digest = createHash("sha256").update(nativeSessionId).digest("hex");
+  await writeFile(
+    path.join(root, `${digest}.json`),
+    `${JSON.stringify({
+      version: 1,
+      runId: "test-run",
+      nativeSessionId,
+      status: "archived",
+      activityVersion: "2026-08-05T00:00:00.000Z",
+      attempts: 1,
+      updatedAt: "2026-08-05T00:00:01.000Z",
+      archivedAt: "2026-08-05T00:00:01.000Z",
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
 }
 
 function piRpcScript(

@@ -2,7 +2,11 @@ import path from "node:path";
 import { assertRunExecutionAdmission, type RuntimeBackendKind } from "./admission.js";
 import { harnessesForRun } from "./harnesses/registry.js";
 import { RunJournal } from "./journal.js";
-import { ManagedSessionTurn, resolveSession } from "./sessions.js";
+import {
+  ManagedSessionTurn,
+  resolveSession,
+  withSessionProviderLifecycle,
+} from "./sessions.js";
 import type { AgentRequest, JsonValue } from "./types.js";
 
 const DEFAULT_SESSION_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -34,43 +38,53 @@ export async function resumeSession(input: {
   if (!existing.nativeSessionId) {
     throw new Error(`Jaeger session ${existing.id} has no native provider session to resume`);
   }
+  const nativeSessionId = existing.nativeSessionId;
   const adapter = harnessesForRun(journal.record).get(existing.harness);
   if (!adapter) throw new Error(`No session adapter is installed for ${existing.harness}`);
-  const session = await ManagedSessionTurn.resume(journal.runDir, existing.id, adapter.driver);
-  const request: AgentRequest = {
-    harness: existing.harness,
-    prompt: input.message,
-    cwd: existing.cwd,
-    timeoutMs,
-    runDir: journal.runDir,
-    stepId: input.turnId
-      ? `${existing.stepId}/turn:${input.turnId}`
-      : `${existing.stepId}/turn:${existing.turnCount + 1}`,
-    session,
-    ...(existing.label ? { label: existing.label } : {}),
-    ...(existing.model ? { model: existing.model } : {}),
-    ...(existing.effort ? { effort: existing.effort } : {}),
-    ...(existing.serviceTier ? { serviceTier: existing.serviceTier } : {}),
-    ...(existing.profile ? { profile: existing.profile } : {}),
-    ...(input.signal ? { signal: input.signal } : {}),
-  };
-  try {
-    const execution = await adapter.execute(request);
-    const output = toJsonValue(execution.output, "session output");
-    const result: SessionResumeResult = {
-      sessionId: existing.id,
-      nativeSessionId: execution.nativeSessionId ?? existing.nativeSessionId,
-      turn: existing.turnCount + 1,
-      output,
-      ...(execution.metadata ? { metadata: execution.metadata } : {}),
+  const execute = async (): Promise<SessionResumeResult> => {
+    const session = await ManagedSessionTurn.resume(
+      journal.runDir,
+      existing.id,
+      adapter.driver,
+    );
+    const request: AgentRequest = {
+      harness: existing.harness,
+      prompt: input.message,
+      cwd: existing.cwd,
+      timeoutMs,
+      runDir: journal.runDir,
+      stepId: input.turnId
+        ? `${existing.stepId}/turn:${input.turnId}`
+        : `${existing.stepId}/turn:${existing.turnCount + 1}`,
+      session,
+      ...(existing.label ? { label: existing.label } : {}),
+      ...(existing.model ? { model: existing.model } : {}),
+      ...(existing.effort ? { effort: existing.effort } : {}),
+      ...(existing.serviceTier ? { serviceTier: existing.serviceTier } : {}),
+      ...(existing.profile ? { profile: existing.profile } : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
     };
-    if (input.beforeComplete) await input.beforeComplete(result);
-    await session.complete(output, execution.metadata);
-    return result;
-  } catch (error) {
-    await session.fail(error);
-    throw error;
-  }
+    try {
+      const execution = await adapter.execute(request);
+      const output = toJsonValue(execution.output, "session output");
+      const result: SessionResumeResult = {
+        sessionId: existing.id,
+        nativeSessionId: execution.nativeSessionId ?? nativeSessionId,
+        turn: existing.turnCount + 1,
+        output,
+        ...(execution.metadata ? { metadata: execution.metadata } : {}),
+      };
+      if (input.beforeComplete) await input.beforeComplete(result);
+      await session.complete(output, execution.metadata);
+      return result;
+    } catch (error) {
+      await session.fail(error);
+      throw error;
+    }
+  };
+  return adapter.driver === "codex-app-server"
+    ? await withSessionProviderLifecycle(journal.runDir, existing.id, execute)
+    : await execute();
 }
 
 function checkedTimeout(value: number | undefined): number {

@@ -117,6 +117,18 @@ The CLI and skill should let an agent inspect compact summaries, wait when
 appropriate, stop a run, and interact with a selected provider session without
 continuously polling or ingesting full transcripts.
 
+Successful-run Codex thread archival is backend-owned post-checkpoint
+housekeeping. Once a persistent-backend run is durably `completed`, an
+independent reconciler archives its idle, unpinned, Jaeger-owned Codex threads.
+The reconciler operates only on exact provider IDs already recorded by Jaeger,
+retains threads with non-Jaeger descendants because Codex archival cascades,
+and retries delivery without changing workflow certainty. Other terminal and
+resumable states remain visible. Archive state is durable and appears in
+session inspection; a later Jaeger resume or fork unarchives the provider
+thread before using it and makes it eligible for archival again after it
+settles. Provider thread deletion and ephemeral worker sessions remain outside
+this policy because both would violate durable inspection or resume guarantees.
+
 ## Persistent scheduling model
 
 Scheduling is a capability of a continuing runtime, not workflow syntax and not
@@ -602,6 +614,8 @@ The implementation follows this boundary:
   agent boundaries;
 - session list, inspect, resume, turn inspect/wait, steer, and interrupt are
   CLI-level operations, with resumed turns independently supervised;
+- successfully completed persistent runs archive eligible Codex threads through
+  independent, retryable housekeeping while preserving durable Jaeger state;
 - detached attachment, compact run inspection, waiting, resume, and stop remain
   run-level operations; and
 - host isolation remains an outer runtime concern rather than a provider prompt

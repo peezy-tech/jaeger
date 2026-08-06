@@ -41,6 +41,7 @@ import type {
 
 const POLL_MS = 40;
 const CONTROL_TIMEOUT_MS = 10_000;
+const PROVIDER_LIFECYCLE_WAIT_MS = 35_000;
 
 type ControllerIdentity = ProcessLeaseOwner;
 
@@ -369,6 +370,29 @@ export async function resolveSession(
   throw new Error(`Unknown Jaeger session ${selector}`);
 }
 
+/**
+ * Serialize provider-thread visibility changes with work that may resume or
+ * fork that thread. The archive reconciler acquires this lease without
+ * waiting; user-initiated work waits for an in-flight archive operation and
+ * then restores visibility before continuing.
+ */
+export async function withSessionProviderLifecycle<T>(
+  runDir: string,
+  sessionId: string,
+  operation: () => Promise<T>,
+  options: { readonly waitMs?: number } = {},
+): Promise<T> {
+  const sessionDir = sessionDirectory(runDir, sessionId);
+  const owner = await acquireProcessLease(providerLifecycleLeasePath(sessionDir), {
+    waitMs: options.waitMs ?? PROVIDER_LIFECYCLE_WAIT_MS,
+  });
+  try {
+    return await operation();
+  } finally {
+    await releaseProcessLease(providerLifecycleLeasePath(sessionDir), owner);
+  }
+}
+
 export async function finalizeCompletedSessionTurn(
   runDir: string,
   input: {
@@ -529,6 +553,10 @@ async function acquireTurn(sessionDir: string): Promise<ControllerIdentity> {
 
 function turnLeasePath(sessionDir: string): string {
   return path.join(sessionDir, "turn.lock");
+}
+
+function providerLifecycleLeasePath(sessionDir: string): string {
+  return path.join(sessionDir, "provider-lifecycle.lock");
 }
 
 async function prepareSessionDirectory(sessionDir: string): Promise<void> {

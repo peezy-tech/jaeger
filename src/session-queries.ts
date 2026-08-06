@@ -32,7 +32,7 @@ import {
   currentProcessIdentity,
   isProcessIdentityActive,
 } from "./process-identity.js";
-import { resolveSession } from "./sessions.js";
+import { resolveSession, withSessionProviderLifecycle } from "./sessions.js";
 import {
   clearSessionQueryReservation,
   reserveSessionForQuery,
@@ -420,37 +420,44 @@ export async function executeSessionQueryWorker(input: {
     ...(session.profile ? { profile: session.profile } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   };
-  try {
-    const execution = await adapter.execute(agentRequest);
-    const result: SessionQueryResult = {
-      version: 1,
-      queryId: request.queryId,
-      requestHash: request.requestHash,
-      status: "completed",
-      output: toJsonValue(execution.output),
-      nativeSessionId:
-        execution.nativeSessionId ?? passive.nativeSessionId ?? request.parentNativeSessionId,
-      ...(execution.metadata ? { metadata: execution.metadata } : {}),
-      finishedAt: new Date().toISOString(),
-    };
-    await publishResult(journal.runDir, request, result);
-  } catch (error) {
-    const uncertain: SessionQueryResult = {
-      version: 1,
-      queryId: request.queryId,
-      requestHash: request.requestHash,
-      status: "uncertain",
-      error: errorMessage(error),
-      finishedAt: new Date().toISOString(),
-    };
-    await publishResult(journal.runDir, request, uncertain).catch((publishError: unknown) => {
-      if (!hasCode(publishError, "EEXIST")) throw publishError;
-    });
-    throw error;
-  } finally {
-    if (reserved) {
-      await clearSessionQueryReservation(journal.runDir, request);
+  const execute = async (): Promise<void> => {
+    try {
+      const execution = await adapter.execute(agentRequest);
+      const result: SessionQueryResult = {
+        version: 1,
+        queryId: request.queryId,
+        requestHash: request.requestHash,
+        status: "completed",
+        output: toJsonValue(execution.output),
+        nativeSessionId:
+          execution.nativeSessionId ?? passive.nativeSessionId ?? request.parentNativeSessionId,
+        ...(execution.metadata ? { metadata: execution.metadata } : {}),
+        finishedAt: new Date().toISOString(),
+      };
+      await publishResult(journal.runDir, request, result);
+    } catch (error) {
+      const uncertain: SessionQueryResult = {
+        version: 1,
+        queryId: request.queryId,
+        requestHash: request.requestHash,
+        status: "uncertain",
+        error: errorMessage(error),
+        finishedAt: new Date().toISOString(),
+      };
+      await publishResult(journal.runDir, request, uncertain).catch((publishError: unknown) => {
+        if (!hasCode(publishError, "EEXIST")) throw publishError;
+      });
+      throw error;
+    } finally {
+      if (reserved) {
+        await clearSessionQueryReservation(journal.runDir, request);
+      }
     }
+  };
+  if (adapter.driver === "codex-app-server") {
+    await withSessionProviderLifecycle(journal.runDir, session.id, execute);
+  } else {
+    await execute();
   }
 }
 
