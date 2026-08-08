@@ -2,7 +2,7 @@ packages:
   - .
 
 minimumReleaseAgeExclude:
-  - mdcsp@0.1.0
+  - mdcsp@0.1.1
 
 overrides:
   fast-uri: 3.1.5
