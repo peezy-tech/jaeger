@@ -36,7 +36,7 @@ export async function resumeSession(input: {
   }
   const adapter = harnessesForRun(journal.record).get(existing.harness);
   if (!adapter) throw new Error(`No session adapter is installed for ${existing.harness}`);
-  const session = await ManagedSessionTurn.resume(journal.runDir, existing.id);
+  const session = await ManagedSessionTurn.resume(journal.runDir, existing.id, adapter.driver);
   const request: AgentRequest = {
     harness: existing.harness,
     prompt: input.message,

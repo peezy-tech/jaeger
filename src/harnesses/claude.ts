@@ -11,6 +11,7 @@ import type {
 } from "@anthropic-ai/claude-agent-sdk";
 import { validateStructuredOutput } from "../schema.js";
 import { StructuredOutputError } from "../errors.js";
+import { claudeRuntimeEvent } from "../provider-runtime.js";
 import type {
   AgentOptions,
   AgentRequest,
@@ -22,6 +23,7 @@ import {
   spawnStreamingHarnessProcess,
   type StreamingHarnessProcess,
 } from "./process.js";
+import { NativeRuntimeReporter } from "./runtime-events.js";
 import { jsonValue, stepScratchDirectory } from "./support.js";
 
 type QueryFactory = (input: {
@@ -81,6 +83,7 @@ export class ClaudeHarness implements HarnessAdapter {
     let sessionPublished = false;
     let result: SDKResultMessage | undefined;
     const scratch = stepScratchDirectory(request.runDir, request.stepId);
+    const runtime = new NativeRuntimeReporter(request.session, claudeRuntimeEvent);
 
     const queryHandle = this.queryFactory({
       prompt: messages,
@@ -157,6 +160,7 @@ export class ClaudeHarness implements HarnessAdapter {
             }
           }
         }
+        runtime.observe(message);
         if (message.type !== "result") continue;
         if (explicitlyInterrupted) {
           throw new Error("Claude session turn was interrupted by the Jaeger user");
@@ -181,6 +185,7 @@ export class ClaudeHarness implements HarnessAdapter {
         );
       }
       const output = claudeOutput(result, request);
+      await runtime.flush();
       const processResult = await closeQuery(queryHandle, processHandle);
       return {
         output,
@@ -208,6 +213,7 @@ export class ClaudeHarness implements HarnessAdapter {
       controlAbort.abort();
       messages.close();
       await controls;
+      await runtime.flush().catch(() => undefined);
       queryHandle.close();
       await processHandle?.done.catch(() => undefined);
       abort.dispose();

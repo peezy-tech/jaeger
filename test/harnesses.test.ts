@@ -17,6 +17,7 @@ import { PiHarness } from "../src/harnesses/pi.js";
 import type {
   AgentRequest,
   JsonSchema,
+  ProviderRuntimeEvent,
   SessionControlRequest,
   SessionTurn,
 } from "../src/types.js";
@@ -49,6 +50,16 @@ test("Codex adapter uses app-server, persists the thread, and never invokes exec
       reasoningOutputTokens: 0,
     },
   });
+  assert.deepEqual(
+    session.runtimeEvents.map((event) => event.type),
+    [
+      "account/updated",
+      "thread/tokenUsage/updated",
+      "item/started",
+      "item/completed",
+      "turn/completed",
+    ],
+  );
 
   const args = JSON.parse(await readFile(path.join(root, "codex-args.json"), "utf8")) as string[];
   assert.deepEqual(args, ["--profile", "test-profile", "app-server", "--stdio"]);
@@ -445,6 +456,9 @@ test("Claude adapter uses a persistent Agent SDK streaming session and resumes b
     preset: "claude_code",
   });
   assert.deepEqual(captured?.options?.tools, { type: "preset", preset: "claude_code" });
+  assert.deepEqual(session.callOrder.slice(0, 3), ["providerStarted", "turnStarted", "providerEvent"]);
+  assert.equal(session.runtimeEvents.at(-1)?.type, "claude.result");
+  assert.deepEqual(session.runtimeEvents.at(-1)?.usage, { input_tokens: 8, output_tokens: 3 });
 });
 
 test("Claude preserves xhigh effort and applies its native session label", async () => {
@@ -641,6 +655,8 @@ class FakeSession implements SessionTurn {
   turnId: string | undefined;
   turnStartedCount = 0;
   readonly controlResults: Array<Record<string, unknown>> = [];
+  readonly runtimeEvents: ProviderRuntimeEvent[] = [];
+  readonly callOrder: string[] = [];
 
   constructor(
     nativeSessionId?: string,
@@ -651,13 +667,20 @@ class FakeSession implements SessionTurn {
   }
 
   async providerStarted(nativeSessionId: string): Promise<void> {
+    this.callOrder.push("providerStarted");
     this.providerId = nativeSessionId;
     this.nativeSessionId = nativeSessionId;
   }
 
   async turnStarted(nativeTurnId?: string): Promise<void> {
+    this.callOrder.push("turnStarted");
     this.turnStartedCount++;
     this.turnId = nativeTurnId;
+  }
+
+  async providerEvent(event: ProviderRuntimeEvent): Promise<void> {
+    this.callOrder.push("providerEvent");
+    this.runtimeEvents.push(event);
   }
 
   async processControls(
@@ -707,8 +730,11 @@ fs.writeFileSync(path.join(process.cwd(), "codex-args.json"), JSON.stringify(pro
 const requests = path.join(process.cwd(), "codex-requests.jsonl")
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n")
 const complete = (answer) => {
+  send({ method: "account/updated", params: { account: { id: "account-1", planType: "pro", accessToken: "must-not-persist" } } })
   send({ method: "thread/tokenUsage/updated", params: { threadId: "codex-thread", turnId: "codex-turn", tokenUsage: { total: { totalTokens: 16, inputTokens: 12, cachedInputTokens: 0, outputTokens: 4, reasoningOutputTokens: 0 } } } })
   const finalMessage = { type: "agentMessage", id: "message-1", text: JSON.stringify({ answer }), phase: "final_answer", memoryCitation: null }
+  send({ method: "item/started", params: { threadId: "codex-thread", turnId: "codex-turn", item: { type: "commandExecution", id: "exec-1", command: "git status" } } })
+  send({ method: "item/completed", params: { threadId: "codex-thread", turnId: "codex-turn", item: { type: "commandExecution", id: "exec-1", command: "git status" } } })
   ${options.unloadedTurnItems ? 'send({ method: "item/completed", params: { threadId: "codex-thread", turnId: "codex-turn", item: finalMessage } })' : ""}
   send({ method: "turn/completed", params: { threadId: "codex-thread", turn: { id: "codex-turn", status: "completed", items: ${options.unloadedTurnItems ? "[]" : "[finalMessage]"}${options.unloadedTurnItems ? ', itemsView: "notLoaded"' : ""} } } })
 }

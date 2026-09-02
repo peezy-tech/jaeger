@@ -661,6 +661,7 @@ function executeAgent(
           stepId,
           agentOptions,
           cwd,
+          adapter.driver,
         );
         const request: AgentRequest = { ...requestBase, session };
         const execution = await adapter.execute(request);

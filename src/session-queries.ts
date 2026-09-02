@@ -468,6 +468,8 @@ class QuerySession implements SessionTurn {
 
   async turnStarted(): Promise<void> {}
 
+  async providerEvent(): Promise<void> {}
+
   async processControls(): Promise<void> {}
 }
 

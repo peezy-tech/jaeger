@@ -8,8 +8,10 @@ import type {
   JsonValue,
   SessionControlRequest,
 } from "../types.js";
+import { codexRuntimeEvent } from "../provider-runtime.js";
 import { JAEGER_VERSION } from "../version.js";
 import { spawnStreamingHarnessProcess } from "./process.js";
+import { NativeRuntimeReporter } from "./runtime-events.js";
 import { jsonObject, nonEmptyString, stepScratchDirectory } from "./support.js";
 
 type JsonObject = Record<string, unknown>;
@@ -36,7 +38,8 @@ export class CodexHarness implements HarnessAdapter {
       transcriptDir: stepScratchDirectory(request.runDir, request.stepId),
       signal: controller.signal,
     });
-    const client = new AppServerClient(processHandle.child);
+    const runtime = new NativeRuntimeReporter(request.session, codexRuntimeEvent);
+    const client = new AppServerClient(processHandle.child, (message) => runtime.observe(message));
     let completed = false;
     let controlAbort: AbortController | undefined;
     try {
@@ -82,6 +85,7 @@ export class CodexHarness implements HarnessAdapter {
       );
       const thread = objectField(threadResponse, "thread");
       const threadId = stringField(thread, "id");
+      await runtime.flush();
       await request.session.providerStarted(threadId);
 
       const turnResponse = await client.request("turn/start", {
@@ -98,6 +102,7 @@ export class CodexHarness implements HarnessAdapter {
         ...(request.schema ? { outputSchema: request.schema } : {}),
       });
       const turnId = stringField(objectField(turnResponse, "turn"), "id");
+      await runtime.flush();
       await request.session.turnStarted(turnId);
 
       controlAbort = new AbortController();
@@ -129,6 +134,7 @@ export class CodexHarness implements HarnessAdapter {
         ? parseStructuredOutput(finalMessage.trim(), request.schema)
         : finalMessage.trim();
       const usage = client.latestUsageFor(turnId);
+      await runtime.flush();
 
       client.closeInput();
       const processResult = await processHandle.done;
@@ -151,6 +157,7 @@ export class CodexHarness implements HarnessAdapter {
     } catch (error) {
       controlAbort?.abort();
       client.closeInput();
+      await runtime.flush().catch(() => undefined);
       if (!completed) processHandle.terminate("aborted");
       const processResult = await processHandle.done.catch(() => undefined);
       if (
@@ -179,7 +186,10 @@ class AppServerClient {
   private readonly finalMessageByTurn = new Map<string, string>();
   private closedError: Error | undefined;
 
-  constructor(private readonly child: import("node:child_process").ChildProcessWithoutNullStreams) {
+  constructor(
+    private readonly child: import("node:child_process").ChildProcessWithoutNullStreams,
+    private readonly onNotification?: (message: JsonObject) => void,
+  ) {
     const lines = createInterface({ input: child.stdout });
     lines.on("line", (line) => this.receive(line));
     child.once("close", (code, signal) => {
@@ -285,6 +295,7 @@ class AppServerClient {
         this.finalMessageByTurn.set(turnId, item.text);
       }
     }
+    this.onNotification?.(message);
     this.notifications.push(message);
     this.wakeNotifications();
   }

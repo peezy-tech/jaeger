@@ -54,11 +54,61 @@ export interface SessionControlRequest {
   readonly message?: string;
 }
 
+export type ProviderRuntimeActivity = "starting" | "running" | "completed" | "failed" | "interrupted";
+
+export interface ProviderRuntimeProgress {
+  readonly id: string;
+  readonly kind: "task" | "tool" | "workflow";
+  readonly status: "running" | "completed" | "failed" | "interrupted";
+  readonly label?: string;
+  readonly parentId?: string;
+  readonly updatedAt: string;
+}
+
+/**
+ * An allowlisted projection of a native provider event. It is safe to persist
+ * in a session record and intentionally never contains prompts, outputs, or
+ * provider-authentication material.
+ */
+export interface ProviderRuntimeEvent {
+  readonly id: string;
+  readonly type: string;
+  readonly source: HarnessDriver;
+  readonly at: string;
+  readonly nativeSessionId?: string;
+  readonly nativeTurnId?: string;
+  readonly nativeItemId?: string;
+  readonly activity?: ProviderRuntimeActivity;
+  readonly usage?: Record<string, JsonValue>;
+  readonly rateLimits?: Record<string, JsonValue>;
+  readonly identity?: unknown;
+  readonly progress?: ProviderRuntimeProgress;
+  readonly error?: string;
+}
+
+export interface ProviderRuntimeSnapshot {
+  readonly version: 1;
+  readonly activity: ProviderRuntimeActivity;
+  readonly updatedAt: string;
+  readonly identity?: JsonValue;
+  readonly usage?: Record<string, JsonValue>;
+  readonly rateLimits?: Record<string, JsonValue>;
+  readonly progress: readonly ProviderRuntimeProgress[];
+  readonly recentEvents: readonly {
+    readonly id: string;
+    readonly type: string;
+    readonly at: string;
+    readonly activity?: ProviderRuntimeActivity;
+  }[];
+  readonly lastError?: string;
+}
+
 export interface SessionTurn {
   readonly id: string;
   readonly nativeSessionId?: string | undefined;
   providerStarted(nativeSessionId: string): Promise<void>;
   turnStarted(nativeTurnId?: string): Promise<void>;
+  providerEvent(event: ProviderRuntimeEvent): Promise<void>;
   processControls(
     handler: (request: SessionControlRequest) => Promise<Record<string, JsonValue> | void>,
     signal?: AbortSignal,
@@ -216,6 +266,7 @@ export interface WorkflowSessionRecord {
   readonly runId: string;
   readonly stepId: string;
   readonly harness: HarnessName;
+  readonly driver?: HarnessDriver;
   readonly cwd: string;
   readonly label?: string;
   readonly model?: string;
@@ -230,6 +281,7 @@ export interface WorkflowSessionRecord {
   readonly updatedAt: string;
   readonly lastOutput?: JsonValue | undefined;
   readonly lastError?: string | undefined;
+  readonly runtime?: ProviderRuntimeSnapshot | undefined;
 }
 
 export interface WorkflowSessionSummary extends WorkflowSessionRecord {

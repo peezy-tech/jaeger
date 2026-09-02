@@ -9,6 +9,14 @@ import {
   unlink,
 } from "node:fs/promises";
 import path from "node:path";
+import {
+  applyProviderIdentityUpdate,
+  createInitialProviderIdentity,
+  markProviderIdentityStale,
+  parseProviderIdentitySnapshot,
+  redactSensitiveText,
+  type ProviderIdentityUpdate,
+} from "./provider-identity.js";
 import { validateHarnessName } from "./harnesses/registry.js";
 import {
   acquireProcessLease,
@@ -19,8 +27,11 @@ import {
 } from "./process-lease.js";
 import type {
   AgentOptions,
+  HarnessDriver,
   HarnessName,
   JsonValue,
+  ProviderRuntimeEvent,
+  ProviderRuntimeSnapshot,
   SessionControlKind,
   SessionControlRequest,
   SessionTurn,
@@ -78,7 +89,11 @@ export class ManagedSessionTurn implements SessionTurn {
     stepId: string,
     options: AgentOptions,
     cwd: string,
+    driver?: HarnessDriver,
   ): Promise<ManagedSessionTurn> {
+    if (driver !== undefined && !isHarnessDriver(driver)) {
+      throw new TypeError("session driver is invalid");
+    }
     const id = sessionIdFor(stepId, options.harness);
     const sessionDir = sessionDirectory(runDir, id);
     await prepareSessionDirectory(sessionDir);
@@ -90,6 +105,7 @@ export class ManagedSessionTurn implements SessionTurn {
       runId,
       stepId,
       harness: canonicalHarness(options.harness),
+      driver: driver ?? legacyDriverForHarness(options.harness),
       cwd,
       ...(options.label ? { label: options.label } : {}),
       ...(options.model ? { model: options.model } : {}),
@@ -97,6 +113,7 @@ export class ManagedSessionTurn implements SessionTurn {
       ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
       ...(options.profile ? { profile: options.profile } : {}),
       status: "starting",
+      runtime: initialRuntime(createdAt),
       turnCount: 0,
       createdAt,
       updatedAt: createdAt,
@@ -113,7 +130,14 @@ export class ManagedSessionTurn implements SessionTurn {
     return new ManagedSessionTurn(sessionDir, active, controller);
   }
 
-  static async resume(runDir: string, selector: string): Promise<ManagedSessionTurn> {
+  static async resume(
+    runDir: string,
+    selector: string,
+    driver?: HarnessDriver,
+  ): Promise<ManagedSessionTurn> {
+    if (driver !== undefined && !isHarnessDriver(driver)) {
+      throw new TypeError("session driver is invalid");
+    }
     const existing = await resolveSession(runDir, selector);
     if (!existing.nativeSessionId) {
       throw new Error(`Jaeger session ${existing.id} has no native provider session to resume`);
@@ -130,10 +154,14 @@ export class ManagedSessionTurn implements SessionTurn {
     }
     const sessionDir = sessionDirectory(runDir, existing.id);
     const controller = await acquireTurn(sessionDir);
+    const updatedAt = new Date().toISOString();
+    const activeDriver = driver ?? existing.driver ?? legacyDriverForHarness(existing.harness);
     const active: StoredSessionRecord = {
       ...existing,
+      driver: activeDriver,
       status: "starting",
-      updatedAt: new Date().toISOString(),
+      runtime: restartRuntime(existing.runtime, updatedAt),
+      updatedAt,
       controller,
       activeTurnId: undefined,
       lastError: undefined,
@@ -149,14 +177,47 @@ export class ManagedSessionTurn implements SessionTurn {
         `Provider changed native session id for ${this.id}: ${this.record.nativeSessionId} -> ${nativeSessionId}`,
       );
     }
-    await this.update({ nativeSessionId, status: "running" });
+    await this.update({
+      nativeSessionId,
+      status: "running",
+      runtime: updateRuntime(this.record, {
+        id: `provider.session.started:${nativeSessionId}`,
+        type: "provider.session.started",
+        source: driverForRecord(this.record),
+        at: new Date().toISOString(),
+        activity: "running",
+      }),
+    });
   }
 
   async turnStarted(nativeTurnId?: string): Promise<void> {
     await this.update({
       status: "running",
       ...(nativeTurnId ? { activeTurnId: nativeTurnId } : {}),
+      runtime: updateRuntime(this.record, {
+        id: `provider.turn.started:${nativeTurnId ?? this.id}`,
+        type: "provider.turn.started",
+        source: driverForRecord(this.record),
+        at: new Date().toISOString(),
+        activity: "running",
+      }),
     });
+  }
+
+  async providerEvent(event: ProviderRuntimeEvent): Promise<void> {
+    if (event.source !== driverForRecord(this.record)) {
+      throw new Error(
+        `Provider event source ${event.source} does not match session driver ${driverForRecord(this.record)}`,
+      );
+    }
+    if (!Number.isFinite(Date.parse(event.at))) {
+      throw new TypeError("provider event timestamp must be an ISO date");
+    }
+    if (
+      this.record.runtime &&
+      Date.parse(event.at) < Date.parse(this.record.runtime.updatedAt)
+    ) return;
+    await this.update({ runtime: updateRuntime(this.record, event) });
   }
 
   async processControls(
@@ -209,6 +270,13 @@ export class ManagedSessionTurn implements SessionTurn {
       ...(durable !== undefined ? { lastOutput: durable } : {}),
       lastError: undefined,
       turnCount: this.record.turnCount + 1,
+      runtime: updateRuntime(this.record, {
+        id: `provider.turn.completed:${this.record.activeTurnId ?? this.id}:${this.record.turnCount + 1}`,
+        type: "provider.turn.completed",
+        source: driverForRecord(this.record),
+        at: new Date().toISOString(),
+        activity: "completed",
+      }),
     });
   }
 
@@ -217,8 +285,17 @@ export class ManagedSessionTurn implements SessionTurn {
     this.closed = true;
     await this.update({
       status: this.record.nativeSessionId ? "uncertain" : "failed",
-      lastError: errorMessage(error),
+      lastError: redactSensitiveText(error),
       controller: undefined,
+      activeTurnId: undefined,
+      runtime: updateRuntime(this.record, {
+        id: `provider.turn.failed:${this.record.activeTurnId ?? this.id}:${this.record.turnCount + 1}`,
+        type: "provider.turn.failed",
+        source: driverForRecord(this.record),
+        at: new Date().toISOString(),
+        activity: "failed",
+        error: errorMessage(error),
+      }),
     });
     await releaseProcessLease(turnLeasePath(this.sessionDir), this.controller);
   }
@@ -327,6 +404,17 @@ export async function finalizeCompletedSessionTurn(
     lastError: undefined,
     activeTurnId: undefined,
     controller: undefined,
+    ...(record.driver
+      ? {
+          runtime: updateRuntime(record, {
+            id: `provider.turn.completed:${record.activeTurnId ?? record.id}:${input.turn}`,
+            type: "provider.turn.completed",
+            source: record.driver,
+            at: new Date().toISOString(),
+            activity: "completed",
+          }),
+        }
+      : {}),
     updatedAt: new Date().toISOString(),
   };
   await atomicWriteJson(recordPath, completed);
@@ -488,7 +576,11 @@ function parseStoredSessionRecord(value: unknown): StoredSessionRecord {
   ) {
     throw new Error("Invalid Jaeger session record");
   }
+  if (record.driver !== undefined && !isHarnessDriver(record.driver)) {
+    throw new Error("Invalid Jaeger session driver");
+  }
   if (record.controller !== undefined) parseController(record.controller);
+  if (record.runtime !== undefined) parseRuntime(record.runtime, record.harness, record.driver);
   return value as StoredSessionRecord;
 }
 
@@ -506,6 +598,124 @@ function stripController(record: StoredSessionRecord): WorkflowSessionRecord {
   return publicRecord;
 }
 
+const MAX_RUNTIME_EVENTS = 48;
+const MAX_RUNTIME_PROGRESS = 48;
+
+function initialRuntime(updatedAt: string): ProviderRuntimeSnapshot {
+  return {
+    version: 1,
+    activity: "starting",
+    updatedAt,
+    progress: [],
+    recentEvents: [],
+  };
+}
+
+function restartRuntime(
+  current: ProviderRuntimeSnapshot | undefined,
+  updatedAt: string,
+): ProviderRuntimeSnapshot {
+  if (!current) return initialRuntime(updatedAt);
+  const { lastError: _lastError, ...withoutLastError } = current;
+  const identity = current.identity
+    ? jsonValue(markProviderIdentityStale(parseProviderIdentitySnapshot(current.identity)))
+    : undefined;
+  return {
+    ...withoutLastError,
+    activity: "starting",
+    updatedAt,
+    ...(identity ? { identity } : {}),
+  };
+}
+
+function updateRuntime(
+  record: StoredSessionRecord,
+  event: ProviderRuntimeEvent,
+): ProviderRuntimeSnapshot {
+  const current = record.runtime ?? initialRuntime(event.at);
+  const progress = new Map(current.progress.map((item) => [item.id, item]));
+  if (event.progress) progress.set(event.progress.id, event.progress);
+  const identity = runtimeIdentity(record, current, event);
+  const recentEvents = [
+    ...current.recentEvents,
+    {
+      id: event.id,
+      type: event.type,
+      at: event.at,
+      ...(event.activity ? { activity: event.activity } : {}),
+    },
+  ].slice(-MAX_RUNTIME_EVENTS);
+  return {
+    version: 1,
+    activity: event.activity ?? current.activity,
+    updatedAt: event.at,
+    ...(identity ? { identity } : {}),
+    ...(event.usage ? { usage: event.usage } : current.usage ? { usage: current.usage } : {}),
+    ...(event.rateLimits
+      ? { rateLimits: event.rateLimits }
+      : current.rateLimits
+        ? { rateLimits: current.rateLimits }
+        : {}),
+    progress: [...progress.values()].slice(-MAX_RUNTIME_PROGRESS),
+    recentEvents,
+    ...(event.error
+      ? { lastError: redactSensitiveText(event.error) }
+      : event.activity !== "completed" && current.lastError
+        ? { lastError: current.lastError }
+        : {}),
+  };
+}
+
+function runtimeIdentity(
+  record: StoredSessionRecord,
+  current: ProviderRuntimeSnapshot,
+  event: ProviderRuntimeEvent,
+): JsonValue | undefined {
+  if (event.identity === undefined) return current.identity;
+  try {
+    const prior = current.identity
+      ? parseProviderIdentitySnapshot(current.identity)
+      : createInitialProviderIdentity(record.harness, event.source);
+    return jsonValue(
+      applyProviderIdentityUpdate(prior, event.identity as ProviderIdentityUpdate, event.at),
+    );
+  } catch {
+    return jsonValue(
+      markIdentityUncertain(record.harness, event.source, event.at),
+    );
+  }
+}
+
+function markIdentityUncertain(
+  harness: HarnessName,
+  driver: HarnessDriver,
+  observedAt: string,
+): Record<string, JsonValue> {
+  return {
+    provider: harness,
+    driver,
+    auth: { status: "unknown" },
+    freshness: "uncertain",
+    observedAt,
+  };
+}
+
+function driverForRecord(record: WorkflowSessionRecord): HarnessDriver {
+  return record.driver ?? legacyDriverForHarness(record.harness);
+}
+
+function legacyDriverForHarness(harness: HarnessName): HarnessDriver {
+  return harness === "claude" || harness.includes("claude")
+    ? "claude-agent-sdk"
+    : harness === "pi"
+      ? "pi-rpc"
+      : "codex-app-server";
+}
+
+function isHarnessDriver(value: unknown): value is HarnessDriver {
+  return value === "codex-app-server" || value === "claude-agent-sdk" || value === "pi-rpc";
+}
+
 function parseController(value: unknown): ControllerIdentity {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Invalid session controller identity");
@@ -520,6 +730,80 @@ function parseController(value: unknown): ControllerIdentity {
     throw new Error("Invalid session controller identity");
   }
   return value as ControllerIdentity;
+}
+
+function parseRuntime(
+  value: unknown,
+  harness: HarnessName,
+  driver: HarnessDriver | undefined,
+): asserts value is ProviderRuntimeSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid provider runtime snapshot");
+  }
+  const runtime = value as Record<string, unknown>;
+  if (
+    runtime.version !== 1 ||
+    !["starting", "running", "completed", "failed", "interrupted"].includes(String(runtime.activity)) ||
+    !isIsoTimestamp(runtime.updatedAt) ||
+    !Array.isArray(runtime.progress) ||
+    !Array.isArray(runtime.recentEvents) ||
+    runtime.progress.length > MAX_RUNTIME_PROGRESS ||
+    runtime.recentEvents.length > MAX_RUNTIME_EVENTS ||
+    (runtime.identity !== undefined && jsonValue(runtime.identity) === undefined) ||
+    (runtime.usage !== undefined && !isJsonRecord(runtime.usage)) ||
+    (runtime.rateLimits !== undefined && !isJsonRecord(runtime.rateLimits)) ||
+    (runtime.lastError !== undefined && typeof runtime.lastError !== "string")
+  ) {
+    throw new Error("Invalid provider runtime snapshot");
+  }
+  if (runtime.identity !== undefined) {
+    const identity = parseProviderIdentitySnapshot(runtime.identity);
+    if (identity.provider !== harness || (driver !== undefined && identity.driver !== driver)) {
+      throw new Error("Provider runtime identity does not match its session");
+    }
+  }
+  for (const progress of runtime.progress) {
+    if (!progress || typeof progress !== "object" || Array.isArray(progress)) {
+      throw new Error("Invalid provider runtime progress");
+    }
+    const item = progress as Record<string, unknown>;
+    if (
+      typeof item.id !== "string" ||
+      !["task", "tool", "workflow"].includes(String(item.kind)) ||
+      !["running", "completed", "failed", "interrupted"].includes(String(item.status)) ||
+      !isIsoTimestamp(item.updatedAt) ||
+      (item.label !== undefined && typeof item.label !== "string") ||
+      (item.parentId !== undefined && typeof item.parentId !== "string")
+    ) {
+      throw new Error("Invalid provider runtime progress");
+    }
+  }
+  for (const event of runtime.recentEvents) {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      throw new Error("Invalid provider runtime event");
+    }
+    const item = event as Record<string, unknown>;
+    if (
+      typeof item.id !== "string" ||
+      typeof item.type !== "string" ||
+      !isIsoTimestamp(item.at) ||
+      (item.activity !== undefined &&
+        !["starting", "running", "completed", "failed", "interrupted"].includes(
+          String(item.activity),
+        ))
+    ) {
+      throw new Error("Invalid provider runtime event");
+    }
+  }
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isJsonRecord(value: unknown): value is Record<string, JsonValue> {
+  const durable = jsonValue(value);
+  return durable !== undefined && typeof durable === "object" && !Array.isArray(durable);
 }
 
 function parseControlRequest(value: unknown): StoredControlRequest {
