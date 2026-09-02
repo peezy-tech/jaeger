@@ -2,46 +2,47 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   finalizeTelegramDisposition,
-  activateTelegramCall,
   parseHttpsPublicUrl,
   readTelegramConfig,
-  sendTelegramCall,
   TelegramDeliveryUncertainError,
   TelegramCallInvitations,
+  sendTelegramCall,
 } from "./telegram-call.mjs";
 
-const stateRoot =
-  process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
-const stateFile =
-  process.env.VOICE_SPIKE_INVITATION_STATE_FILE ??
-  join(stateRoot, "jaeger", "voice-spike", "telegram-call.json");
-const envFile =
-  process.env.VOICE_TELEGRAM_ENV_FILE ?? join(homedir(), ".env");
 const configuredPublicUrl = process.env.VOICE_SPIKE_PUBLIC_URL;
 if (!configuredPublicUrl) {
   throw new Error(
-    "VOICE_SPIKE_PUBLIC_URL must be set to this install's own HTTPS voice-surface URL; the invitation bearer token is placed in its fragment",
+    "VOICE_SPIKE_PUBLIC_URL must be set to the HTTPS URL that serves this install's voice surface",
   );
 }
 const publicUrl = parseHttpsPublicUrl(configuredPublicUrl);
-const reason = process.argv.slice(2).join(" ").trim() || "Jaeger wants to talk.";
-
-const invitations = new TelegramCallInvitations({ stateFile });
-const telegram = await readTelegramConfig(envFile);
-const pending = await invitations.pendingDisposition();
-// A rejected close-out must not abort the preflight: create() below reports
-// whether the previous call still blocks this one.
-if (pending) {
-  reportDisposition(
-    await finalizeTelegramDisposition(invitations, telegram, pending),
+const reason = parseCallReason(process.argv.slice(2));
+const stateFile =
+  process.env.VOICE_SPIKE_INVITATION_STATE_FILE ??
+  join(
+    process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
+    "jaeger",
+    "voice-spike",
+    "telegram-call.json",
   );
+const telegram = await readTelegramConfig(
+  process.env.VOICE_TELEGRAM_ENV_FILE ?? join(homedir(), ".env"),
+);
+const invitations = new TelegramCallInvitations({ stateFile });
+const pending = await invitations.pendingDisposition();
+if (pending) {
+  const outcome = await finalizeTelegramDisposition(invitations, telegram, pending);
+  if (outcome.error) {
+    throw new Error(
+      "Previous voice call disposition is still unresolved: " +
+        outcome.error.message,
+    );
+  }
 }
+
 const { token, invitation } = await invitations.create({ reason });
 const answerUrl = new URL(publicUrl);
 answerUrl.hash = "";
-const answerUrlBase = answerUrl.href;
-answerUrl.hash = new URLSearchParams({ call: token }).toString();
-
 await invitations.recordTelegramDeliveryUncertain(token, {
   chatId: telegram.chatId,
   messageThreadId: telegram.messageThreadId,
@@ -50,55 +51,58 @@ await invitations.recordTelegramDeliveryUncertain(token, {
 let delivery;
 try {
   delivery = await sendTelegramCall({
-    ...telegram,
+    botToken: telegram.botToken,
+    chatId: telegram.chatId,
+    messageThreadId: telegram.messageThreadId,
     answerUrl: answerUrl.href,
     reason: invitation.reason,
     expiresAt: invitation.expiresAt,
   });
 } catch (error) {
-  if (error instanceof TelegramDeliveryUncertainError) {
-    // The uncertainty marker was persisted before the request, so a crash at
-    // any point after Telegram accepts the message cannot look like a clean
-    // ringing invitation on the next recovery pass.
-  } else {
-    await invitations.fail(token);
+  if (!(error instanceof TelegramDeliveryUncertainError)) {
+    await invitations.fail(token).catch(() => {});
   }
   throw error;
 }
 
-const recorded = await invitations.recordTelegramDelivery(token, {
-  chatId: telegram.chatId,
-  messageThreadId: telegram.messageThreadId,
-  messageId: delivery.messageId,
-  answerUrlBase,
-});
-await activateTelegramCall({
-  ...telegram,
-  messageId: delivery.messageId,
-  answerUrl: answerUrl.href,
-  reason: invitation.reason,
-  expiresAt: invitation.expiresAt,
-});
-await invitations.markTelegramDeliveryActivated(recorded);
-if (["answered", "declined", "expired"].includes(recorded.invitation.status)) {
-  reportDisposition(
-    await finalizeTelegramDisposition(invitations, telegram, recorded),
+let recorded;
+try {
+  recorded = await invitations.recordTelegramDelivery(token, {
+    chatId: telegram.chatId,
+    messageThreadId: telegram.messageThreadId,
+    messageId: delivery.messageId,
+    answerUrlBase: answerUrl.href,
+  });
+} catch (error) {
+  process.stderr.write(
+    "Telegram message was sent but could not be recorded safely: " +
+      error.message +
+      "\n",
   );
+  throw error;
 }
+
+const activation = await finalizeTelegramDisposition(
+  invitations,
+  telegram,
+  await invitations.pendingDisposition(),
+);
+if (activation.error) {
+  throw new Error("Telegram call activation failed: " + activation.error.message);
+}
+
 process.stdout.write(
-  `${JSON.stringify({
+  JSON.stringify({
     delivered: true,
-    status: recorded.invitation.status,
+    reason: recorded.invitation.reason,
     messageId: delivery.messageId,
     expiresAt: invitation.expiresAt,
-  })}\n`,
+  }) + "\n",
 );
 
-function reportDisposition(outcome) {
-  if (!outcome.error) return;
-  process.stderr.write(
-    `Telegram call disposition update failed${
-      outcome.finalized ? " and was finalized without updating Telegram" : ""
-    }: ${outcome.error.message}\n`,
-  );
+function parseCallReason(argv) {
+  if (argv.some((value) => value.startsWith("-"))) {
+    throw new Error("Call reason must be plain text; no options are supported");
+  }
+  return argv.join(" ").trim() || "Your assistant is calling.";
 }

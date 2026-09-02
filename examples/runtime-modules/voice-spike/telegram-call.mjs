@@ -49,7 +49,7 @@ export class TelegramCallInvitations {
   }
 
   async create({
-    reason = "Jaeger wants to talk.",
+    reason = "Your assistant is calling.",
     ttlMs = DEFAULT_CALL_TTL_MS,
   } = {}) {
     return await this.#exclusive(async () => {
@@ -96,7 +96,7 @@ export class TelegramCallInvitations {
       const createdAt = new Date(this.now()).toISOString();
       const expiresAt = new Date(this.now() + ttlMs).toISOString();
       const record = {
-        version: 1,
+        version: 2,
         tokenHash: hashToken(token),
         status: "ringing",
         reason: normalizeReason(reason),
@@ -442,11 +442,11 @@ export async function updateTelegramCall({
 }) {
   if (!botToken || !chatId || !messageId) return;
   const labels = {
-    answered: "✅ Jaeger call answered",
-    declined: "↘️ Jaeger call declined",
-    expired: "⌛ Jaeger call missed",
+    answered: "✅ Voice call answered",
+    declined: "↘️ Voice call declined",
+    expired: "⌛ Voice call missed",
   };
-  const text = [labels[status] ?? "Jaeger call closed", "", normalizeReason(reason)]
+  const text = [labels[status] ?? "Voice call closed", "", normalizeReason(reason)]
     .join("\n");
   await telegramRequest({
     botToken,
@@ -814,20 +814,20 @@ async function delay(milliseconds) {
 
 function normalizeReason(reason) {
   const value = String(reason ?? "").replace(/\s+/g, " ").trim();
-  if (!value) return "Jaeger wants to talk.";
+  if (!value) return "Your assistant is calling.";
   return value.slice(0, 240);
 }
 
 function telegramCallText({ reason, expiresAt, active }) {
   return [
-    active ? "☎️ Jaeger is calling" : "☎️ Jaeger is preparing a call",
+    active ? "☎️ Your assistant is calling" : "☎️ Preparing your voice call",
     "",
     normalizeReason(reason),
     "",
     active
       ? `Answer before ${formatUtc(expiresAt)}.`
       : "The secure Answer button is being prepared.",
-  ].join("\n");
+  ].filter((line) => line !== null).join("\n");
 }
 
 function hashToken(token) {

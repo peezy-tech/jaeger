@@ -14,6 +14,11 @@ terms and privacy policy:
 - https://www.anthropic.com/legal/commercial-terms
 - https://www.anthropic.com/legal/privacy
 
+The inspectable `voice-spike` example includes a browser bundle built from
+`@json-render/core` and `@json-render/react` 0.19.0 under Apache-2.0, plus React,
+React DOM, and Zod under MIT. The bundle retains React's generated license
+comments; exact package revisions are recorded in the example's lockfile.
+
 Codex, Claude Code, Pi, and any custom harness are independently installed and
 authenticated by the operator. Their availability and use are governed by
 their respective licenses and service terms.

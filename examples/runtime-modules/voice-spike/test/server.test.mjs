@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import {
   createServer as createHttpServer,
   get as httpGet,
@@ -12,11 +19,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { TelegramCallInvitations } from "../telegram-call.mjs";
 
-test("state, transcript, and control APIs require the browser capability", async () => {
+test("state, transcript, and control APIs work without a bearer capability", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-server-auth-"));
-  const capability = "s".repeat(43);
-  const capabilityFile = join(directory, "capability-token");
-  await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
   process.env.HOME = directory;
   await writeFile(
     join(directory, ".env"),
@@ -24,7 +28,6 @@ test("state, transcript, and control APIs require the browser capability", async
     { mode: 0o600 },
   );
   delete process.env.VOICE_TELEGRAM_ENV_FILE;
-  process.env.VOICE_SPIKE_CAPABILITY_FILE = capabilityFile;
   process.env.VOICE_SPIKE_STATE_FILE = join(directory, "operator.json");
   process.env.VOICE_SPIKE_INVITATION_STATE_FILE = join(
     directory,
@@ -49,40 +52,28 @@ test("state, transcript, and control APIs require the browser capability", async
     const callAccessModule = await fetch(`${base}/call-access.js`);
     assert.equal(callAccessModule.status, 200);
     assert.match(await callAccessModule.text(), /export function loadAccessTokens/);
+    const workspaceModule = await fetch(`${base}/workspace.js`);
+    assert.equal(workspaceModule.status, 200);
+    assert.match(await workspaceModule.text(), /generated-canvas/);
 
-    for (const pathname of ["/api/state", "/api/events"]) {
-      const response = await fetch(`${base}${pathname}`);
-      assert.equal(response.status, 401, pathname);
-    }
-
-    const missingCapability = await fetch(`${base}/api/reconnect`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: "https://voice.example",
-      },
-      body: "{}",
+    const directState = await fetch(`${base}/api/state`, {
+      headers: { origin: "https://voice.example" },
     });
-    assert.equal(missingCapability.status, 401);
+    assert.equal(directState.status, 200);
 
     const crossOrigin = await fetch(`${base}/api/state`, {
-      headers: {
-        authorization: `Bearer ${capability}`,
-        origin: "https://attacker.example",
-      },
+      headers: { origin: "https://attacker.example" },
     });
     assert.equal(crossOrigin.status, 403);
 
-    const authorized = await fetch(`${base}/api/state`, {
-      headers: {
-        authorization: `Bearer ${capability}`,
-        origin: "https://voice.example",
-      },
-    });
-    assert.equal(authorized.status, 200);
-    const state = await authorized.json();
+    const state = await directState.json();
     assert.equal(state.connected, false);
     assert.equal(state.telegramCall.configured, true);
+    assert.equal(
+      state.telegramCall.reason,
+      "Your assistant is calling.",
+    );
+    assert.equal(state.dynamicUi, null);
 
     const invitationAuthorized = await fetch(`${base}/api/state`, {
       headers: {
@@ -166,12 +157,8 @@ test("state, transcript, and control APIs require the browser capability", async
 
 test("a backpressured event stream is disconnected", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-server-backpressure-"));
-  const capability = "b".repeat(43);
-  const capabilityFile = join(directory, "capability-token");
-  await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
   process.env.HOME = directory;
   delete process.env.VOICE_TELEGRAM_ENV_FILE;
-  process.env.VOICE_SPIKE_CAPABILITY_FILE = capabilityFile;
   process.env.VOICE_SPIKE_STATE_FILE = join(directory, "operator.json");
   process.env.VOICE_SPIKE_INVITATION_STATE_FILE = join(
     directory,
@@ -192,7 +179,6 @@ test("a backpressured event stream is disconnected", async () => {
         `${base}/api/events`,
         {
           headers: {
-            authorization: `Bearer ${capability}`,
             origin: "https://voice.example",
           },
         },
@@ -226,13 +212,12 @@ test("a backpressured event stream is disconnected", async () => {
 
 test("a closed realtime negotiation is not promoted to the active session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "voice-server-realtime-close-"));
-  const capability = "s".repeat(43);
-  const capabilityFile = join(directory, "capability-token");
   const fakeCodex = join(directory, "fake-codex.mjs");
+  const welcomeLog = join(directory, "welcome.log");
   const invitationStateFile = join(directory, "invitations.json");
   const invitationToken = "i".repeat(43);
   const port = await availablePort();
-  await writeFile(capabilityFile, `${capability}\n`, { mode: 0o600 });
+  await mkdir(join(directory, "docs"));
   const invitations = new TelegramCallInvitations({
     stateFile: invitationStateFile,
     createToken: () => invitationToken,
@@ -242,7 +227,7 @@ test("a closed realtime negotiation is not promoted to the active session", asyn
   await writeFile(
     fakeCodex,
     `#!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import readline from "node:readline";
 
 const threadId = "thread-realtime-test";
@@ -252,6 +237,12 @@ const input = readline.createInterface({ input: process.stdin });
 const send = (...messages) => {
   process.stdout.write(
     messages.map((message) => JSON.stringify(message)).join("\\n") + "\\n",
+  );
+};
+const record = (message) => {
+  appendFileSync(
+    process.env.VOICE_SPIKE_WELCOME_LOG,
+    JSON.stringify(message) + "\\n",
   );
 };
 
@@ -267,6 +258,7 @@ input.on("line", (line) => {
       send(reply({ thread: { id: threadId } }));
       break;
     case "turn/start":
+      record({ method: message.method, input: message.params.input });
       send(
         reply({ turn: { id: "turn-bootstrap" } }),
         {
@@ -324,6 +316,11 @@ input.on("line", (line) => {
       }
       break;
     case "thread/realtime/appendText":
+      record({
+        method: message.method,
+        role: message.params.role,
+        text: message.params.text,
+      });
       send(reply({}));
       break;
     default:
@@ -345,13 +342,14 @@ input.on("line", (line) => {
       env: {
         ...process.env,
         HOME: directory,
-        VOICE_SPIKE_CAPABILITY_FILE: capabilityFile,
         VOICE_SPIKE_CODEX_BIN: fakeCodex,
+        VOICE_SPIKE_CWD: directory,
         VOICE_SPIKE_HOST: "127.0.0.1",
         VOICE_SPIKE_INVITATION_STATE_FILE: invitationStateFile,
         VOICE_SPIKE_PORT: String(port),
         VOICE_SPIKE_PUBLIC_ORIGIN: "https://voice.example",
         VOICE_SPIKE_STATE_FILE: join(directory, "operator.json"),
+        VOICE_SPIKE_WELCOME_LOG: welcomeLog,
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -370,7 +368,6 @@ input.on("line", (line) => {
     );
     const base = `http://127.0.0.1:${port}`;
     const headers = {
-      authorization: `Bearer ${capability}`,
       "content-type": "application/json",
       origin: "https://voice.example",
     };
@@ -397,8 +394,18 @@ input.on("line", (line) => {
     });
     assert.equal(second.status, 200);
     assert.equal((await second.json()).sessionId, secondSessionId);
+    const welcome = await waitForFileText(
+      welcomeLog,
+      (value) => value.includes("folder-welcome") && value.includes(directory),
+    );
+    assert.ok(welcome.includes('"method":"thread/realtime/appendText"'));
+    assert.match(welcome, /"role":"developer"/);
+    assert.ok(welcome.includes('"method":"turn/start"'));
+    assert.match(welcome, /documentation/);
 
-    const eventStream = await fetch(`${base}/api/events`, { headers });
+    const eventStream = await fetch(`${base}/api/events`, {
+      headers,
+    });
     assert.equal(eventStream.status, 200);
     const eventReader = eventStream.body.getReader();
     await readServerEvent(eventReader, "bridge.state");
@@ -540,6 +547,20 @@ async function readStreamUntil(reader, marker, timeoutMs = 2_000) {
     buffered += decoder.decode(value, { stream: true });
   }
   return buffered;
+}
+
+async function waitForFileText(path, predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const value = await readFile(path, "utf8");
+      if (predicate(value)) return value;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${path}`);
 }
 
 function waitForOutput(stream, pattern, timeoutMs = 5_000) {

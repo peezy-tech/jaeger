@@ -20,7 +20,7 @@ test("an invitation token is returned from the fragment and kept out of storage"
         replaceState: (...args) => replacements.push(args),
       },
     }),
-    { callToken: "still-valid", capabilityToken: null },
+    { callToken: "still-valid" },
   );
   assert.deepEqual(replacements, [
     [null, "", "/jaeger-voice/?source=telegram"],
@@ -36,11 +36,11 @@ test("an invitation token is returned from the fragment and kept out of storage"
         replaceState: () => assert.fail("a clean reload must not rewrite history"),
       },
     }),
-    { callToken: null, capabilityToken: null },
+    { callToken: null },
   );
 });
 
-test("a direct capability token is returned while its fragment is scrubbed", () => {
+test("a legacy capability fragment is scrubbed without granting access", () => {
   const replacements = [];
   assert.deepEqual(
     loadAccessTokens({
@@ -53,7 +53,7 @@ test("a direct capability token is returned while its fragment is scrubbed", () 
         replaceState: (...args) => replacements.push(args),
       },
     }),
-    { callToken: null, capabilityToken: "memory-only" },
+    { callToken: null },
   );
   assert.deepEqual(replacements, [[null, "", "/jaeger-voice/"]]);
 });

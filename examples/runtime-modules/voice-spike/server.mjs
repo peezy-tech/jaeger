@@ -3,16 +3,19 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  assertCapability,
-  bearerCapability,
-  readOrCreateCapabilityToken,
-} from "./capability.mjs";
 import { CodexAppServer } from "./codex-app-server.mjs";
 import {
   createJaegerReadonlyRequestHandlers,
   JAEGER_READONLY_TOOLS,
 } from "./jaeger-readonly-tools.mjs";
+import {
+  createUiRequestHandlers,
+  UI_TOOLS,
+} from "./dynamic-ui-tools.mjs";
+import {
+  createWelcomePrompts,
+  discoverFolderSurface,
+} from "./folder-surface.mjs";
 import {
   finalizeTelegramDisposition,
   parseHttpsPublicUrl,
@@ -24,6 +27,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const publicDirectory = join(here, "public");
 const port = Number(process.env.VOICE_SPIKE_PORT ?? 4319);
 const host = process.env.VOICE_SPIKE_HOST ?? "127.0.0.1";
+const operatorCwd = process.env.VOICE_SPIKE_CWD ?? process.cwd();
 const configuredPublicOrigin = process.env.VOICE_SPIKE_PUBLIC_ORIGIN;
 if (!configuredPublicOrigin) {
   throw new Error(
@@ -47,15 +51,6 @@ const invitationStateFile =
     "voice-spike",
     "telegram-call.json",
   );
-const capabilityFile =
-  process.env.VOICE_SPIKE_CAPABILITY_FILE ??
-  join(
-    process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
-    "jaeger",
-    "voice-spike",
-    "capability-token",
-  );
-const capabilityToken = await readOrCreateCapabilityToken(capabilityFile);
 const configuredTelegramEnvFile = process.env.VOICE_TELEGRAM_ENV_FILE;
 const telegramEnvFile = configuredTelegramEnvFile ?? join(homedir(), ".env");
 const telegram = await readTelegramConfig(telegramEnvFile, {
@@ -76,30 +71,93 @@ const jaegerEnv = {
     : {}),
 };
 
-const bridge = new CodexAppServer({
-  codexBin: process.env.VOICE_SPIKE_CODEX_BIN ?? "codex",
-  cwd: process.env.VOICE_SPIKE_CWD ?? process.cwd(),
-  childEnv: jaegerEnv,
-  dynamicTools: JAEGER_READONLY_TOOLS,
-  requestHandlers: createJaegerReadonlyRequestHandlers({
-    jaegerBin: process.env.VOICE_SPIKE_JAEGER_BIN ?? "jaeger",
-    env: jaegerEnv,
-  }),
-  stateFile,
-});
 const eventClients = new Map();
 let activeRealtimeSessionId = null;
 let startingRealtimeSessionId = null;
+let activeDynamicUi = null;
 let realtimeExpiryTimer = null;
 let broadcastQueue = Promise.resolve();
+let pendingDynamicTurn = null;
+let nextDynamicTurnId = 1;
+const readonlyHandlers = createJaegerReadonlyRequestHandlers({
+  jaegerBin: process.env.VOICE_SPIKE_JAEGER_BIN ?? "jaeger",
+  env: jaegerEnv,
+});
+const dynamicUiHandlers = createUiRequestHandlers({
+  publish: async (ui, params) => {
+    assertActiveToolCall(params);
+    activeDynamicUi = ui;
+    await broadcast("ui.render", ui);
+  },
+  clear: async (params) => {
+    assertActiveToolCall(params);
+    activeDynamicUi = null;
+    await broadcast("ui.clear", {});
+  },
+});
+
+const bridge = new CodexAppServer({
+  codexBin: process.env.VOICE_SPIKE_CODEX_BIN ?? "codex",
+  cwd: operatorCwd,
+  childEnv: jaegerEnv,
+  dynamicTools: [...JAEGER_READONLY_TOOLS, ...UI_TOOLS],
+  requestHandlers: {
+    "item/tool/call": async (params) => {
+      const dynamicResult = await dynamicUiHandlers["item/tool/call"](params);
+      if (dynamicResult) {
+        if (!dynamicResult.success) {
+          process.stderr.write(
+            `Dynamic UI tool ${params.tool} rejected: ${
+              dynamicResult.contentItems?.[0]?.text ?? "unknown error"
+            }\n`,
+          );
+        }
+        return dynamicResult;
+      }
+      return await readonlyHandlers["item/tool/call"](params);
+    },
+  },
+  stateFile,
+});
 
 bridge.on("notification", ({ method, params }) => {
   if (!method.startsWith("thread/realtime/")) return;
+  if (
+    method === "thread/realtime/transcript/done" &&
+    params.role === "user" &&
+    typeof params.text === "string" &&
+    params.text.trim()
+  ) {
+    pendingDynamicTurn = {
+      id: nextDynamicTurnId++,
+      sessionId: activeRealtimeSessionId,
+      text: params.text.trim(),
+    };
+  } else if (
+    method === "thread/realtime/itemAdded" &&
+    isRealtimeHandoff(params.item)
+  ) {
+    pendingDynamicTurn = null;
+  } else if (
+    method === "thread/realtime/transcript/done" &&
+    params.role === "assistant" &&
+    pendingDynamicTurn
+  ) {
+    const turn = pendingDynamicTurn;
+    pendingDynamicTurn = null;
+    if (turn.sessionId && turn.sessionId === activeRealtimeSessionId) {
+      void bridge.runOperatorTurn(turn.text).catch((error) => {
+        process.stderr.write(`Dynamic operator fallback failed: ${error.message}\n`);
+      });
+    }
+  }
   let eventParams = params;
   if (method === "thread/realtime/closed") {
     const sessionId = activeRealtimeSessionId ?? startingRealtimeSessionId;
     activeRealtimeSessionId = null;
     startingRealtimeSessionId = null;
+    activeDynamicUi = null;
+    pendingDynamicTurn = null;
     clearRealtimeExpiryTimer();
     if (sessionId) eventParams = { ...params, sessionId };
   }
@@ -109,6 +167,8 @@ bridge.on("ready", (snapshot) => void broadcast("bridge.ready", snapshot));
 bridge.on("disconnected", (error) => {
   activeRealtimeSessionId = null;
   startingRealtimeSessionId = null;
+  activeDynamicUi = null;
+  pendingDynamicTurn = null;
   clearRealtimeExpiryTimer();
   void broadcast("bridge.disconnected", { message: error.message });
 });
@@ -130,22 +190,25 @@ export const server = createServer(async (request, response) => {
     if (url.pathname.startsWith("/api/")) assertOrigin(request);
 
     if (request.method === "GET" && url.pathname === "/api/state") {
-      await assertApiCapability(request);
       return sendJson(response, 200, {
         ...bridge.snapshot(),
         telegramCall: await callSnapshot(),
+        dynamicUi: activeDynamicUi,
       });
     }
 
     if (request.method === "GET" && url.pathname === "/api/events") {
-      const invitationToken = await assertApiCapability(request);
+      const invitationToken = await optionalInvitationToken(request);
       response.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-store",
         connection: "keep-alive",
       });
       response.write(
-        `event: bridge.state\ndata: ${JSON.stringify(bridge.snapshot())}\n\n`,
+        `event: bridge.state\ndata: ${JSON.stringify({
+          ...bridge.snapshot(),
+          dynamicUi: activeDynamicUi,
+        })}\n\n`,
       );
       eventClients.set(response, invitationToken);
       response.once("close", () => eventClients.delete(response));
@@ -187,12 +250,8 @@ export const server = createServer(async (request, response) => {
       return sendJson(response, 200, result.invitation);
     }
 
-    if (url.pathname.startsWith("/api/")) {
-      await assertApiCapability(request);
-    }
-
     if (request.method === "POST" && url.pathname === "/api/session") {
-      const invitationToken = await assertApiCapability(request);
+      const invitationToken = await optionalInvitationToken(request);
       const body = await readJson(request);
       const sessionId = assertRealtimeSessionId(body.sessionId);
       if (activeRealtimeSessionId || startingRealtimeSessionId) {
@@ -201,6 +260,9 @@ export const server = createServer(async (request, response) => {
         throw error;
       }
       startingRealtimeSessionId = sessionId;
+      activeDynamicUi = null;
+      pendingDynamicTurn = null;
+      void broadcast("ui.clear", {});
       response.once("close", () => {
         if (!response.writableFinished) {
           void stopOwnedRealtimeSession(sessionId).catch((error) => {
@@ -231,6 +293,9 @@ export const server = createServer(async (request, response) => {
           error.statusCode = 410;
           throw error;
         }
+        void beginSessionWelcome(sessionId).catch((error) => {
+          process.stderr.write(`Session welcome failed: ${error.message}\n`);
+        });
         return sendJson(response, 200, { ...answer, sessionId });
       } catch (error) {
         if (startingRealtimeSessionId === sessionId) {
@@ -246,6 +311,56 @@ export const server = createServer(async (request, response) => {
       return sendJson(response, 202, { accepted: true });
     }
 
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/ui/actions"
+    ) {
+      const body = await readJson(request);
+      const sessionId = assertRealtimeSessionId(body.sessionId);
+      if (activeRealtimeSessionId !== sessionId) {
+        const error = new Error("The voice session is not active");
+        error.statusCode = 409;
+        throw error;
+      }
+      if (
+        !activeDynamicUi ||
+        body.uiId !== activeDynamicUi.id ||
+        typeof body.actionId !== "string"
+      ) {
+        const error = new Error("That on-screen choice is no longer available");
+        error.statusCode = 409;
+        throw error;
+      }
+      const action = activeDynamicUi.actions.find(
+        (candidate) => candidate.id === body.actionId,
+      );
+      if (!action) {
+        const error = new Error("That on-screen choice is unavailable");
+        error.statusCode = 404;
+        throw error;
+      }
+      const selectedUi = activeDynamicUi;
+      await bridge.appendText(
+        [
+          `The caller selected an on-screen option in "${selectedUi.title}".`,
+          `Selection label: ${action.label}`,
+          `Selection value: ${action.value}`,
+          "Treat this as the caller's answer and continue the conversation naturally.",
+          "If the selection resolves this visual, replace it with the next useful interface or call clear_ui.",
+        ].join("\n"),
+      );
+      if (activeDynamicUi?.id === selectedUi.id) {
+        activeDynamicUi = null;
+        await broadcast("ui.clear", {});
+      }
+      return sendJson(response, 202, {
+        accepted: true,
+        uiId: selectedUi.id,
+        actionId: action.id,
+        label: action.label,
+      });
+    }
+
     if (request.method === "POST" && url.pathname === "/api/stop") {
       const body = await readJson(request);
       const stopped = await stopOwnedRealtimeSession(
@@ -257,6 +372,9 @@ export const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/reconnect") {
       activeRealtimeSessionId = null;
       startingRealtimeSessionId = null;
+      activeDynamicUi = null;
+      pendingDynamicTurn = null;
+      void broadcast("ui.clear", {});
       clearRealtimeExpiryTimer();
       const before = bridge.snapshot();
       const after = await bridge.reconnect();
@@ -299,6 +417,23 @@ function assertRealtimeSessionId(value) {
   return value;
 }
 
+async function beginSessionWelcome(sessionId) {
+  const surface = await discoverFolderSurface(operatorCwd);
+  if (activeRealtimeSessionId !== sessionId) return;
+  const prompts = createWelcomePrompts(surface);
+  await bridge.appendText(prompts.speech, "developer");
+  if (activeRealtimeSessionId !== sessionId) return;
+  await bridge.runOperatorTurn(prompts.ui);
+}
+
+function isRealtimeHandoff(item) {
+  if (!item || typeof item !== "object") return false;
+  return (
+    ["handoff_request", "handoffRequest", "delegation"].includes(item.type) ||
+    item.name === "background_agent"
+  );
+}
+
 async function stopOwnedRealtimeSession(sessionId) {
   const ownsSession =
     activeRealtimeSessionId === sessionId ||
@@ -319,8 +454,25 @@ async function stopOwnedRealtimeSession(sessionId) {
     startingRealtimeSessionId = null;
     clearedOwnership = true;
   }
+  if (clearedOwnership) {
+    activeDynamicUi = null;
+    void broadcast("ui.clear", {});
+  }
   if (clearedOwnership) clearRealtimeExpiryTimer();
   return true;
+}
+
+function assertActiveToolCall(params) {
+  if (
+    !activeRealtimeSessionId ||
+    params?.threadId !== bridge.threadId
+  ) {
+    const error = new Error(
+      "UI tools require the active voice conversation",
+    );
+    error.statusCode = 409;
+    throw error;
+  }
 }
 
 async function armRealtimeInvitationExpiry(sessionId, invitationToken) {
@@ -406,6 +558,9 @@ function staticAsset(pathname) {
   if (pathname === "/app.js") {
     return { file: "app.js", type: "text/javascript; charset=utf-8" };
   }
+  if (pathname === "/workspace.js") {
+    return { file: "workspace.js", type: "text/javascript; charset=utf-8" };
+  }
   if (pathname === "/call-access.js") {
     return { file: "call-access.js", type: "text/javascript; charset=utf-8" };
   }
@@ -442,17 +597,22 @@ function assertOrigin(request) {
   }
 }
 
-async function assertApiCapability(request) {
-  try {
-    assertCapability(request, capabilityToken);
-    return null;
-  } catch {
-    const invitationToken = bearerCapability(request);
-    if (invitationToken && await invitations.authorize(invitationToken)) {
-      return invitationToken;
-    }
-    assertCapability(request, capabilityToken);
-  }
+async function optionalInvitationToken(request) {
+  const token = invitationBearer(request);
+  if (!token) return null;
+  if (await invitations.authorize(token)) return token;
+  const error = new Error("Telegram invitation access expired or was revoked");
+  error.statusCode = 401;
+  throw error;
+}
+
+function invitationBearer(request) {
+  const authorization = request.headers.authorization;
+  const match =
+    typeof authorization === "string"
+      ? /^Bearer ([A-Za-z0-9_-]{43})$/.exec(authorization)
+      : null;
+  return match?.[1] ?? null;
 }
 
 async function readJson(request) {
@@ -523,6 +683,7 @@ async function callSnapshot() {
   return {
     configured: Boolean(telegram),
     status: current?.status ?? "idle",
+    reason: current?.reason ?? null,
     expiresAt: current?.expiresAt ?? null,
   };
 }

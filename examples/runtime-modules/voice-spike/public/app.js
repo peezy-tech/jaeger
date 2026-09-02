@@ -10,6 +10,7 @@ const elements = {
   bridgeDot: document.querySelector("#bridge-dot"),
   bridgeLabel: document.querySelector("#bridge-label"),
   callExpiry: document.querySelector("#call-expiry"),
+  callHeading: document.querySelector("#call-heading"),
   callInvite: document.querySelector("#call-invite"),
   callNotice: document.querySelector("#call-notice"),
   callReason: document.querySelector("#call-reason"),
@@ -35,7 +36,7 @@ const state = {
   channel: null,
   callCountdown: null,
   callToken: null,
-  capabilityToken: null,
+  invitationToken: null,
   eventStreamStarted: false,
   inputStream: null,
   peer: null,
@@ -54,14 +55,22 @@ const apiUrl = (path) => new URL(path.replace(/^\//, ""), apiBaseUrl);
 
 const accessTokens = loadAccessTokens();
 const invitationToken = accessTokens.callToken;
-state.capabilityToken = accessTokens.capabilityToken;
-if (state.capabilityToken) {
-  await refreshState();
-  connectEvents();
-} else {
-  renderBridge({ connected: false, generation: "—", threadId: "—" });
-  setSignal("Answer an invitation or open with the capability token");
-}
+window.jaegerVoice = {
+  respondToUi: async ({ uiId, actionId }) => {
+    if (!state.sessionActive) {
+      const connected = await startSession();
+      if (!connected) throw new Error("The voice session could not be opened");
+    }
+    const result = await post("api/ui/actions", {
+      uiId,
+      actionId,
+      sessionId: state.sessionId,
+    });
+    setSignal("Choice sent to the assistant");
+    return result;
+  },
+};
+if (await refreshState()) connectEvents();
 drawWaveform();
 
 elements.answerCall.addEventListener("click", async () => {
@@ -75,12 +84,11 @@ elements.answerCall.addEventListener("click", async () => {
       answer: (token) => post("api/invitations/answer", { token }),
       inspect: (token) => post("api/invitations/inspect", { token }),
     });
-    state.capabilityToken = invitationCapability;
+    state.invitationToken = invitationCapability;
     clearCallInvitation();
-    await refreshState();
-    connectEvents();
+    if (await refreshState()) connectEvents();
     const connected = await startSession();
-    if (!connected) showCallNotice("Call answered. Tap Open microphone to retry.");
+    if (!connected) showCallNotice("Call answered. Tap Open mic to retry.");
   } catch (error) {
     elements.answerCall.textContent = "Answer";
     elements.answerCall.disabled = false;
@@ -209,7 +217,7 @@ async function startSessionAttempt() {
     setSignal("Negotiating Codex realtime");
     const answer = await post("api/session", {
       sdp: state.peer.localDescription.sdp,
-      voice: "juniper",
+      voice: "ember",
       sessionId: requestedSessionId,
     });
     await state.peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
@@ -220,8 +228,12 @@ async function startSessionAttempt() {
     state.sessionId = answer.sessionId;
     state.startingRealtimeSessionId = null;
     state.sessionActive = true;
+    window.jaegerWorkspace?.setSession({
+      active: true,
+      sessionId: state.sessionId,
+    });
     elements.talkButton.classList.add("active");
-    elements.talkLabel.textContent = "End session";
+    elements.talkLabel.textContent = "End call";
     elements.muteButton.disabled = false;
     setSignal("Listening");
     return true;
@@ -243,9 +255,8 @@ async function loadCallInvitation(token) {
   try {
     const invitation = await post("api/invitations/inspect", { token });
     if (hasActiveAnsweredAccess(invitation)) {
-      state.capabilityToken = token;
-      await refreshState();
-      connectEvents();
+      state.invitationToken = token;
+      if (await refreshState()) connectEvents();
       showCallNotice("Answered call access restored.");
       return;
     }
@@ -254,7 +265,9 @@ async function loadCallInvitation(token) {
       return;
     }
     state.callToken = token;
-    elements.callReason.textContent = invitation.reason;
+    elements.callHeading.textContent = "Your assistant is calling.";
+    elements.callReason.textContent =
+      invitation.reason ?? "A voice conversation is ready.";
     elements.callInvite.hidden = false;
     document.body.classList.add("incoming-call");
     elements.answerCall.focus();
@@ -332,18 +345,29 @@ function resetSessionUi() {
   state.sessionActive = false;
   state.sessionId = null;
   state.startingRealtimeSessionId = null;
+  window.jaegerWorkspace?.clearGenerated();
+  window.jaegerWorkspace?.setSession({ active: false, sessionId: null });
   elements.talkButton.classList.remove("active");
-  elements.talkLabel.textContent = "Open microphone";
+  elements.talkLabel.textContent = "Open mic";
   elements.muteButton.textContent = "Mute mic";
   elements.muteButton.disabled = true;
 }
 
 async function refreshState() {
   try {
-    renderBridge(await get("api/state"));
+    const snapshot = await get("api/state");
+    renderBridge(snapshot);
+    window.jaegerWorkspace?.update({ bridge: snapshot });
+    if (snapshot.dynamicUi) {
+      window.jaegerWorkspace?.renderGenerated(snapshot.dynamicUi);
+    } else {
+      window.jaegerWorkspace?.clearGenerated();
+    }
+    return true;
   } catch (error) {
     renderBridge({ connected: false, generation: "—", threadId: "—" });
     setSignal(error.message, true);
+    return false;
   }
 }
 
@@ -362,7 +386,13 @@ function connectEvents() {
   state.eventStreamStarted = true;
   const source = new EventTarget();
   source.addEventListener("bridge.state", (event) => {
-    renderBridge(JSON.parse(event.data));
+    const snapshot = JSON.parse(event.data);
+    renderBridge(snapshot);
+    if (snapshot.dynamicUi) {
+      window.jaegerWorkspace?.renderGenerated(snapshot.dynamicUi);
+    } else {
+      window.jaegerWorkspace?.clearGenerated();
+    }
   });
   source.addEventListener("bridge.ready", (event) => {
     renderBridge(JSON.parse(event.data));
@@ -386,6 +416,12 @@ function connectEvents() {
     const params = JSON.parse(event.data);
     setSignal(params.message, true);
   });
+  source.addEventListener("ui.render", (event) => {
+    window.jaegerWorkspace?.renderGenerated(JSON.parse(event.data));
+  });
+  source.addEventListener("ui.clear", () => {
+    window.jaegerWorkspace?.clearGenerated();
+  });
   source.addEventListener("thread/realtime/closed", (event) => {
     const params = JSON.parse(event.data);
     if (
@@ -408,7 +444,7 @@ function connectEvents() {
 }
 
 async function consumeEvents(target) {
-  while (state.capabilityToken) {
+  while (state.eventStreamStarted) {
     try {
       const response = await fetch(apiUrl("api/events"), {
         cache: "no-store",
@@ -420,7 +456,7 @@ async function consumeEvents(target) {
           await parseResponse(response);
         } catch (error) {
           if (status === 401 || status === 403) {
-            state.capabilityToken = null;
+            state.invitationToken = null;
             closePeer();
             resetSessionUi();
             setSignal("Voice access expired or was revoked", true);
@@ -492,10 +528,10 @@ function renderTranscriptDone(role, text) {
     draft.querySelector("p").textContent = text;
     delete draft.dataset.draft;
     state.transcriptDrafts.delete(normalizedRole);
-    return;
+  } else {
+    clearEmptyTranscript();
+    elements.transcript.append(createUtterance(normalizedRole, text));
   }
-  clearEmptyTranscript();
-  elements.transcript.append(createUtterance(normalizedRole, text));
 }
 
 function createUtterance(role, text) {
@@ -605,7 +641,7 @@ async function parseResponse(response) {
 }
 
 function authorizationHeaders() {
-  return state.capabilityToken
-    ? { authorization: `Bearer ${state.capabilityToken}` }
+  return state.invitationToken
+    ? { authorization: `Bearer ${state.invitationToken}` }
     : {};
 }

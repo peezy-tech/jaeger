@@ -170,7 +170,10 @@ test("concurrent browser entry points share one session start", async () => {
           sessionId: body.sessionId,
         });
       }
-      if (url.pathname === "/api/text" || url.pathname === "/api/stop") {
+      if (
+        url.pathname === "/api/text" ||
+        url.pathname === "/api/stop"
+      ) {
         return Response.json({ ok: true });
       }
       throw new Error(`Unexpected request: ${url.pathname}`);

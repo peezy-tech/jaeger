@@ -1,187 +1,152 @@
-# Codex realtime voice compatibility spike
+# General-purpose voice surface
 
-This is the Stage 1 proof for
-[`docs/design/codex-realtime-voice-module.md`](../../../docs/design/codex-realtime-voice-module.md).
-It is intentionally not a Jaeger runtime module and is not included in the
-backend composition. It is distributed as an inspectable source-registry item
-and is included in the published package so the proven compatibility tool can
-be mounted into the same shared runtime project:
+This example is a private WebRTC voice surface backed by one persistent Codex
+app-server thread. It can:
 
-```bash
-jaeger modules add voice-spike
-VOICE_SPIKE_PUBLIC_ORIGIN=https://voice.example \
-  node ~/.config/jaeger/runtime/modules/voice-spike/server.mjs
-```
+- start a read-only realtime voice conversation;
+- reconnect the app-server without changing the operator thread;
+- expose only the fixed 'jaeger_status' inspection tool;
+- generate a bounded interface in the caller's browser when a visual helps; and
+- send an outbound Telegram call invitation into the same browser session.
 
-The item contributes no package dependency of its own. If it is installed
-together with Telegram or future modules, Jaeger still performs one dependency
-installation for the complete runtime project.
+Realtime calls request the `ember` speaking voice through Codex app-server's
+experimental v3 WebRTC surface. Codex owns model selection for that surface;
+the bridge does not send an unsupported caller-selected model override.
 
-The spike proves:
+The generated workspace is intentionally empty at first. The assistant does
+not preload a subject, dashboard, example data, or decision. It can call
+'generate_ui' during the conversation, and the new interface replaces the
+previous one. 'clear_ui' returns the browser to the empty listening canvas.
+The outer surface is a fixed, single-viewport stage and never becomes a
+scrolling document. Generated content is composed to fit that stage; unusually
+long generated content may scroll only inside its own bounded content region.
 
-- browser microphone and output audio over WebRTC;
-- Codex app-server's experimental realtime V3 negotiation;
-- a dedicated, persistent Codex operator thread;
-- read-only Jaeger status inspection;
-- exact thread resumption after an app-server restart; and
-- outbound Telegram call invitations into the same browser voice session.
+When the microphone connects, the assistant greets the caller, states the exact
+working folder, and generates a small read-only welcome menu from that folder's
+bounded top-level surface. The menu may include project commands, an overview,
+documentation, tests, or source orientation when those markers are present.
 
-The backend binds only to `127.0.0.1`. On the HQ VPS it is exposed privately at
-`https://hq.peezy.tech/jaeger-voice/` through the existing Tailscale-only
-Traefik listener. Codex and ChatGPT credentials never enter the browser.
+The backend binds only to '127.0.0.1'. On an HQ install it is exposed privately
+by the surrounding service or reverse proxy.
 
-## Requirements
+## Run locally
 
-- Codex CLI with the `realtime_conversation` feature;
-- an active ChatGPT login with realtime entitlement;
-- a modern browser with microphone and WebRTC support; and
-- the installed `jaeger` CLI.
-
-Verify the installed surface:
-
-```bash
-codex --version
-codex features list
-codex login status
-```
-
-## Configuration
-
-Every install must declare its own public surface. Nothing defaults to another
-operator's host.
-
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `VOICE_SPIKE_PUBLIC_ORIGIN` | yes, for `start` | HTTPS origin that serves this install. Every `/api/` request is checked against it, and the service refuses to start without it. |
-| `VOICE_SPIKE_PUBLIC_URL` | yes, for `call` | HTTPS URL of this install's voice surface, including any path prefix. Invitation bearer tokens are placed in its fragment, so it must be a host you control. `call` fails closed without it. |
-| `VOICE_SPIKE_CWD` | no | Working directory for the Codex app-server thread. Defaults to the process working directory. |
-| `VOICE_SPIKE_CAPABILITY_FILE` | no | Capability token path. Defaults to `~/.local/state/jaeger/voice-spike/capability-token`. |
-| `VOICE_TELEGRAM_ENV_FILE` | no | Telegram credential file. Defaults to `~/.env`. |
-
-On the HQ VPS those values are `https://hq.peezy.tech` and
-`https://hq.peezy.tech/jaeger-voice/`; substitute your own throughout this
-document.
-
-## Run
-
-```bash
-cd examples/runtime-modules/voice-spike
-npm test
-VOICE_SPIKE_PUBLIC_ORIGIN=https://voice.example \
-  VOICE_SPIKE_PORT=4319 \
-  npm start
-```
-
-On first startup the service creates a 256-bit capability at
-`~/.local/state/jaeger/voice-spike/capability-token` with mode `0600`. Copy that
-value into the URL fragment when opening the browser directly:
+The example has its own package root:
 
 ```text
-<VOICE_SPIKE_PUBLIC_URL>#capability=<copied capability token>
-```
-
-The browser removes the fragment immediately and keeps the token only in
-memory. State, transcript events, realtime controls, and reconnect requests
-require the token as a bearer capability. A valid Telegram invitation receives
-30 minutes of browser access only after its single-use answer transition
-succeeds; it never receives the per-install capability.
-
-The operator thread ID is the only durable conversation state written by the
-spike. It lives at
-`~/.local/state/jaeger/voice-spike/operator.json` with mode `0600`. Audio and
-transcripts are not written to disk.
-
-## Telegram call invitations
-
-Telegram is a signaling adapter only. It never carries live audio and it does
-not expose chat commands, polling, or webhook authority. The outbound command
-reads only `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and the optional
-`TELEGRAM_MESSAGE_THREAD_ID` from `VOICE_TELEGRAM_ENV_FILE`, which defaults to
-`~/.env`. The file must be a regular file owned by the current user with no
-group or world permissions (for example, mode `0600`).
-
-Place a call:
-
-```bash
 cd examples/runtime-modules/voice-spike
-VOICE_SPIKE_PUBLIC_URL=https://voice.example/jaeger-voice/ \
-  npm run call -- "A Jaeger workflow needs your attention."
+npm install
+npm run build:ui
 ```
 
-`VOICE_SPIKE_PUBLIC_URL` must point at the surface this install serves. The
-invitation's 256-bit bearer token is placed in that URL's fragment, so pointing
-it at a host you do not control hands the token to that host. The command
-refuses to send when the variable is unset.
+Set the public origin used for browser requests:
 
-The command sends one Telegram notification with an **Answer** button. The
-button opens that private route and joins the existing Codex operator thread
-through the proven WebRTC path.
+```text
+export VOICE_SPIKE_PUBLIC_ORIGIN=https://voice.example
+export VOICE_SPIKE_PUBLIC_URL=https://voice.example/jaeger-voice/
+npm run start
+```
 
-Invitation properties:
+Open the public URL directly through the private reverse proxy. The page can
+also be opened through an answered Telegram invitation.
 
-- one active invitation at a time;
-- ten-minute lifetime;
-- answer or decline exactly once;
-- 256-bit random bearer token in the URL fragment, so it is not sent in HTTP
-  requests or Traefik access logs;
-- only the SHA-256 token hash is persisted; and
-- owner-only state at
-  `~/.local/state/jaeger/voice-spike/telegram-call.json`.
+## Make a call
 
-The managed service reads the same Telegram configuration so it can replace the
-Answer button with an answered, declined, or missed disposition. Telegram
-delivery failures fail closed and do not expose the invitation URL on stdout.
+With Telegram configuration available through 'VOICE_TELEGRAM_ENV_FILE' or the
+optional supported environment file:
 
-A disposition that Telegram rejects permanently — the message was deleted, the
-bot lost the chat, or the message is too old to edit — is finalized locally
-instead of blocking the next call. Transient failures are retried, and the
-invitation is finalized after five failed attempts. `npm run reset` discards the
-invitation state outright if an operator needs to clear it by hand.
+```text
+cd examples/runtime-modules/voice-spike
+npm run call
+```
 
-Codex's read-only Linux sandbox maps root-owned ancestors to uid `65534`, which
-causes Jaeger's authority-path validation to reject direct CLI startup. For
-this compatibility spike only, the app-server thread receives one
-client-executed dynamic tool, `jaeger_status`. The loopback service implements
-that tool with exactly `jaeger status --json`. It accepts no arguments and
-cannot mutate Jaeger. This finding must be resolved before the planned module
-claims direct in-sandbox CLI operation.
+An optional plain-text reason is shown in the invitation:
 
-With the managed web service stopped, `npm run probe` performs one direct
-read-only operator turn and reports the exact command exit code. The HQ service
-sets the required Codex, Jaeger socket, and private client-profile environment
-automatically; copy those environment values from its unit when running the
-probe manually.
+```text
+npm run call -- "I have something to ask you about."
+```
 
-## Live proof
+The call command accepts no feature-specific mode. The assistant starts as a
+general conversational surface and decides whether a generated interface is
+useful.
 
-1. Open the private route with the capability-token fragment described above.
-2. Select **Open microphone** and allow microphone access.
-3. Ask: “Give me the current Jaeger status.”
-4. Confirm the spoken reply matches `jaeger status --json`.
-5. Select **Restart app-server**.
-6. Confirm the generation increments and the displayed operator thread ID does
-   not change.
-7. Open the microphone again and ask a follow-up that depends on the earlier
-   exchange.
+## Generated UI boundary
 
-For the Telegram path:
+The app-server exposes two browser-facing dynamic tools:
 
-1. Run `npm run call -- "Live Telegram acceptance test."`.
-2. Confirm the configured Telegram topic receives the incoming-call message.
-3. Select **Answer** on the phone.
-4. Confirm the invitation screen transitions into a live WebRTC session.
-5. Confirm the Telegram message changes to the answered disposition.
+- 'generate_ui' creates one interface from the committed component catalog;
+- 'clear_ui' removes it.
 
-The spoken-output probe exercises the realtime conversation and audio output
-path without requiring speech recognition. It does not verify Jaeger
-delegation and does not replace the microphone acceptance test.
+The catalog supports only:
 
-## Authority boundary
+- concise text;
+- compact stats;
+- short lists;
+- highlighted callouts; and
+- bounded choices whose IDs and values are resolved by the server.
 
-The Codex app-server starts with its shell, apps, plugins, subagents, hooks,
-goals, MCP servers, and web search disabled. Every start and resume persists a
-restricted read-only sandbox policy with no project or home-directory roots.
-The only operational tool exposed to the thread is the module-owned,
-zero-argument `jaeger_status` dynamic tool, which invokes the fixed
-`jaeger status --json` command. Approval policy remains `never`, and unknown
-server requests are declined.
+The model cannot provide arbitrary HTML, CSS, JavaScript, URLs, browser APIs, or
+tool names. The server normalizes every generated request before publishing it
+as a JSON-render tree. A choice sends only its server-known value back into the
+live voice conversation, then the generated interface is cleared.
+
+The committed browser bundle is built from 'ui/workspace.jsx':
+
+```text
+npm run build:ui
+```
+
+Node dependencies are not required by the installed runtime after the bundle
+has been built.
+
+## Read-only authority
+
+The operator thread starts with the installed app-server ':read-only'
+permission profile. Shell, apps, plugins, subagents, goals, hooks, web search,
+and ambient MCP servers are disabled. The only backend tools are the fixed
+'jaeger_status' read-only bridge and the bounded UI tools above.
+
+The generated interface is presentation only. This example does not start,
+resume, steer, interrupt, stop, purchase, trade, submit, or otherwise mutate
+external state on the caller's behalf.
+
+## HTTP surface
+
+The private server provides:
+
+- 'GET /healthz' for process readiness;
+- 'GET /api/state' and 'GET /api/events' for the browser;
+- invitation inspect, answer, and decline routes;
+- 'POST /api/session' for WebRTC negotiation;
+- 'POST /api/text' for the typed probe;
+- 'POST /api/ui/actions' for server-resolved generated choices;
+- 'POST /api/stop' and 'POST /api/reconnect' for session control; and
+- static 'workspace.js', 'app.js', 'call-access.js', and 'styles.css' assets.
+
+Every API request is origin-checked. The live route is intended to remain behind
+the private reverse proxy; no bearer capability is required. Answered Telegram
+invitation access remains separately time-limited.
+
+## Probes and tests
+
+Run the focused example suite:
+
+```text
+cd examples/runtime-modules/voice-spike
+npm test
+```
+
+The browser acceptance path should verify that:
+
+1. the generated workspace is absent before any 'generate_ui' call;
+2. a spoken request for a visual causes a successful 'generate_ui' call;
+3. the generated interface appears without reloading;
+4. generated choices return their server-known values to the conversation;
+5. 'clear_ui' removes the interface completely; and
+6. reconnect preserves the persistent operator thread.
+
+The manual probe remains available for the realtime audio path:
+
+```text
+npm run probe
+```

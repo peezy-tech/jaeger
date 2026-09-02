@@ -39,6 +39,11 @@ test("reconnect resumes the exact persisted operator thread", async () => {
 
   await bridge.start();
   const originalThreadId = bridge.threadId;
+  const threadStart = processes[0].requests.find(
+    ({ method }) => method === "thread/start",
+  );
+  assert.equal(threadStart.params.permissions, ":read-only");
+  assert.equal("sandbox" in threadStart.params, false);
   const result = await bridge.reconnect();
 
   assert.equal(processes.length, 2);
@@ -51,14 +56,46 @@ test("reconnect resumes the exact persisted operator thread", async () => {
   const policyTurn = processes[1].requests.find(
     ({ method }) => method === "turn/start",
   );
-  assert.deepEqual(policyTurn.params.sandboxPolicy, {
-    type: "readOnly",
-    access: {
-      type: "restricted",
-      includePlatformDefaults: true,
-      readableRoots: [],
-    },
+  assert.equal(policyTurn.params.permissions, ":read-only");
+  assert.equal("sandboxPolicy" in policyTurn.params, false);
+  await bridge.stop();
+});
+
+test("a changed dynamic tool set starts a fresh compatible operator thread", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-tool-rotation-"));
+  const stateFile = join(directory, "operator.json");
+  await writeThreadState(stateFile, "thread-from-old-tool-set");
+  const child = createMockProcess();
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile,
+    dynamicTools: [
+      {
+        type: "function",
+        name: "generate_ui",
+        description: "Render a bounded interface.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+      },
+    ],
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
   });
+
+  await bridge.start();
+  assert.equal(
+    child.requests.some(({ method }) => method === "thread/resume"),
+    false,
+  );
+  const started = child.requests.find(({ method }) => method === "thread/start");
+  assert.equal(started.params.dynamicTools[0].name, "generate_ui");
+  assert.equal(bridge.threadId, "thread-persistent");
+  const state = await readThreadState(stateFile);
+  assert.equal(state.threadId, "thread-persistent");
+  assert.match(state.toolDigest, /^[a-f0-9]{64}$/);
   await bridge.stop();
 });
 
@@ -305,7 +342,6 @@ test("WebRTC start forwards the SDP offer and returns the matching answer", asyn
   await bridge.start();
   const answer = await bridge.startRealtime({
     sdp: "v=0\r\nmock-offer",
-    voice: "juniper",
   });
 
   const request = child.requests.find(
@@ -315,7 +351,39 @@ test("WebRTC start forwards the SDP offer and returns the matching answer", asyn
   assert.equal(request.params.transport.sdp, "v=0\r\nmock-offer");
   assert.equal(request.params.version, "v3");
   assert.equal(request.params.outputModality, "audio");
+  assert.equal("model" in request.params, false);
+  assert.equal(request.params.voice, "ember");
+  assert.match(
+    request.params.prompt,
+    /Those are artifact-generation requests/,
+  );
   assert.equal(answer.sdp, "v=0\r\nmock-answer");
+  await bridge.stop();
+});
+
+test("operator turns are serialized on the persistent restricted thread", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-spike-operator-turn-"));
+  const child = createMockProcess();
+  const bridge = new CodexAppServer({
+    cwd: "/tmp",
+    stateFile: join(directory, "operator.json"),
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+  });
+
+  await bridge.start();
+  const first = bridge.runOperatorTurn("Show three choices.");
+  const second = bridge.runOperatorTurn("Now show a comparison.");
+  await Promise.all([first, second]);
+
+  const turns = child.requests.filter(
+    ({ method }) => method === "turn/start",
+  );
+  assert.equal(turns.length, 3);
+  assert.equal(turns[1].params.threadId, "thread-persistent");
+  assert.equal(turns[1].params.input[0].text, "Show three choices.");
+  assert.equal(turns[2].params.input[0].text, "Now show a comparison.");
+  assert.equal(turns[1].params.permissions, ":read-only");
   await bridge.stop();
 });
 

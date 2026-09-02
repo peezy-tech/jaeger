@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -7,14 +8,8 @@ import readline from "node:readline";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 const DEFAULT_FORCE_STOP_TIMEOUT_MS = 2_000;
-const OPERATOR_SANDBOX_POLICY = {
-  type: "readOnly",
-  access: {
-    type: "restricted",
-    includePlatformDefaults: true,
-    readableRoots: [],
-  },
-};
+export const DEFAULT_REALTIME_VOICE = "ember";
+const OPERATOR_PERMISSION_PROFILE = ":read-only";
 const APP_SERVER_ARGS = [
   "app-server",
   "--enable",
@@ -37,17 +32,54 @@ const APP_SERVER_ARGS = [
   "mcp_servers={}",
 ];
 
-export const OPERATOR_INSTRUCTIONS = `You are the read-only Jaeger voice operator for a compatibility spike.
+export const OPERATOR_INSTRUCTIONS = `You are a concise, general-purpose voice assistant in a read-only compatibility experiment.
 
-Your only operational purpose is to inspect Jaeger and report concise spoken
-answers. Use the jaeger_status tool for current Jaeger status. It is a narrow,
-read-only bridge to the installed Jaeger CLI. Do not use shell commands.
+Talk naturally about whatever the caller asks. The browser starts as an empty
+listening canvas. When a visual would materially help, use generate_ui to create
+a restrained phone-first interface:
+- Use generate_ui for a useful explanation, comparison, short list, status
+  summary, or bounded choice.
+- If the caller asks for something on screen, including a card, buttons,
+  options, or a visual summary, you MUST successfully call generate_ui before
+  saying that it is visible.
+- A new generated interface replaces the previous one. Use clear_ui when it is
+  no longer useful.
+- When a new voice session provides a folder-aware welcome request, follow it:
+  greet the caller, state the exact working folder supplied by the backend, and
+  use generate_ui for the discovered read-only starting points.
+- Never say that a screen changed unless generate_ui returned success. If the
+  tool rejects a request, correct the arguments and retry once before explaining
+  that the visual is unavailable.
+- Do not narrate JSON or tool mechanics.
 
-Never start, resume, steer, interrupt, stop, or otherwise mutate a Jaeger run or
-session. Never edit files. Never install software. Never retry an uncertain
-operation. If a request would mutate state, explain that this spike is
-read-only. Preserve opaque IDs exactly. Keep spoken answers under 70 words unless
-the operator asks for detail.`;
+Use jaeger_status only when the caller asks about current Jaeger status. It is a
+narrow, read-only bridge to the installed Jaeger CLI. You have no shell, ambient
+web, application, plugin, or mutation tools.
+
+Never start, resume, steer, interrupt, stop, purchase, trade, submit, or
+otherwise mutate external state. Never edit files or install software. If a
+request would mutate state, explain that the experiment is read-only, but you
+may still generate non-binding information or choices. Preserve opaque IDs
+exactly. Keep spoken answers under 70 words unless the caller asks for detail.`;
+
+export const REALTIME_OPERATOR_PROMPT = `You are the conversational surface of one assistant. The backend handles execution and produces user-visible artifacts. Never mention the backend.
+
+Respond directly only to casual conversation or a clearly self-contained spoken
+question. Always use the backend when the user asks to create, show, render, or
+change anything on screen, including a card, buttons, options, or choices.
+Those are artifact-generation requests, even when you could describe the
+content aloud. Delegate the user's complete request without first paraphrasing
+or verbally simulating the requested interface. Wait for the backend result,
+then briefly present it as your own work.
+
+When the backend provides a new-session welcome request, treat its folder facts
+and discovered choice definitions as authoritative. Generate that welcome
+interface immediately with generate_ui, without inventing unrelated actions.
+
+Also use the backend for Jaeger status or any other request that needs a tool.
+Backend output is authoritative. Never claim that an interface or external
+result exists before the backend completes it. Never claim an external
+mutation, purchase, trade, or submission occurred.`;
 
 export class CodexAppServer extends EventEmitter {
   constructor({
@@ -67,6 +99,7 @@ export class CodexAppServer extends EventEmitter {
     this.cwd = cwd;
     this.childEnv = childEnv;
     this.dynamicTools = dynamicTools;
+    this.toolDigest = dynamicToolDigest(dynamicTools);
     this.requestHandlers = requestHandlers;
     this.stateFile = stateFile;
     this.spawnProcess = spawnProcess;
@@ -82,6 +115,7 @@ export class CodexAppServer extends EventEmitter {
     this.stopping = false;
     this.realtimeStarting = false;
     this.reconnecting = null;
+    this.operatorTurnQueue = Promise.resolve();
     this.stdoutReaders = new WeakMap();
   }
 
@@ -187,7 +221,10 @@ export class CodexAppServer extends EventEmitter {
     return this.snapshot();
   }
 
-  async startRealtime({ sdp, voice = "juniper" }) {
+  async startRealtime({
+    sdp,
+    voice = DEFAULT_REALTIME_VOICE,
+  }) {
     this.#assertReady();
     if (typeof sdp !== "string" || !sdp.startsWith("v=0")) {
       throw new Error("A valid WebRTC SDP offer is required");
@@ -207,6 +244,7 @@ export class CodexAppServer extends EventEmitter {
           version: "v3",
           voice,
           includeStartupContext: true,
+          prompt: REALTIME_OPERATOR_PROMPT,
         }),
         answer.promise,
       ]);
@@ -230,16 +268,31 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
-  async appendText(text) {
+  async appendText(text, role = "user") {
     this.#assertReady();
     if (typeof text !== "string" || text.trim().length === 0) {
       throw new Error("Text is required");
     }
+    if (!["user", "developer"].includes(role)) {
+      throw new Error("Realtime text role must be user or developer");
+    }
     await this.request("thread/realtime/appendText", {
       threadId: this.threadId,
-      role: "user",
+      role,
       text: text.trim(),
     });
+  }
+
+  runOperatorTurn(text) {
+    this.#assertReady();
+    if (typeof text !== "string" || text.trim().length === 0) {
+      return Promise.reject(new Error("Operator turn text is required"));
+    }
+    const task = this.operatorTurnQueue.then(() =>
+      this.#runOperatorTurn(text.trim()),
+    );
+    this.operatorTurnQueue = task.catch(() => {});
+    return task;
   }
 
   async stopRealtime() {
@@ -300,7 +353,7 @@ export class CodexAppServer extends EventEmitter {
 
   async #createOrResumeThread() {
     const stored = await readThreadState(this.stateFile);
-    if (stored) {
+    if (stored?.toolDigest === this.toolDigest) {
       const result = await this.request("thread/resume", {
         threadId: stored.threadId,
         cwd: this.cwd,
@@ -319,7 +372,7 @@ export class CodexAppServer extends EventEmitter {
     const result = await this.request("thread/start", {
       cwd: this.cwd,
       approvalPolicy: "never",
-      sandbox: "read-only",
+      permissions: OPERATOR_PERMISSION_PROFILE,
       developerInstructions: OPERATOR_INSTRUCTIONS,
       dynamicTools: this.dynamicTools,
       ephemeral: false,
@@ -330,7 +383,7 @@ export class CodexAppServer extends EventEmitter {
     await this.#bootstrapThread(
       "Initialize this persistent voice-operator thread. Do not inspect Jaeger yet. Reply with READY only.",
     );
-    await writeThreadState(this.stateFile, this.threadId);
+    await writeThreadState(this.stateFile, this.threadId, this.toolDigest);
   }
 
   async #bootstrapThread(text) {
@@ -349,7 +402,7 @@ export class CodexAppServer extends EventEmitter {
           },
         ],
         approvalPolicy: "never",
-        sandboxPolicy: OPERATOR_SANDBOX_POLICY,
+        permissions: OPERATOR_PERMISSION_PROFILE,
       });
       const result = await completed.promise;
       if (result.turn?.status !== "completed") {
@@ -357,6 +410,35 @@ export class CodexAppServer extends EventEmitter {
           `Operator bootstrap turn ended with ${result.turn?.status ?? "unknown status"}`,
         );
       }
+    } finally {
+      completed.cancel();
+    }
+  }
+
+  async #runOperatorTurn(text) {
+    this.#assertReady();
+    const completed = this.#notificationWaiter(
+      "turn/completed",
+      (params) => params.threadId === this.threadId,
+      120_000,
+    );
+    try {
+      const started = await this.request("turn/start", {
+        threadId: this.threadId,
+        input: [{ type: "text", text }],
+        approvalPolicy: "never",
+        permissions: OPERATOR_PERMISSION_PROFILE,
+      });
+      const result = await completed.promise;
+      if (result.turn?.status !== "completed") {
+        throw new Error(
+          `Operator turn ended with ${result.turn?.status ?? "unknown status"}`,
+        );
+      }
+      return {
+        turnId: result.turn?.id ?? started.turn?.id ?? null,
+        status: result.turn.status,
+      };
     } finally {
       completed.cancel();
     }
@@ -604,14 +686,28 @@ export async function readThreadState(stateFile) {
   }
 }
 
-export async function writeThreadState(stateFile, threadId) {
+export async function writeThreadState(stateFile, threadId, toolDigest) {
   const directory = dirname(stateFile);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const temporary = `${stateFile}.${process.pid}.tmp`;
   await writeFile(
     temporary,
-    `${JSON.stringify({ threadId }, null, 2)}\n`,
+    `${JSON.stringify({
+      threadId,
+      ...(typeof toolDigest === "string" && toolDigest
+        ? { toolDigest }
+        : {}),
+    }, null, 2)}\n`,
     { mode: 0o600 },
   );
   await rename(temporary, stateFile);
+}
+
+export function dynamicToolDigest(dynamicTools) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      dynamicTools,
+      developerInstructions: OPERATOR_INSTRUCTIONS,
+    }))
+    .digest("hex");
 }

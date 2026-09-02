@@ -35,7 +35,7 @@ test("call invitations persist only a token hash in an owner-only file", async (
   });
 
   const { token, invitation } = await invitations.create({
-    reason: "A workflow needs attention.",
+    reason: "A conversation is ready.",
   });
   await invitations.recordTelegramDelivery(token, {
     chatId: "-100123",
@@ -147,7 +147,7 @@ test("an ambiguous Telegram send preserves the invitation and blocks replacement
       botToken: "secret",
       chatId: "-100123",
       answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=opaque",
-      reason: "Review finished.",
+      reason: "A general question is ready.",
       expiresAt: "2026-07-29T03:10:00Z",
       fetchImpl: async () => {
         throw new Error("response was lost");
@@ -169,6 +169,52 @@ test("an ambiguous Telegram send preserves the invitation and blocks replacement
   });
   now += ANSWERED_ACCESS_TTL_MS + 1;
   assert.equal((await invitations.create()).invitation.status, "ringing");
+});
+
+test("the call entrypoint persists ambiguity before Telegram delivery", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "voice-call-entrypoint-"));
+  const stateFile = join(directory, "telegram-call.json");
+  const envFile = join(directory, "telegram.env");
+  await writeFile(
+    envFile,
+    "TELEGRAM_BOT_TOKEN=test-token\nTELEGRAM_CHAT_ID=-100123\n",
+    { mode: 0o600 },
+  );
+
+  const previous = {
+    argv: process.argv,
+    fetch: globalThis.fetch,
+    publicUrl: process.env.VOICE_SPIKE_PUBLIC_URL,
+    stateFile: process.env.VOICE_SPIKE_INVITATION_STATE_FILE,
+    envFile: process.env.VOICE_TELEGRAM_ENV_FILE,
+  };
+  t.after(async () => {
+    process.argv = previous.argv;
+    globalThis.fetch = previous.fetch;
+    restoreEnv("VOICE_SPIKE_PUBLIC_URL", previous.publicUrl);
+    restoreEnv("VOICE_SPIKE_INVITATION_STATE_FILE", previous.stateFile);
+    restoreEnv("VOICE_TELEGRAM_ENV_FILE", previous.envFile);
+    await rm(directory, { recursive: true, force: true });
+  });
+  process.argv = [process.execPath, "call.mjs"];
+  process.env.VOICE_SPIKE_PUBLIC_URL = "https://voice.example/jaeger-voice/";
+  process.env.VOICE_SPIKE_INVITATION_STATE_FILE = stateFile;
+  process.env.VOICE_TELEGRAM_ENV_FILE = envFile;
+  globalThis.fetch = async () => {
+    throw new Error("response was lost");
+  };
+
+  await assert.rejects(
+    import(new URL(`../call.mjs?uncertain=${Date.now()}`, import.meta.url)),
+    TelegramDeliveryUncertainError,
+  );
+  const invitations = new TelegramCallInvitations({ stateFile });
+  assert.equal((await invitations.current()).status, "ringing");
+  await assert.rejects(() => invitations.create(), {
+    message:
+      "The Telegram call has an uncertain delivery and must be resolved before creating another",
+    statusCode: 409,
+  });
 });
 
 test("a delivery marker makes an interrupted successful send recoverable", async () => {
@@ -453,7 +499,7 @@ test("Telegram delivery activates its answer button after recording the message"
     messageThreadId: "42",
     answerUrl:
       "https://hq.peezy.tech/jaeger-voice/#call=opaque-invitation",
-    reason: "Review finished.",
+    reason: "A general question is ready.",
     expiresAt: "2026-07-29T03:10:00Z",
     fetchImpl: async (url, options) => {
       requests.push({ url, options });
@@ -473,12 +519,14 @@ test("Telegram delivery activates its answer button after recording the message"
   assert.equal(sendBody.message_thread_id, 42);
   assert.equal(sendBody.disable_notification, false);
   assert.equal(sendBody.reply_markup, undefined);
+  assert.match(sendBody.text, /A general question is ready/);
+  assert.match(sendBody.text, /Preparing your voice call/);
   await activateTelegramCall({
     botToken: "secret",
     chatId: "-100123",
     messageId: result.messageId,
     answerUrl: "https://hq.peezy.tech/jaeger-voice/#call=opaque-invitation",
-    reason: "Review finished.",
+    reason: "A general question is ready.",
     expiresAt: "2026-07-29T03:10:00Z",
     fetchImpl: async (url, options) => {
       requests.push({ url, options });
@@ -490,6 +538,7 @@ test("Telegram delivery activates its answer button after recording the message"
   });
   const activateBody = JSON.parse(requests[1].options.body);
   assert.equal(activateBody.message_id, 991);
+  assert.match(activateBody.text, /Your assistant is calling/);
   assert.equal(activateBody.reply_markup.inline_keyboard[0][0].text, "Answer");
   assert.match(
     activateBody.reply_markup.inline_keyboard[0][0].url,
@@ -601,7 +650,7 @@ test("an idempotent Telegram disposition edit counts as recovered", async () => 
     chatId: "-100123",
     messageId: 991,
     status: "answered",
-    reason: "Review finished.",
+    reason: "A general question is ready.",
     fetchImpl: async () =>
       new Response(
         JSON.stringify({
@@ -868,3 +917,11 @@ test("Telegram configuration accepts only an owner-only regular file", async () 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function restoreEnv(name, value) {
+  if (value === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = value;
+  }
+}

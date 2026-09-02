@@ -12,7 +12,7 @@ export function loadAccessTokens({
       `${location.pathname}${location.search}`,
     );
   }
-  return { callToken, capabilityToken };
+  return { callToken };
 }
 
 export async function answerInvitationWithRecovery(
