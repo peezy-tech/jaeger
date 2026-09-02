@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url"
 
 const execFileAsync = promisify(execFile)
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+const sourcePackage = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"))
 const skillPath = path.join(root, "skills", "jaeger-workflows", "SKILL.md")
 const agentInstallPath = path.join(root, "AGENT_INSTALL.md")
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "jaeger-package-"))
@@ -119,7 +120,7 @@ try {
   )
   const installedPackage = JSON.parse(await readFile(path.join(installedRoot, "package.json"), "utf8"))
   assert.equal(installedPackage.name, "@peezy.tech/jaeger")
-  assert.equal(installedPackage.version, "0.1.4")
+  assert.equal(installedPackage.version, sourcePackage.version)
   assert.deepEqual(installedPackage.bin, { jaeger: "dist/cli.js" })
   assert(installedPackage.dependencies?.typescript, "typescript must be a runtime dependency")
   assert(installedPackage.dependencies?.mdcsp, "mdcsp must be a runtime dependency")
@@ -151,7 +152,10 @@ try {
     await readFile(path.join(vendoredClaudeRoot, "package.json"), "utf8"),
   )
   assert.equal(vendoredClaudePackage.name, "@anthropic-ai/claude-agent-sdk")
-  assert.equal(vendoredClaudePackage.version, "0.3.220")
+  assert.equal(
+    vendoredClaudePackage.version,
+    sourcePackage.devDependencies["@anthropic-ai/claude-agent-sdk"],
+  )
   await access(path.join(vendoredClaudeRoot, "LICENSE.md"))
   await access(path.join(vendoredClaudeRoot, "README.md"))
   await access(path.join(vendoredClaudeRoot, "sdk.mjs"))
