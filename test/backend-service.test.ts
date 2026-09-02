@@ -339,7 +339,7 @@ return await agent("SLOW", {
         requestHash: oldRequest.requestHash,
         createdAt: oldRequest.createdAt,
       })}\n`,
-      "utf8",
+      { encoding: "utf8", mode: 0o600 },
     );
     const contenders = [
       { turnId: "turn-concurrent-next-0001", message: "left contender" },
