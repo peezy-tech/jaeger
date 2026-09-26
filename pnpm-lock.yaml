@@ -26,7 +26,7 @@ importers:
         version: 7.8.5
       smol-toml:
         specifier: ^1.8.0
-        version: 1.8.0
+        version: 1.9.0
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -601,8 +601,8 @@ packages:
     resolution: {integrity: sha512-6x6dK6zJdpTzF4sQeNYxwtvBzf6Eg4GtlesS94HOvTudUeyK2WXAaIfmDgsyslYrRBeFIlsi54AYsFGUuhmvrQ==}
     engines: {node: '>= 0.4'}
 
-  smol-toml@1.8.0:
-    resolution: {integrity: sha512-kCZr2V3ch9i00x8zXRhjUNVcjG9ijES5dDudkXvUVCT5QlJNQWElSJdZqyPemffHoLNUYwOcou0Fy+ojN0uHSQ==}
+  smol-toml@1.9.0:
+    resolution: {integrity: sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ==}
     engines: {node: '>= 18'}
 
   standardwebhooks@1.1.1:
@@ -1034,7 +1034,7 @@ snapshots:
 
   mdcsp@0.1.1:
     dependencies:
-      smol-toml: 1.8.0
+      smol-toml: 1.9.0
 
   media-typer@1.1.1: {}
 
@@ -1168,7 +1168,7 @@ snapshots:
       side-channel-map: 1.0.1
       side-channel-weakmap: 1.0.2
 
-  smol-toml@1.8.0: {}
+  smol-toml@1.9.0: {}
 
   standardwebhooks@1.1.1:
     dependencies:
